@@ -1,0 +1,38 @@
+:root {
+  font-family: 'Microsoft YaHei UI', 'Noto Sans SC', 'PingFang SC', system-ui, sans-serif;
+  color: #e7eeea;
+  background: #0b1716;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-optical-sizing: auto;
+  font-weight: 400;
+  color-scheme: dark;
+  --bg: #0b1716;
+  --surface: #101f1e;
+  --surface-2: #152523;
+  --surface-3: #1a2c29;
+  --line: rgba(209, 225, 216, .09);
+  --line-strong: rgba(209, 225, 216, .14);
+  --text: #e6eeea;
+  --text-soft: #bbc9c3;
+  --muted: #879993;
+  --dim: #61736e;
+  --accent: #a7d1b7;
+  --accent-bright: #c7e3d0;
+  --accent-dark: #224d41;
+  --gold: #d7bf8a;
+  --danger: #df9287;
+  --mono: 'Cascadia Code', 'SFMono-Regular', Consolas, monospace;
+  font-synthesis: none;
+}
+
+* { box-sizing: border-box; }
+html { min-width: 320px; background: var(--bg); }
+body { min-width: 320px; min-height: 100vh; margin: 0; }
+button, input, textarea, select { font: inherit; }
+button { color: inherit; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid rgba(167, 209, 183, .78); outline-offset: 2px; }
+::selection { background: rgba(167, 209, 183, .34); color: #f3faf6; }
+#root { min-height: 100vh; }

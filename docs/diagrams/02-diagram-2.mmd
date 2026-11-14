@@ -1,0 +1,26 @@
+sequenceDiagram
+    participant U as 玩家
+    participant A as 应用 API
+    participant G as GM
+    participant W as 模拟 Worker
+    participant M as 模型网关
+    participant D as 状态数据库
+    U->>A: 输入与幂等键
+    A->>G: 已授权的会话输入
+    G->>G: 识别意图与知情范围
+    alt 查询或假设讨论
+        G->>D: 读取角色可见投影
+        G->>M: 可选解释请求
+        G-->>U: GM 回答，不改变世界时间
+    else 世界行动
+        G->>D: 创建命令与持久作业
+        A-->>U: command_id 和进度订阅
+        W->>D: 获取租约与固定状态版本
+        W->>M: 请求有限行动或人物决策提案
+        M-->>W: 结构化提案
+        W->>W: 规则裁定、时间事件与约束校验
+        W->>D: 短事务检查版本并提交事件、状态、消息表
+        D-->>W: 提交版本及结果
+        W->>M: 基于可见结果生成叙述
+        W-->>U: 最终结果与已提交进度
+    end

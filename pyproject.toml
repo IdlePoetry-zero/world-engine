@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "world-engine"
+version = "0.1.0"
+description = "Transactional foundation for a persistent world simulation engine"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "alembic==1.20.1",
+  "fastapi==0.163.0",
+  "httpx==0.28.1",
+  "jsonschema==4.26.0",
+  "pydantic==2.14.3",
+  "pydantic-core==2.50.4",
+  "sqlalchemy==2.1.8",
+  "uvicorn==0.54.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==9.2.0",
+  "pytest-asyncio==1.5.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "backend"}
+
+[tool.setuptools.packages.find]
+where = ["backend"]
+
+[tool.pytest.ini_options]
+pythonpath = ["backend"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

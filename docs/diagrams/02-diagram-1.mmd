@@ -1,0 +1,21 @@
+flowchart LR
+    Player[玩家或作者] --> Web[本地网页]
+    Web --> API[认证与应用 API]
+    API --> GM[GM 会话与命令编排]
+    API --> Editor[世界与人物编辑]
+    GM --> Query[授权查询与知识投影]
+    GM --> Sim[世界模拟作业]
+    Editor --> Sim
+    Sim --> Core[规则与事务提交]
+    Core --> DB[(权威状态与事件数据库)]
+    Query --> DB
+    GM --> Gateway[模型网关]
+    Sim --> Gateway
+    Gateway --> Cloud[DeepSeek 与其他云端]
+    Gateway --> Local[本地 Ollama]
+    Core --> Outbox[事务消息表]
+    Outbox --> Media[语音图片等扩展]
+    Media --> Assets[(媒体存储)]
+    API --> Ops[配置与运行后台]
+    Gateway --> Ops
+    Sim --> Ops

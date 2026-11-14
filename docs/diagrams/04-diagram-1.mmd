@@ -1,0 +1,13 @@
+flowchart TD
+    Input[玩家输入] --> Intent[分段与意图识别]
+    Intent --> Ask[GM 查询或假设]
+    Intent --> Act[世界行动或角色对话]
+    Intent --> Edit[作者编辑或系统控制]
+    Ask --> Scope[按当前视角检索]
+    Scope --> Answer[解释并记录会话 不推进世界]
+    Act --> Check[目标 条件 代价与歧义检查]
+    Check --> Resolve[调度与裁定]
+    Resolve --> Commit[原子提交世界事件]
+    Commit --> Tell[生成可见结果]
+    Edit --> Permission[作者权限与影响预览]
+    Permission --> Revision[分支或版本化干预]

@@ -1,0 +1,12 @@
+flowchart TD
+    Pack[版本化设定包] --> Genesis[世界初态]
+    Genesis --> Events[(追加事件日志)]
+    Events --> State[(当前状态投影)]
+    Events --> History[(历史索引与档案)]
+    Events --> Snapshot[(检查点快照)]
+    State --> Knowledge[按角色授权的知识投影]
+    Knowledge --> Memory[全文与向量检索]
+    Memory --> Prompt[受限模型上下文]
+    Snapshot --> Branch[新分支]
+    Events --> Branch
+    Branch --> Events

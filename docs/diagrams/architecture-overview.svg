@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1210" viewBox="0 0 1600 1210">
+<rect width="1600" height="1210" fill="#101923"/>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#6a9caa"/></marker></defs>
+<g font-family="Microsoft YaHei, sans-serif">
+<text x="60" y="65" fill="#eef4f8" font-size="36">万象世界引擎 架构总览</text>
+<text x="60" y="105" fill="#a5bac7" font-size="21">设计基线 1.0 · 完整玩法 · 长期模拟 · 模块独立</text>
+<polyline points="800,270 800,350" fill="none" stroke="#6a9caa" stroke-width="3" marker-end="url(#arrow)"/>
+<polyline points="800,470 800,550" fill="none" stroke="#6a9caa" stroke-width="3" marker-end="url(#arrow)"/>
+<polyline points="800,670 800,750" fill="none" stroke="#6a9caa" stroke-width="3" marker-end="url(#arrow)"/>
+<polyline points="800,870 800,950" fill="none" stroke="#6a9caa" stroke-width="3" marker-end="url(#arrow)"/>
+<polyline points="500,210 530,210 530,410 560,410" fill="none" stroke="#6a9caa" stroke-width="3" marker-end="url(#arrow)"/>
+<polyline points="1100,210 1070,210 1070,410 1040,410" fill="none" stroke="#6a9caa" stroke-width="3" marker-end="url(#arrow)"/>
+<polyline points="560,610 500,610" fill="none" stroke="#6a9caa" stroke-width="3" marker-end="url(#arrow)"/>
+<polyline points="1040,610 1100,610" fill="none" stroke="#6a9caa" stroke-width="3" marker-end="url(#arrow)"/>
+<polyline points="500,810 560,810" fill="none" stroke="#6a9caa" stroke-width="3" marker-end="url(#arrow)"/>
+<polyline points="1320,670 1320,750" fill="none" stroke="#6a9caa" stroke-width="3" marker-end="url(#arrow)"/>
+<polyline points="1040,830 1070,830 1070,650 1100,650" fill="none" stroke="#6a9caa" stroke-width="3" marker-end="url(#arrow)"/>
+<polyline points="560,1010 500,1010" fill="none" stroke="#6a9caa" stroke-width="3" marker-end="url(#arrow)"/>
+<polyline points="1040,1010 1100,1010" fill="none" stroke="#6a9caa" stroke-width="3" marker-end="url(#arrow)"/>
+<rect x="60" y="150" width="440" height="120" rx="14" fill="#202e3c" stroke="#436575"/>
+<text x="84" y="197" fill="#eef4f8" font-size="25">世界与人物编辑器</text>
+<text x="84" y="236" fill="#b4c9d3" font-size="18">设定包 · NPC · 校验 · 发布</text>
+<rect x="560" y="150" width="480" height="120" rx="14" fill="#193d46" stroke="#436575"/>
+<text x="584" y="197" fill="#eef4f8" font-size="25">文字游戏网页</text>
+<text x="584" y="236" fill="#b4c9d3" font-size="18">问 GM · 扮演 · 行动 · 历史</text>
+<rect x="1100" y="150" width="440" height="120" rx="14" fill="#202e3c" stroke="#436575"/>
+<text x="1124" y="197" fill="#eef4f8" font-size="25">模型与运行后台</text>
+<text x="1124" y="236" fill="#b4c9d3" font-size="18">模型选择 · Token · 延迟 · 费用</text>
+<rect x="560" y="350" width="480" height="120" rx="14" fill="#193d46" stroke="#436575"/>
+<text x="584" y="397" fill="#eef4f8" font-size="25">身份与应用接口</text>
+<text x="584" y="436" fill="#b4c9d3" font-size="18">本地身份 · 授权 · 未来多人契约</text>
+<rect x="60" y="550" width="440" height="120" rx="14" fill="#202e3c" stroke="#436575"/>
+<text x="84" y="597" fill="#eef4f8" font-size="25">知识与记忆</text>
+<text x="84" y="636" fill="#b4c9d3" font-size="18">事实 · 观察 · 信念 · 可见投影</text>
+<rect x="560" y="550" width="480" height="120" rx="14" fill="#193d46" stroke="#436575"/>
+<text x="584" y="597" fill="#eef4f8" font-size="25">GM 会话与命令编排</text>
+<text x="584" y="636" fill="#b4c9d3" font-size="18">查询不推进世界 · 行动形成提案</text>
+<rect x="1100" y="550" width="440" height="120" rx="14" fill="#202e3c" stroke="#436575"/>
+<text x="1124" y="597" fill="#eef4f8" font-size="25">统一模型网关</text>
+<text x="1124" y="636" fill="#b4c9d3" font-size="18">能力探测 · 职责路由 · 用量追踪</text>
+<rect x="60" y="750" width="440" height="120" rx="14" fill="#202e3c" stroke="#436575"/>
+<text x="84" y="797" fill="#eef4f8" font-size="25">规则与 NPC 决策</text>
+<text x="84" y="836" fill="#b4c9d3" font-size="18">条件 · 成本 · 目标 · 有限裁定</text>
+<rect x="560" y="750" width="480" height="120" rx="14" fill="#193d46" stroke="#436575"/>
+<text x="584" y="797" fill="#eef4f8" font-size="25">世界模拟与时间调度</text>
+<text x="584" y="836" fill="#b4c9d3" font-size="18">秒至百年 · 因果边界 · 可中断作业</text>
+<rect x="1100" y="750" width="440" height="120" rx="14" fill="#202e3c" stroke="#436575"/>
+<text x="1124" y="797" fill="#eef4f8" font-size="25">云端与本地模型</text>
+<text x="1124" y="836" fill="#b4c9d3" font-size="18">DeepSeek Flash · Ollama · 其他 API</text>
+<rect x="60" y="950" width="440" height="120" rx="14" fill="#202e3c" stroke="#436575"/>
+<text x="84" y="997" fill="#eef4f8" font-size="25">快照与历史档案</text>
+<text x="84" y="1036" fill="#b4c9d3" font-size="18">存档 · 分支 · 回放 · 版本迁移</text>
+<rect x="560" y="950" width="480" height="120" rx="14" fill="#193d46" stroke="#436575"/>
+<text x="584" y="997" fill="#eef4f8" font-size="25">权威状态与事件提交</text>
+<text x="584" y="1036" fill="#b4c9d3" font-size="18">事务 · 资源账本 · 幂等 · 消息表</text>
+<rect x="1100" y="950" width="440" height="120" rx="14" fill="#202e3c" stroke="#436575"/>
+<text x="1124" y="997" fill="#eef4f8" font-size="25">插件与媒体接口</text>
+<text x="1124" y="1036" fill="#b4c9d3" font-size="18">语音 · 图片 · 授权资产 · 隔离</text>
+<text x="60" y="1135" fill="#a5bac7" font-size="20">所有世界修改经过规则校验与统一提交；LLM 与媒体插件不直接修改数据库。</text>
+<text x="60" y="1173" fill="#a5bac7" font-size="18">图示为概念调用关系；详细查询路径、时序、事务与数据权限见架构文档。</text>
+</g></svg>
