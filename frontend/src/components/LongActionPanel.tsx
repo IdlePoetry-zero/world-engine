@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError, type ItineraryRouteOption, type JobDecision, type JobStatusRecord, type LongActionItineraryProgress, type LongActionRequest, type LongActionWorkProgress, type LongActionWorkPurchaseAffordability, type LongActionWorkPurchaseTarget, type LongActionWorkResume, type MarketOfferQuote, type OwnActiveTravel, type OwnStudySkill, type OwnWorkAssignment, type Settings, type TravelOption, type WorkShiftOffer, type WorldAdvanceRequest } from '../api/client'
 
 import { Icon } from './Icon'
+import './JourneyRoute.css'
 
 import type { Notice } from '../App'
 
@@ -274,6 +275,15 @@ export function LongActionPanel({
     : null
   const currentItineraryProgress = currentJob?.job_type === 'simulation.long_action'
     ? readItineraryProgress(currentJob.itinerary_progress)
+    : null
+  const itineraryDeadline = parseTick(currentJob?.target_tick)
+  const itineraryWorldTick = parseTick(currentTick)
+  const itineraryCommittedTick = parseTick(currentJob?.committed_through_tick)
+  const itineraryReferenceTick = itineraryWorldTick !== null &&
+    (itineraryCommittedTick === null || itineraryWorldTick > itineraryCommittedTick)
+    ? itineraryWorldTick : itineraryCommittedTick
+  const itineraryWindowRemaining = itineraryDeadline !== null && itineraryReferenceTick !== null
+    ? itineraryDeadline > itineraryReferenceTick ? itineraryDeadline - itineraryReferenceTick : 0n
     : null
   const currentJobRequiresItineraryReplan = currentJob ? isNonresumableItineraryPause(currentJob) : false
   const currentJobCanOpenItineraryReplan = currentJobRequiresItineraryReplan || isStructuralItineraryPause(currentJob)
@@ -1082,12 +1092,21 @@ export function LongActionPanel({
               <div className="long-action-target-line"><span>安全暂停阈值</span><strong>{currentJobStudySafetyThreshold}</strong></div>
               <small>角色个人安全值达到或低于此值时暂停学习。</small>
             </div>}
-            {currentItineraryProgress && <div className="long-action-target-progress" aria-label="行程路段抵达进度">
-              <div className="long-action-target-line"><span>{currentItineraryProgress.legs_arrived === currentItineraryProgress.legs_total ? '全部路段已抵达' : '已抵达路段'}</span><strong>{currentItineraryProgress.legs_arrived} / {currentItineraryProgress.legs_total}</strong></div>
+            {currentItineraryProgress && <section className="journey-route" aria-label="行程路段抵达进度">
+              <header><h3>行程路线</h3><span>已抵达 {currentItineraryProgress.legs_arrived} / {currentItineraryProgress.legs_total} 段</span></header>
+              {OPEN_STATUSES.has(currentJob.status) && itineraryWindowRemaining !== null && <small>剩余授权时窗 {formatTickDurationDetail(itineraryWindowRemaining, dayLength, yearLength)}</small>}
+              {currentJob.itinerary_route?.length === currentItineraryProgress.legs_total && <ol>
+                {currentJob.itinerary_route.map((leg, index) => <li key={index} data-arrived={leg.arrived}>
+                  <div><strong>{leg.from_name ?? '地点未显示'} → {leg.to_name ?? '地点未显示'}</strong>
+                    <span>{leg.arrived ? '已抵达' : leg.expected_arrival_tick == null ? '尚未抵达' : '在途'}</span></div>
+                  <small>{leg.expected_arrival_tick != null && !leg.arrived
+                    ? `预计 ${formatJourneyTick(leg.expected_arrival_tick, dayLength, yearLength)} 抵达`
+                    : `路线时长 ${formatTickDurationDetail(parsePositiveTravelTicks(leg.travel_ticks), dayLength, yearLength)}`}</small>
+                </li>)}
+              </ol>}
               {currentJob.status === 'succeeded' && currentItineraryProgress.legs_arrived < currentItineraryProgress.legs_total && <small>作业已结束，但仍有授权路段尚未抵达。</small>}
               {currentJob.status === 'succeeded' && currentItineraryProgress.legs_arrived === currentItineraryProgress.legs_total && <small>已按授权路线抵达终点。</small>}
-              <small>只显示后端确认的行程路段进度。</small>
-            </div>}
+            </section>}
 
             {currentJobRequiresItineraryReplan && <div className="long-action-boundary" role="status">
               <Icon name="info" size={14} />

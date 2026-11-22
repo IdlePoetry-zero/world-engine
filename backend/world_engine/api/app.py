@@ -52,7 +52,9 @@ from world_engine.domain.components import NeedsComponent, PlaceComponent, Skill
 from world_engine.domain.models import MembershipRole
 from world_engine.domain.models import AccessScope
 from world_engine.domain.work_shift import WorkShiftError, registered_work_shift_terms
-from world_engine.domain.travel_itinerary import plan_travel_itinerary, revalidate_travel_itinerary_leg
+from world_engine.domain.travel_itinerary import (
+    plan_travel_itinerary, revalidate_travel_itinerary_leg, travel_itinerary_journey_id,
+)
 from world_engine.domain.travel_itinerary_progress import itinerary_requires_replan
 from world_engine.rules.engine import route_access_reason
 
@@ -335,7 +337,7 @@ def create_app(
         job = worlds.repository.read_job(access, job_id)
         return wire(public_job(job, access))
 
-    def public_job(job, access=None):
+    def public_job(job, access=None, *, itinerary_player_state=None):
         result = job.result or {}
         interruption = result.get("interruption") or {}
         simulation_job = job.job_type in {"simulation.long_action", "simulation.world_advance"}
@@ -390,6 +392,28 @@ def create_app(
                 "legs_total": len(itinerary["legs"]),
                 "legs_arrived": cursor["leg_index"] + 1 if cursor is not None else 0,
             }
+            if itinerary_player_state is None:
+                try:
+                    itinerary_player_state = worlds.view_world(access, job.world_id, job.branch_id)["state"]
+                except (AccessDenied, NotFound):
+                    itinerary_player_state = {}
+            if itinerary_player_state.get("player_id") == itinerary.get("actor_id"):
+                itinerary_plan = LongActionPlan.model_validate(plan).travel_itinerary
+                if itinerary_plan is not None:
+                    entities = itinerary_player_state["entities"]
+                    journey = itinerary_player_state.get("own_active_travel") or {}
+                    route_view = []
+                    for leg in itinerary_plan.legs:
+                        origin = entities.get(str(leg.from_place_id)) or {}
+                        destination = entities.get(str(leg.to_place_id)) or {}
+                        in_transit = str(travel_itinerary_journey_id(itinerary_plan.itinerary_id, leg.leg_id)) == journey.get("journey_id")
+                        route_view.append({
+                            "from_name": origin.get("name"), "to_name": destination.get("name"),
+                            "travel_ticks": str(leg.travel_ticks),
+                            "arrived": leg.leg_index < view["itinerary_progress"]["legs_arrived"],
+                            "expected_arrival_tick": journey.get("arrival_tick") if in_transit else None,
+                        })
+                    view["itinerary_route"] = route_view
             if job.status.value == "paused" and (
                 itinerary_requires_replan(interruption.get("reason_code"))
                 or itinerary_requires_replan(result.get("reason_code"))
@@ -474,7 +498,14 @@ def create_app(
     def branch_jobs(request: Request, world_id: UUID, branch_id: UUID):
         access = scope(request)
         jobs = worlds.repository.list_jobs(access, world_id, branch_id)
-        return wire({"items": [public_job(job, access) for job in jobs]})
+        itinerary_player_state = None
+        if any(job.payload.get("submitted_by") == str(access.user_id) and
+               (job.payload.get("plan") or {}).get("travel_itinerary") is not None for job in jobs):
+            try:
+                itinerary_player_state = worlds.view_world(access, world_id, branch_id)["state"]
+            except (AccessDenied, NotFound):
+                itinerary_player_state = {}
+        return wire({"items": [public_job(job, access, itinerary_player_state=itinerary_player_state) for job in jobs]})
 
     @app.post("/api/v1/worlds/{world_id}/long-actions", status_code=202)
     def enqueue_long_action(

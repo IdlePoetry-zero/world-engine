@@ -8,12 +8,13 @@ import { InstitutionalCreditPanel } from '../components/InstitutionalCreditPanel
 import { LeadershipBallotsPanel } from '../components/LeadershipBallotsPanel'
 import { LongActionPanel } from '../components/LongActionPanel'
 import { OccupationsPanel } from '../components/OccupationsPanel'
+import { PlaySceneCard, type PlaySceneStage } from '../components/PlaySceneCard'
 import { RelationshipInvitationsPanel } from '../components/RelationshipInvitationsPanel'
 import { RelationshipPartnershipsPanel } from '../components/RelationshipPartnershipsPanel'
 import { SafeConductPanel } from '../components/SafeConductPanel'
 import { ShipmentReliefPanel } from '../components/ShipmentReliefPanel'
 import type { Notice, Page } from '../App'
-import { errorMessage, FOREGROUND_STATUS_POLL_INTERVAL_MS, initials, jobReasonLabel } from '../utils'
+import { errorMessage, FOREGROUND_STATUS_POLL_INTERVAL_MS, jobReasonLabel } from '../utils'
 
 const CombatTrucePanel = lazy(() => import('../components/CombatTrucePanel').then((module) => ({ default: module.CombatTrucePanel })))
 const CultivationBreakthroughPanel = lazy(() => import('../components/CultivationBreakthroughPanel').then((module) => ({ default: module.CultivationBreakthroughPanel })))
@@ -52,7 +53,7 @@ type OwnPrivateGiftView = {
   can_request_reply: boolean
 }
 
-export function PlayPage({ world, view, viewError, branches, branchId, loading, onSelectWorld, onOpenHistory, onBranchChange, onNotice, onRefresh }: { world: World | null; view: WorldView | null; viewError: string | null; branches: Branch[]; branchId: string | null; loading: boolean; onSelectWorld: () => void; onOpenHistory: () => void; onBranchChange: (id: string) => void; onNotice: (notice: Notice) => void; onRefresh: () => void }) {
+export function PlayPage({ world, view, viewError, branches, branchId, loading, sceneStage, onSelectWorld, onOpenHistory, onBranchChange, onNotice, onRefresh }: { world: World | null; view: WorldView | null; viewError: string | null; branches: Branch[]; branchId: string | null; loading: boolean; sceneStage?: PlaySceneStage; onSelectWorld: () => void; onOpenHistory: () => void; onBranchChange: (id: string) => void; onNotice: (notice: Notice) => void; onRefresh: () => void }) {
   const [mode, setMode] = useState<Mode>('auto')
   const [input, setInput] = useState('')
   const [messages, setMessages] = useState<GameMessage[]>([])
@@ -76,9 +77,15 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
   const conversationSessionId = conversation?.session_id
   const conversationLoading = Boolean(worldId && branchId && !conversationState)
   const conversationError = conversationState?.error ?? null
-  const state = view?.state
+  const state = view && (!('mode' in view) || view.mode === 'player') ? view.state : undefined
   const playerId = state?.player_id
   const sendScopeRevision = useRef(0)
+  const composer = useRef<HTMLTextAreaElement>(null)
+  const story = useRef<HTMLDivElement>(null)
+  const followStory = useRef(true)
+  const journeyTools = useRef<HTMLDetailsElement>(null)
+  const journeyStatus = useRef<HTMLDivElement>(null)
+  const traveling = state?.own_active_travel?.status === 'in_transit'
   const chatLongActionJob = job?.refreshLongActionList && job.jobId
     && job.worldId === worldId && job.branchId === branchId && job.actorId === playerId
     ? { jobId: job.jobId, worldId: job.worldId, branchId: job.branchId, actorId: job.actorId }
@@ -119,10 +126,15 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
   const failedContinuationRequest = continuationSubmitState?.key === continuationRequestKey ? continuationSubmitState.failedRequest : null
   const modeForActor = characterCanAct ? mode : 'ask_gm'
   const playerPlaceId = typeof player?.location_id === 'string' ? player.location_id : null
-  const location = player?.location_id ? state?.entities[player.location_id]?.name : undefined
-  const outgoingRelations = useMemo(() => new Map((state?.relations ?? []).filter((relation) => relation.from_id === playerId).map((relation) => [relation.to_id, relation])), [state?.relations, playerId])
-  const canPrepareAction = Boolean(characterCanAct && branchId && playerId && conversation && !conversationLoading && !conversationError && !loading && !viewError && !input.trim() && !sending && !failedRequest)
-  const canPrepareQuery = Boolean(branchId && playerId && conversation && !conversationLoading && !conversationError && !loading && !viewError && !input.trim() && !sending && !failedRequest)
+  const composerReady = Boolean(branchId && playerId && conversation?.actor_id === playerId && profile && !conversationLoading && !conversationError && !loading && !viewError && !sending && !failedRequest)
+  const canPrepareQuery = composerReady && input.length === 0
+  const canPrepareAction = canPrepareQuery && characterCanAct
+  const canPrepareSceneDraft = modeForActor !== 'author'
+
+  useLayoutEffect(() => {
+    const transcript = story.current
+    if (transcript && followStory.current) transcript.scrollTop = transcript.scrollHeight
+  }, [messages.length, sending, conversationSessionId])
 
   useLayoutEffect(() => {
     return () => { sendScopeRevision.current += 1 }
@@ -284,7 +296,7 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
     } finally { setSending(false) }
   }
   const send = () => {
-    if (!world || !branchId || !playerId || !conversation || !profile || !input.trim() || sending || failedRequest || conversationLoading || conversationError || (!characterCanAct && modeForActor !== 'ask_gm')) return
+    if (!world || !branchId || !conversation || !profile || !input.trim() || !composerReady) return
     const text = input.trim()
     const request: MessageRequest = {
       request_id: crypto.randomUUID(), world_id: world.world_id, branch_id: branchId,
@@ -335,199 +347,85 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
     }
   }
   const retryFailedRequest = () => { if (failedRequest && !sending) void executeRequest(failedRequest, true) }
-  const prepareActionDraft = (text: string) => {
-    if (!characterCanAct || input.trim() || sending || failedRequest) return
-    setMode('action')
+  const prepareDraft = (text: string, draftMode: 'ask_gm' | 'roleplay' | 'action') => {
+    if (draftMode === 'ask_gm' ? !canPrepareQuery : !canPrepareAction) return
+    setMode(draftMode)
     setInput(text)
+    composer.current?.focus()
   }
-  const prepareGmQueryDraft = (text: string) => {
-    if (input.trim() || sending || failedRequest) return
-    setMode('ask_gm')
-    setInput(text)
+  const prepareActionDraft = (text: string) => prepareDraft(text, 'action')
+  const prepareGmQueryDraft = (text: string) => prepareDraft(text, 'ask_gm')
+  const openJourneyStatus = () => {
+    const tools = journeyTools.current
+    const status = journeyStatus.current
+    if (!tools || !status) return
+    tools.open = true
+    status.focus({ preventScroll: true })
+    status.scrollIntoView({ block: 'start' })
   }
   const onInputKey = (event: KeyboardEvent<HTMLTextAreaElement>) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() } }
 
   if (!world) return <PageEmpty eyebrow="进入世界" title="先选择一个世界。" body="从世界库打开现有存档，或创建一个新的世界。当前没有可展示的虚构进度。" action={<button className="button button-primary" onClick={onSelectWorld}>前往世界库 <Icon name="arrow-right" size={16} /></button>} />
-  return <section className="play-page page-enter">
-    <div className="play-topline"><div><div className="eyebrow"><span className="eyebrow-line" />正在游玩</div><h1>{world.title}</h1></div><div className="play-header-actions"><select aria-label="当前分支" className="branch-select" value={branchId ?? ''} onChange={(event) => onBranchChange(event.target.value)} disabled={!branches.length}>{branches.length === 0 ? <option value="">尚无分支</option> : branches.map((branch) => <option key={branch.branch_id} value={branch.branch_id}>{branch.label || branch.branch_id.slice(0, 8)}</option>)}</select><button className="button button-secondary button-small" onClick={onOpenHistory}><Icon name="timeline" size={15} />历史</button></div></div>
-    <div className="play-statusbar"><span className="statusbar-dot" /><span>本地世界</span><span className="status-divider" /><span>{branchId ? `分支 ${branchId.slice(0, 8)}` : '分支待创建'}</span><span className="status-divider" /><span>{view?.branch.current_tick ?? world.current_tick} tick</span><span className="statusbar-spacer" /><span className="status-version">版本 {view?.world.state_version ?? world.state_version}</span></div>
-    {worldId && <LongActionPanel worldId={worldId} branchId={branchId} currentTick={view?.branch.current_tick ?? world.current_tick} stateVersion={view?.branch.state_version ?? world.state_version} daySeconds={view?.state.calendar?.day_seconds} yearDays={view?.state.calendar?.year_days} travelOptions={state?.travel_options} itineraryRouteOptions={state?.itinerary_route_options} currentPlaceId={playerPlaceId} ownActiveTravel={state?.own_active_travel} ownStudySkills={state?.own_study_skills} ownWorkAssignments={state?.own_work_assignments} marketOffers={marketOffers} marketCurrency={marketCurrency} actorId={playerId} chatLongActionJob={chatLongActionJob} profile={profile} profileLoading={profileLoading} profileError={profileError} disabled={loading || Boolean(viewError) || !view || !playerId || !characterCanAct} onRefresh={onRefresh} onNotice={onNotice} />}
-    <InstitutionalCreditPanel
-      key={`${worldId ?? ''}:${branchId ?? ''}:${playerId ?? ''}`}
-      credit={state?.institutional_credit}
-      finance={state?.institutional_finance}
-      projectionLoading={loading}
-      canPrepareAction={canPrepareAction}
-      canPrepareQuery={canPrepareQuery}
-      onPrepareAction={prepareActionDraft}
-      onPrepareQuery={prepareGmQueryDraft}
-    />
-    <OccupationsPanel
-      postings={localWorkPostings}
-      assignments={ownWorkAssignments}
-      projectionAvailable={Boolean(state && playerId)}
-      loading={loading}
-      viewError={viewError}
-      canPrepareAction={canPrepareAction}
-      onPrepareAction={prepareActionDraft}
-    />
-    <LeadershipBallotsPanel
-      memberships={ownMemberships as OwnMembership[] | null | undefined}
-      ballots={ownLeadershipBallots as OwnLeadershipBallot[] | null | undefined}
-      projectionAvailable={Boolean(state && playerId)}
-      loading={loading}
-      viewError={viewError}
-      canPrepareAction={canPrepareAction}
-      onPrepareAction={prepareActionDraft}
-    />
-    <SafeConductPanel
-      proposalOptions={safeConductProposalOptions as SafeConductProposalOption[] | null | undefined}
-      treaties={ownSafeConductTreaties as OwnSafeConductTreaty[] | null | undefined}
-      entities={state?.entities ?? {}}
-      currentTick={view?.branch.current_tick ?? world.current_tick}
-      projectionAvailable={Boolean(state && playerId)}
-      loading={loading}
-      viewError={viewError}
-      canPrepareAction={canPrepareAction}
-      onPrepareAction={prepareActionDraft}
-    />
-    {(combatTruceOptions || (ownCombatTruces?.length ?? 0) > 0) && <Suspense fallback={null}>
-      <CombatTrucePanel
-        options={combatTruceOptions}
-        truces={ownCombatTruces}
-        entities={state?.entities ?? {}}
-        playerId={playerId}
-        projectionAvailable={Boolean(state && playerId)}
-        loading={loading}
-        viewError={viewError}
-        canPrepareAction={canPrepareAction}
-        onPrepareAction={prepareActionDraft}
-      />
-    </Suspense>}
-    {cultivationBreakthroughOptions && cultivationBreakthroughOptions.length > 0 && <Suspense fallback={null}>
-      <CultivationBreakthroughPanel
-        options={cultivationBreakthroughOptions}
-        canPrepareAction={canPrepareAction}
-        onPrepareAction={prepareActionDraft}
-      />
-    </Suspense>}
-    <RelationshipInvitationsPanel
-      invitations={relationshipInvitations}
-      reflections={ownMeetingReflections}
-      entities={state?.entities ?? {}}
-      playerId={playerId}
-      currentTick={view?.branch.current_tick ?? world.current_tick}
-      projectionAvailable={Boolean(state && playerId)}
-      loading={loading}
-      viewError={viewError}
-      canPrepareAction={canPrepareAction}
-      onPrepareAction={prepareActionDraft}
-    />
-    <PrivateGiftsPanel
-      gifts={rawPrivateGifts}
-      entities={state?.entities ?? {}}
-      playerId={playerId}
-      currentTick={view?.branch.current_tick ?? world.current_tick}
-      projectionAvailable={Boolean(state && playerId)}
-      loading={loading}
-      viewError={viewError}
-      canPrepareAction={canPrepareAction}
-      onPrepareAction={prepareActionDraft}
-    />
-    <RelationshipPartnershipsPanel
-      partnerships={relationshipPartnerships}
-      proposalTargetIds={partnershipProposalTargetIds}
-      disclosureOptions={relationshipDisclosureOptions}
-      receivedDisclosures={ownRelationshipDisclosures}
-      entities={state?.entities ?? {}}
-      playerId={playerId}
-      projectionAvailable={Boolean(state && playerId)}
-      loading={loading}
-      viewError={viewError}
-      canPrepareAction={canPrepareAction}
-      onPrepareAction={prepareActionDraft}
-    />
-    <PromisesPanel
-      promises={promises}
-      entities={state?.entities ?? {}}
-      promiseDataAvailable={promiseDataAvailable}
-      projectionAvailable={Boolean(state && playerId)}
-      loading={loading}
-      viewError={viewError}
-      canPrepareAction={canPrepareAction}
-      onPrepareAction={prepareActionDraft}
-    />
-    <ShipmentsPanel
-      shipments={shipments}
-      entities={state?.entities ?? {}}
-      playerName={player?.name ?? '你'}
-      projectionAvailable={Boolean(state && playerId)}
-      loading={loading}
-      viewError={viewError}
-      canPrepareAction={canPrepareAction}
-      onReceive={(shipmentId) => prepareActionDraft(`请接收运单 ${shipmentId}`)}
-    />
-    <ShipmentReliefPanel
-      options={shipmentReliefOptions}
-      canPrepareAction={canPrepareAction}
-      onPrepareAction={prepareActionDraft}
-    />
-    {marketOffers.length > 0 && <MarketQuotesPanel
-      offers={marketOffers}
-      currencyResourceId={marketCurrency}
-      canPrepareQuery={canPrepareQuery}
-      onAsk={(text) => prepareGmQueryDraft(text)}
-    />}
-    <div className="play-layout">
-      <aside className="play-aside play-aside-left">
-        <div className="aside-section"><div className="aside-heading">此刻所在 <Icon name="pin" size={14} /></div>{loading ? <div className="quiet-loading">正在读取世界投影…</div> : location ? <div className="location-card"><div className="location-glyph"><Icon name="compass" size={18} /></div><div><strong>{location}</strong><span>当前位置</span></div></div> : <div className="aside-empty">世界投影尚未提供位置资料。</div>}</div>
-        <div className="aside-section"><div className="aside-heading">在场人物 <span className="aside-count">{people.length || '—'}</span></div>{people.length ? <div className="people-list">{people.slice(0, 5).map((person) => {
-          const relation = outgoingRelations.get(person.id)
-          const familiarity = relation?.dimensions?.familiarity
-          return <article className="person-row-card" key={person.id}>
-            <div className="person-row"><span className="person-avatar">{initials(person.name ?? '')}</span><span><strong>{person.name ?? '未命名人物'}</strong><small>{person.status ?? '状态未知'}</small></span><span className="person-presence" /></div>
-            {person.id !== playerId && <small className="person-familiarity">{familiarity === undefined ? '你对 TA 的熟悉度：尚未记录' : `你对 TA 的熟悉度：${formatFamiliarity(familiarity)} / 100`}</small>}
-            {relation && Object.keys(relation.dimensions ?? {}).length > 0 && <details className="person-relation-details"><summary>查看你对 TA 的关系记录</summary><dl>{Object.entries(relation.dimensions ?? {}).map(([dimension, value]) => <div key={dimension}><dt>{relationDimensionLabel(dimension)}</dt><dd>{formatRelationValue(value)}</dd></div>)}</dl>{relation.label && <p>{relation.label}</p>}</details>}
-          </article>
-        })}</div> : <div className="aside-empty">当前分支没有可显示的人物投影。</div>}</div>
-        <div className="aside-link-card"><Icon name="book" size={16} /><span><strong>设定档案</strong><small>查看本世界的实体投影</small></span><button className="link-arrow" aria-label="打开设定档案" onClick={() => window.dispatchEvent(new CustomEvent<Page>('world-engine:navigate', { detail: 'world' }))}><Icon name="arrow-right" size={15} /></button></div>
-      </aside>
-      <section className="conversation-panel" aria-label="GM 对话">
-        <div className="conversation-head"><div><span className="conversation-mark"><Icon name="spark" size={15} /></span><div><strong>GM 对话</strong><small>由当前世界状态与角色视角驱动</small></div></div><button className="icon-button quiet-button" title="复制对话" onClick={() => { void navigator.clipboard?.writeText(messages.map((message) => `${message.role}: ${message.content}`).join('\n\n')); onNotice({ kind: 'info', text: '已复制当前对话。' }) }} disabled={!messages.length}><Icon name="copy" size={16} /></button></div>
-        <InvestigationJournal
-          key={`${worldId ?? ''}:${branchId ?? ''}:${playerId ?? ''}`}
-          anchors={state?.available_case_anchors ?? []}
-          caseFiles={state?.case_files ?? []}
-          repairOffers={state?.own_accusation_repair_offers}
-          playerId={playerId}
-          knowledge={state?.knowledge ?? []}
-          projectionAvailable={Boolean(state && playerId)}
-          loading={loading}
-          viewError={Boolean(viewError)}
-          inputHasText={Boolean(input.trim())}
-          busy={sending || Boolean(failedRequest) || !characterCanAct}
-          authorMode={modeForActor === 'author'}
-          onPrepareAction={prepareActionDraft}
-        />
-      {playerDead && continuationState && (continuationState.status === 'ready' || continuationState.status === 'error') && <PlayerContinuationPanel
-        currentPlayerId={playerId}
-        loadError={continuationState.status === 'error' ? continuationState.error ?? '无法读取继续游玩的选项。' : null}
-        options={continuationOptions}
-        selectedId={selectedContinuationId}
-        submitting={continuationSubmitting}
-        submitError={continuationSubmitError}
-        retrying={Boolean(failedContinuationRequest)}
-        onSelect={(actorId) => setSelectedContinuation({ key: continuationRequestKey, actorId })}
-        onContinue={() => { void submitContinuation() }}
-        onRetryContinue={() => { void submitContinuation(failedContinuationRequest) }}
-        onRetryOptions={() => setContinuationAttempt((attempt) => attempt + 1)}
-      />}
-        <div className="conversation-body" aria-live="polite">
-          {loading && <div className="conversation-blank"><span className="blank-symbol"><Icon name="spinner" size={22} /></span><strong>正在读取世界状态</strong><span>GM 回复只会在收到后端结果后显示。</span></div>}
+  return <section className="play-page scene-play page-enter">
+    <div className="play-topline">
+      <h1>{world.title}</h1>
+      <div className="play-header-actions">
+        <select aria-label="当前分支" className="branch-select" value={branchId ?? ''} onChange={(event) => onBranchChange(event.target.value)} disabled={!branches.length}>
+          {branches.length === 0 ? <option value="">尚无分支</option> : branches.map((branch) => <option key={branch.branch_id} value={branch.branch_id}>{branch.label || branch.branch_id.slice(0, 8)}</option>)}
+        </select>
+        <button type="button" className="button button-secondary button-small" onClick={onOpenHistory}><Icon name="timeline" size={15} />历史</button>
+      </div>
+    </div>
+    <div className="play-statusbar">
+      <span className="statusbar-dot" /><span>本地世界</span><span className="status-divider" />
+      <span>{branchId ? '分支 ' + branchId.slice(0, 8) : '分支待创建'}</span>
+      <span className="status-divider" /><span>{view?.branch.current_tick ?? world.current_tick} tick</span>
+      <span className="statusbar-spacer" /><span className="status-version">版本 {view?.world.state_version ?? world.state_version}</span>
+    </div>
+    <div className="scene-play-grid">
+      <section className="conversation-panel scene-story" aria-labelledby="play-story-title">
+        <div className="conversation-head">
+          <div><span className="conversation-mark"><Icon name="spark" size={16} /></span><h2 id="play-story-title">故事与对话</h2></div>
+          <div className="scene-story-actions">
+            <button type="button" className="scene-journey-link" data-traveling={traveling} aria-controls="play-journey-tools" onClick={openJourneyStatus}>
+              <Icon name="clock" size={15} />{traveling ? '行程进度' : '长行动'}
+            </button>
+            <button type="button" className="icon-button quiet-button" aria-label="复制对话" title="复制对话" onClick={() => { void navigator.clipboard?.writeText(messages.map((message) => message.role + ': ' + message.content).join('\n\n')); onNotice({ kind: 'info', text: '已复制当前对话。' }) }} disabled={!messages.length}><Icon name="copy" size={16} /></button>
+          </div>
+        </div>
+        {playerDead && continuationState && (continuationState.status === 'ready' || continuationState.status === 'error') && (
+          <div className="scene-continuation">
+            <PlayerContinuationPanel
+              currentPlayerId={playerId}
+              loadError={continuationState.status === 'error' ? continuationState.error ?? '无法读取继续游玩的选项。' : null}
+              options={continuationOptions}
+              selectedId={selectedContinuationId}
+              submitting={continuationSubmitting}
+              submitError={continuationSubmitError}
+              retrying={Boolean(failedContinuationRequest)}
+              onSelect={(actorId) => setSelectedContinuation({ key: continuationRequestKey, actorId })}
+              onContinue={() => { void submitContinuation() }}
+              onRetryContinue={() => { void submitContinuation(failedContinuationRequest) }}
+              onRetryOptions={() => setContinuationAttempt((attempt) => attempt + 1)}
+            />
+          </div>
+        )}
+        <div
+          className="conversation-body"
+          aria-label="故事记录"
+          aria-live="polite"
+          tabIndex={0}
+          ref={story}
+          onScroll={(event) => {
+            const transcript = event.currentTarget
+            followStory.current = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 48
+          }}
+        >
+          {loading && <div className="conversation-blank"><span className="blank-symbol"><Icon name="spinner" size={22} /></span><strong>正在读取世界状态</strong><span>正在载入当前分支及角色的可见信息。</span></div>}
           {!loading && viewError && <InlineState icon="cloud-off" title="无法读取此分支" description={viewError} action={<button className="button button-secondary button-small" onClick={onRefresh}>重新连接</button>} />}
           {!loading && conversationLoading && <div className="conversation-blank"><span className="blank-symbol"><Icon name="spinner" size={22} /></span><strong>正在读取持久对话</strong><span>正在载入当前分支的会话与历史消息。</span></div>}
           {!loading && !conversationLoading && conversationError && <InlineState icon="cloud-off" title="无法读取对话记录" description={conversationError} action={<button className="button button-secondary button-small" onClick={() => setConversationAttempt((attempt) => attempt + 1)}>重新读取</button>} />}
-          {!loading && !viewError && !conversationLoading && !conversationError && messages.length === 0 && <div className="conversation-blank"><span className="blank-symbol"><Icon name="message" size={22} /></span><strong>{playerDead ? '旧旅程留在这里。' : '这一页，留给即将发生的事。'}</strong><span>{playerDead ? '你仍可向 GM 查询这个分支的历史；行动和角色对话已停用。' : '输入一句话开始。尚未发送的内容不会推进世界时间。'}</span><div className="starter-prompts"><button onClick={() => { setMode('ask_gm'); setInput('我现在身处哪里？') }}>我现在身处哪里？</button>{!playerDead && <button onClick={() => { setMode('action'); setInput('看看周围有什么线索。') }}>看看周围有什么线索</button>}</div></div>}
+          {!loading && !viewError && !conversationLoading && !conversationError && messages.length === 0 && <div className="conversation-blank"><span className="blank-symbol"><Icon name="message" size={22} /></span><strong>{playerDead ? '旧旅程留在这里。' : '这一页，留给即将发生的事。'}</strong><span>{playerDead ? '你仍可向 GM 查询这个分支的历史；行动和角色对话已停用。' : '输入一句话开始。尚未发送的内容不会推进世界时间。'}</span><div className="starter-prompts"><button type="button" disabled={!canPrepareQuery || !canPrepareSceneDraft} onClick={() => prepareGmQueryDraft('我现在身处哪里？')}>我现在身处哪里？</button>{characterCanAct && <button type="button" disabled={!canPrepareAction || !canPrepareSceneDraft} onClick={() => prepareActionDraft('看看周围有什么线索。')}>看看周围有什么线索</button>}</div></div>}
           {messages.map((message) => (
             <article key={message.id} className={`message-row message-${message.role}`}>
               <div className="message-avatar">
@@ -562,14 +460,211 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
           {sending && <div className="typing-indicator"><span /><span /><span /><em>正在发送到本地引擎</em></div>}
           {job && <div className="job-strip"><span className="job-pulse" /><span>后台任务 {job.jobId?.slice(0, 8) ?? job.commandId?.slice(0, 8) ?? ''}</span><strong>{jobStatusLabel(job.status)}</strong></div>}
         </div>
-        <div className="composer-wrap"><div className="mode-switcher" role="group" aria-label="输入模式">{(['auto', 'ask_gm', 'roleplay', 'action', 'author'] as Mode[]).map((value) => <button key={value} className={`mode-option ${modeForActor === value ? 'selected' : ''}`} onClick={() => setMode(value)} title={!characterCanAct && value !== 'ask_gm' ? '当前角色已去世；只能向 GM 查询。' : modeHints[value]} aria-pressed={modeForActor === value} disabled={!characterCanAct && value !== 'ask_gm'}>{modeLabels[value]}</button>)}</div><div className="composer"><textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={onInputKey} aria-label="发送给 GM" placeholder={modeForActor === 'ask_gm' ? '想向 GM 了解什么？' : modeForActor === 'author' ? '输入作者指令…' : '描述你想说的话或采取的行动…'} rows={2} disabled={!branchId || !playerId || !conversation || conversationLoading || Boolean(conversationError) || sending || !profile || loading || Boolean(viewError) || Boolean(failedRequest) || (!characterCanAct && modeForActor !== 'ask_gm')} /><div className="composer-footer"><span><kbd>Enter</kbd> 发送 <span className="kbd-divider">·</span> <kbd>Shift + Enter</kbd> 换行</span><button className="send-button" onClick={send} disabled={!input.trim() || sending || !branchId || !playerId || !conversation || conversationLoading || Boolean(conversationError) || !profile || loading || Boolean(viewError) || Boolean(failedRequest) || (!characterCanAct && modeForActor !== 'ask_gm')} aria-label="发送消息">{sending ? <Icon name="spinner" size={17} /> : <Icon name="arrow-up" size={17} />}</button></div></div><div className="composer-note"><Icon name="shield" size={12} /><span>{failedRequest ? '发送状态未确认；请重试同一请求，以避免重复执行。' : conversationLoading ? '正在从后端恢复会话。' : conversationError ? '对话状态不可用；重新读取前不会发送请求。' : playerDead ? '旧角色已去世：你仍可使用 GM 查询，行动与角色对话不可用。' : '查询与假设不会推进世界时间；行动结果以提交后的状态为准。'}</span><span className="profile-chip">{profileLoading ? '读取配置…' : profile ? `${profile.speed} · ${profile.depth}` : `发送已停用 · ${profileError ?? '无法读取运行配置'}`}</span></div></div>
+        <div className="composer-wrap">
+          <div className="mode-switcher" role="group" aria-label="输入模式">
+            {(['auto', 'ask_gm', 'roleplay', 'action', 'author'] as Mode[]).map((value) => (
+              <button type="button" key={value} className={'mode-option' + (modeForActor === value ? ' selected' : '')} onClick={() => setMode(value)} title={!characterCanAct && value !== 'ask_gm' ? '当前角色只能向 GM 查询。' : modeHints[value]} aria-pressed={modeForActor === value} disabled={!characterCanAct && value !== 'ask_gm'}>{modeLabels[value]}</button>
+            ))}
+          </div>
+          <div className="composer">
+            <textarea
+              ref={composer}
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              onKeyDown={onInputKey}
+              aria-label="发送给 GM"
+              placeholder={modeForActor === 'ask_gm' ? '想向 GM 了解什么？' : modeForActor === 'author' ? '输入作者指令…' : '描述你想说的话或采取的行动…'}
+              rows={2}
+              disabled={!composerReady}
+            />
+            <div className="composer-footer">
+              <span><kbd>Enter</kbd> 发送 <span className="kbd-divider">·</span> <kbd>Shift + Enter</kbd> 换行</span>
+              <button type="button" className="send-button" onClick={send} disabled={!input.trim() || !composerReady} aria-label="发送消息">
+                {sending ? <Icon name="spinner" size={17} /> : <Icon name="arrow-up" size={17} />}
+              </button>
+            </div>
+          </div>
+          <div className="composer-note"><Icon name="shield" size={12} /><span>{failedRequest ? '发送状态未确认；请重试同一请求，以避免重复执行。' : conversationLoading ? '正在从后端恢复会话。' : conversationError ? '对话状态不可用；重新读取前不会发送请求。' : playerDead ? '旧角色已去世：你仍可使用 GM 查询，行动与角色对话不可用。' : '查询与假设不会推进世界时间；行动结果以提交后的状态为准。'}</span><span className="profile-chip">{profileLoading ? '读取配置…' : profile ? `${profile.speed} · ${profile.depth}` : `发送已停用 · ${profileError ?? '无法读取运行配置'}`}</span></div>
+        </div>
       </section>
-      <aside className="play-aside play-aside-right">
-        <div className="aside-section"><div className="aside-heading">角色状态 <Icon name="user" size={14} /></div>{player ? <div className="player-card"><div className="player-portrait">{initials(player.name ?? '')}</div><strong>{player.name ?? '未命名人物'}</strong><span>{player.status ?? '状态未知'}</span><div className="player-stat-list"><StatLine label="位置" value={location ?? '未知'} /><StatLine label="资源" value={Object.keys(state?.resources ?? {}).length ? `${Object.keys(state?.resources ?? {}).length} 项` : '尚无数据'} /></div></div> : <div className="aside-empty">当前视角角色信息未包含在授权投影中。</div>}</div>
-        <div className="aside-section"><div className="aside-heading">世界资源 <Icon name="box" size={14} /></div>{state && Object.keys(state.resources ?? {}).length ? <div className="resource-list">{Object.values(state.resources).slice(0, 4).map((resource) => <div className="resource-row" key={resource.resource_id}><span>{resource.resource_id}</span><strong>{resource.balance}</strong></div>)}</div> : <div className="aside-empty">尚无可显示的资源账目。</div>}</div>
-        <div className="aside-section aside-snapshot"><div className="aside-heading">调用概览 <Icon name="pulse" size={14} /></div><p>运行用量与模型信息仅在后台返回时显示。</p><button className="text-button" onClick={() => window.dispatchEvent(new CustomEvent<Page>('world-engine:navigate', { detail: 'operations' }))}>打开模型后台 <Icon name="arrow-right" size={14} /></button></div>
-      </aside>
+      <PlaySceneCard
+        state={state}
+        loading={loading}
+        viewError={Boolean(viewError)}
+        stage={sceneStage}
+        canPrepareAction={canPrepareSceneDraft && canPrepareAction}
+        canPrepareQuery={canPrepareSceneDraft && canPrepareQuery}
+        onPrepareDraft={({ mode: draftMode, text }) => { if (canPrepareSceneDraft) prepareDraft(text, draftMode) }}
+      />
     </div>
+    <details id="play-journey-tools" className="scene-tools" ref={journeyTools}>
+      <summary><Icon name="layers" size={18} /><strong>旅程工具</strong><small>长行动、调查、物资与关系</small><Icon name="chevron" size={15} /></summary>
+      <div className="scene-tools-content">
+        <section className="scene-tool-group" aria-labelledby="scene-tools-journey">
+          <h3 id="scene-tools-journey">行动与调查</h3>
+          {worldId && <div className="scene-journey-status" role="group" aria-labelledby="long-action-title" tabIndex={-1} ref={journeyStatus}>
+            <LongActionPanel worldId={worldId} branchId={branchId} currentTick={view?.branch.current_tick ?? world.current_tick} stateVersion={view?.branch.state_version ?? world.state_version} daySeconds={view?.state.calendar?.day_seconds} yearDays={view?.state.calendar?.year_days} travelOptions={state?.travel_options} itineraryRouteOptions={state?.itinerary_route_options} currentPlaceId={playerPlaceId} ownActiveTravel={state?.own_active_travel} ownStudySkills={state?.own_study_skills} ownWorkAssignments={state?.own_work_assignments} marketOffers={marketOffers} marketCurrency={marketCurrency} actorId={playerId} chatLongActionJob={chatLongActionJob} profile={profile} profileLoading={profileLoading} profileError={profileError} disabled={loading || Boolean(viewError) || !view || !playerId || !characterCanAct} onRefresh={onRefresh} onNotice={onNotice} />
+          </div>}
+          <InvestigationJournal
+            key={`${worldId ?? ''}:${branchId ?? ''}:${playerId ?? ''}`}
+            anchors={state?.available_case_anchors ?? []}
+            caseFiles={state?.case_files ?? []}
+            repairOffers={state?.own_accusation_repair_offers}
+            playerId={playerId}
+            knowledge={state?.knowledge ?? []}
+            projectionAvailable={Boolean(state && playerId)}
+            loading={loading}
+            viewError={Boolean(viewError)}
+            inputHasText={Boolean(input.trim())}
+            busy={sending || Boolean(failedRequest) || !characterCanAct}
+            authorMode={modeForActor === 'author'}
+            onPrepareAction={prepareActionDraft}
+          />
+          {cultivationBreakthroughOptions && cultivationBreakthroughOptions.length > 0 && <Suspense fallback={null}>
+            <CultivationBreakthroughPanel
+              options={cultivationBreakthroughOptions}
+              canPrepareAction={canPrepareAction}
+              onPrepareAction={prepareActionDraft}
+            />
+          </Suspense>}
+        </section>
+        <section className="scene-tool-group" aria-labelledby="scene-tools-economy">
+          <h3 id="scene-tools-economy">生计与物资</h3>
+          <OccupationsPanel
+            postings={localWorkPostings}
+            assignments={ownWorkAssignments}
+            projectionAvailable={Boolean(state && playerId)}
+            loading={loading}
+            viewError={viewError}
+            canPrepareAction={canPrepareAction}
+            onPrepareAction={prepareActionDraft}
+          />
+          <ShipmentsPanel
+            shipments={shipments}
+            entities={state?.entities ?? {}}
+            playerName={player?.name ?? '你'}
+            projectionAvailable={Boolean(state && playerId)}
+            loading={loading}
+            viewError={viewError}
+            canPrepareAction={canPrepareAction}
+            onReceive={(shipmentId) => prepareActionDraft(`请接收运单 ${shipmentId}`)}
+          />
+          <ShipmentReliefPanel
+            options={shipmentReliefOptions}
+            canPrepareAction={canPrepareAction}
+            onPrepareAction={prepareActionDraft}
+          />
+          {marketOffers.length > 0 && <MarketQuotesPanel
+            offers={marketOffers}
+            currencyResourceId={marketCurrency}
+            canPrepareQuery={canPrepareQuery}
+            onAsk={(text) => prepareGmQueryDraft(text)}
+          />}
+          <details className="shipment-panel">
+            <summary className="shipment-panel-summary"><span><Icon name="box" size={14} />我的资源</span><small>{Object.keys(state?.resources ?? {}).length} 项</small></summary>
+            {state && Object.keys(state.resources ?? {}).length ? (
+              <div className="shipment-list resource-list">{Object.entries(state.resources).map(([accountId, resource]) => <div className="resource-row" key={accountId}><span>{resource.resource_id}</span><strong>{resource.balance}</strong></div>)}</div>
+            ) : <p className="shipment-empty">尚无可显示的资源账目。</p>}
+          </details>
+        </section>
+        <section className="scene-tool-group" aria-labelledby="scene-tools-relations">
+          <h3 id="scene-tools-relations">关系与治理</h3>
+          <RelationshipInvitationsPanel
+            invitations={relationshipInvitations}
+            reflections={ownMeetingReflections}
+            entities={state?.entities ?? {}}
+            playerId={playerId}
+            currentTick={view?.branch.current_tick ?? world.current_tick}
+            projectionAvailable={Boolean(state && playerId)}
+            loading={loading}
+            viewError={viewError}
+            canPrepareAction={canPrepareAction}
+            onPrepareAction={prepareActionDraft}
+          />
+          <PrivateGiftsPanel
+            gifts={rawPrivateGifts}
+            entities={state?.entities ?? {}}
+            playerId={playerId}
+            currentTick={view?.branch.current_tick ?? world.current_tick}
+            projectionAvailable={Boolean(state && playerId)}
+            loading={loading}
+            viewError={viewError}
+            canPrepareAction={canPrepareAction}
+            onPrepareAction={prepareActionDraft}
+          />
+          <RelationshipPartnershipsPanel
+            partnerships={relationshipPartnerships}
+            proposalTargetIds={partnershipProposalTargetIds}
+            disclosureOptions={relationshipDisclosureOptions}
+            receivedDisclosures={ownRelationshipDisclosures}
+            entities={state?.entities ?? {}}
+            playerId={playerId}
+            projectionAvailable={Boolean(state && playerId)}
+            loading={loading}
+            viewError={viewError}
+            canPrepareAction={canPrepareAction}
+            onPrepareAction={prepareActionDraft}
+          />
+          <PromisesPanel
+            promises={promises}
+            entities={state?.entities ?? {}}
+            promiseDataAvailable={promiseDataAvailable}
+            projectionAvailable={Boolean(state && playerId)}
+            loading={loading}
+            viewError={viewError}
+            canPrepareAction={canPrepareAction}
+            onPrepareAction={prepareActionDraft}
+          />
+          <LeadershipBallotsPanel
+            memberships={ownMemberships as OwnMembership[] | null | undefined}
+            ballots={ownLeadershipBallots as OwnLeadershipBallot[] | null | undefined}
+            projectionAvailable={Boolean(state && playerId)}
+            loading={loading}
+            viewError={viewError}
+            canPrepareAction={canPrepareAction}
+            onPrepareAction={prepareActionDraft}
+          />
+          <SafeConductPanel
+            proposalOptions={safeConductProposalOptions as SafeConductProposalOption[] | null | undefined}
+            treaties={ownSafeConductTreaties as OwnSafeConductTreaty[] | null | undefined}
+            entities={state?.entities ?? {}}
+            currentTick={view?.branch.current_tick ?? world.current_tick}
+            projectionAvailable={Boolean(state && playerId)}
+            loading={loading}
+            viewError={viewError}
+            canPrepareAction={canPrepareAction}
+            onPrepareAction={prepareActionDraft}
+          />
+          {(combatTruceOptions || (ownCombatTruces?.length ?? 0) > 0) && <Suspense fallback={null}>
+            <CombatTrucePanel
+              options={combatTruceOptions}
+              truces={ownCombatTruces}
+              entities={state?.entities ?? {}}
+              playerId={playerId}
+              projectionAvailable={Boolean(state && playerId)}
+              loading={loading}
+              viewError={viewError}
+              canPrepareAction={canPrepareAction}
+              onPrepareAction={prepareActionDraft}
+            />
+          </Suspense>}
+          <InstitutionalCreditPanel
+            key={`${worldId ?? ''}:${branchId ?? ''}:${playerId ?? ''}`}
+            credit={state?.institutional_credit}
+            finance={state?.institutional_finance}
+            projectionLoading={loading}
+            canPrepareAction={canPrepareAction}
+            canPrepareQuery={canPrepareQuery}
+            onPrepareAction={prepareActionDraft}
+            onPrepareQuery={prepareGmQueryDraft}
+          />
+        </section>
+        <div className="scene-tool-links">
+          <button type="button" className="button button-secondary button-small" onClick={() => window.dispatchEvent(new CustomEvent<Page>('world-engine:navigate', { detail: 'world' }))}><Icon name="book" size={14} />设定档案</button>
+          <button type="button" className="button button-secondary button-small" onClick={() => window.dispatchEvent(new CustomEvent<Page>('world-engine:navigate', { detail: 'operations' }))}><Icon name="pulse" size={14} />模型与运行</button>
+        </div>
+      </div>
+    </details>
   </section>
 }
 
@@ -1047,22 +1142,6 @@ function formatPrivateGiftTick(value: string | number): string {
 
 function isPositiveDecimalText(value: string): boolean {
   return /^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value) && /[1-9]/.test(value)
-}
-
-function StatLine({ label, value }: { label: string; value: string }) { return <div className="stat-line"><span>{label}</span><strong>{value}</strong></div> }
-
-function formatFamiliarity(value: string | number) {
-  const parsed = typeof value === 'number' ? value : Number(value)
-  return Number.isFinite(parsed) ? new Intl.NumberFormat('zh-HK', { maximumFractionDigits: 6 }).format(parsed) : '不可读取'
-}
-
-function formatRelationValue(value: string | number) {
-  const parsed = typeof value === 'number' ? value : Number(value)
-  return Number.isFinite(parsed) ? new Intl.NumberFormat('zh-HK', { maximumFractionDigits: 6 }).format(parsed) : '不可读取'
-}
-
-function relationDimensionLabel(value: string) {
-  return ({ familiarity: '熟悉度', trust: '信任', affinity: '亲近', respect: '尊重', fear: '畏惧', resentment: '怨恨' } as Record<string, string>)[value] ?? value
 }
 
 function narrativeRewriteSource(requestId: string, kind?: string, rewrites?: NarrativeRewrites): GameMessage['rewriteSource'] {

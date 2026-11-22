@@ -698,6 +698,13 @@ export type JobStatusRecord = {
   work_purchase_target?: LongActionWorkPurchaseTarget | null
   work_purchase_affordability?: LongActionWorkPurchaseAffordability | null
   itinerary_progress?: LongActionItineraryProgress | null
+  itinerary_route?: {
+    from_name: string | null
+    to_name: string | null
+    travel_ticks: string
+    arrived: boolean
+    expected_arrival_tick: string | number | null
+  }[]
   itinerary_requires_replan?: boolean
   study_stop_safety_at_or_below?: number
   asset?: StoredMediaAsset

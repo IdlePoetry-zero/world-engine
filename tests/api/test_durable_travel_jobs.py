@@ -207,6 +207,11 @@ def test_itinerary_resumes_from_committed_first_leg_without_player_route_reentry
             job_id = UUID(queued["job_id"])
             assert client.post(path, headers=headers, json=reversed_routes).status_code == 409
             status_path = f"/api/v1/jobs/{job_id}"
+            route = client.get(status_path).raise_for_status().json()["itinerary_route"]
+            assert len(route) == 2
+            assert route[0]["from_name"] == "Departure Shore"
+            assert all(not leg["arrived"] and leg["expected_arrival_tick"] is None for leg in route)
+            assert all("route_id" not in leg and "journey_id" not in leg for leg in route)
             jobs = SimulationJobs(repository)
             lease = repository.claim_job("itinerary-first-worker")
             assert lease is not None and lease.job_id == job_id
@@ -221,9 +226,13 @@ def test_itinerary_resumes_from_committed_first_leg_without_player_route_reentry
             assert record.status == JobStatus.RUNNING
             assert record.committed_through_tick == 20
             assert record.payload["itinerary_cursor"]["leg_index"] == 0
-            assert client.get(status_path).raise_for_status().json()["itinerary_progress"] == {
+            first_checkpoint = client.get(status_path).raise_for_status().json()
+            assert first_checkpoint["itinerary_progress"] == {
                 "legs_total": 2, "legs_arrived": 1,
             }
+            assert [leg["arrived"] for leg in first_checkpoint["itinerary_route"]] == [True, False]
+            assert first_checkpoint["itinerary_route"][0]["to_name"] == "Arrival Harbor"
+            assert first_checkpoint["itinerary_route"][1]["expected_arrival_tick"] is None
             assert client.post(status_path + "/control", json={"action": "pause"}).raise_for_status().json()["status"] == "paused"
             assert client.post(status_path + "/control", json={"action": "resume"}).raise_for_status().json()["status"] == "queued"
             resumed = repository.claim_job("itinerary-second-worker")

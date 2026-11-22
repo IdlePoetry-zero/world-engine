@@ -19,6 +19,60 @@ from world_engine.simulation.contracts import WorldAdvancePlan
 from world_engine.simulation.engine import SimulationEngine, SimulationPolicy
 
 
+@pytest.mark.parametrize("weather,choose_alternative", [("clear", False), ("storm", True)])
+def test_world_advance_commits_actual_routine_route_and_replays(tmp_path, weather, choose_alternative):
+    app = build_application(data_directory=tmp_path, run_simulation_worker=False)
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        client.get("/api/v1/session").raise_for_status()
+        scope = local_identity(tmp_path)
+        repo = app.state.worlds.repository
+        player, npc, origin, outside, inside, window = (uuid4() for _ in range(6))
+        routes = [PlaceRoute(route_id=uuid4(), from_place_id=origin, to_place_id=place, travel_ticks=30)
+                  for place in (outside, inside)]
+        state = WorldState(player_id=player, entities={
+            origin: WorldEntity(id=origin, kind="place", components={
+                "place": PlaceComponent(place_type="settlement", routes=routes).model_dump(mode="json"),
+            }),
+            outside: WorldEntity(id=outside, kind="place", components={
+                "place": {"place_type": "settlement", "environment": {"weather": weather}},
+            }),
+            inside: WorldEntity(id=inside, kind="place", components={"place": {"place_type": "settlement"}}),
+            player: WorldEntity(id=player, kind="character", location_id=origin),
+            npc: WorldEntity(id=npc, kind="character", location_id=origin, components={
+                "capabilities": {"grants": ["world.travel"]},
+                "daily_routine": {"windows": [{"window_id": str(window), "start_second": 120,
+                                               "duration_seconds": 600, "activity": "study", "place_id": str(outside)}]},
+                "routine_mobility": {"alternatives": {str(window): [str(inside)]}, "avoid_conditions": ["storm"]},
+            }),
+        })
+        created = repo.create_world(scope, NewWorld(title="Routine routes", state=state))
+        world_id, branch_id = created.world.world_id, created.branch.branch_id
+        player_view = f"/api/v1/worlds/{world_id}/view?branch_id={branch_id}"
+        before_projection = client.get(player_view).raise_for_status().json()["state"]["entities"]
+        assert str(npc) in before_projection
+        assert "routine_mobility" not in before_projection[str(npc)]["components"]
+        response = client.post(f"/api/v1/worlds/{world_id}/world-advance", headers={"Idempotency-Key": "routine"},
+                               json={"branch_id": str(branch_id), "expected_state_version": "0", "duration_seconds": 120})
+        job_id = UUID(response.raise_for_status().json()["job_id"])
+        lease = repo.claim_job("routine-worker")
+        assert lease is not None and lease.job_id == job_id
+        jobs = SimulationJobs(repo)
+        for _ in range(10):
+            jobs.advance(scope, lease)
+            if repo.read_job(scope, job_id).status == JobStatus.SUCCEEDED:
+                break
+        else:
+            pytest.fail("Routine world advance did not finish")
+        final = repo.read_world(scope, world_id, branch_id)
+        journey, = final.state.travel_journeys
+        assert journey.departed_tick == 90 and journey.resolved_tick == 120
+        assert journey.status == "arrived" and journey.actor_id == npc
+        assert final.state.entities[npc].location_id == (inside if choose_alternative else outside)
+        final_projection = client.get(player_view).raise_for_status().json()["state"]["entities"]
+        assert str(npc) not in final_projection
+        assert repo.replay(scope, world_id, branch_id, from_genesis=True).state_hash == final.state_hash
+
+
 def test_real_simulation_window_commits_with_job_progress_and_replays(tmp_path):
     app = build_application(data_directory=tmp_path, run_simulation_worker=False)
     with TestClient(app, base_url="http://127.0.0.1:8000") as client:

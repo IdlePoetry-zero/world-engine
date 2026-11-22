@@ -274,6 +274,23 @@ class DailyRoutineComponent(ComponentModel):
         return self
 
 
+class RoutineMobilityComponent(ComponentModel):
+    """Author opt-in for recurring travel to daily routine windows."""
+
+    version: Literal["routine_mobility.v1"] = "routine_mobility.v1"
+    enabled: StrictBool = True
+    alternatives: dict[UUID, Annotated[list[UUID], Field(max_length=8)]] = Field(
+        default_factory=dict, max_length=64,
+    )
+    avoid_conditions: list[BoundedName] = Field(default_factory=list, max_length=16)
+
+    @model_validator(mode="after")
+    def distinct_alternatives(self) -> RoutineMobilityComponent:
+        if any(len(places) != len(set(places)) for places in self.alternatives.values()):
+            raise ValueError("routine alternative places must be distinct within each window")
+        return self
+
+
 class AttributesComponent(ComponentModel):
     values: dict[ResourceName, ExactDecimal | str | int | bool] = Field(default_factory=dict, max_length=256)
 
@@ -1023,6 +1040,7 @@ COMPONENT_REGISTRY: dict[str, ComponentSpec] = {
     "capabilities": ComponentSpec(CapabilitiesComponent, _CHARACTERS),
     "progression": ComponentSpec(ProgressionComponent, _CHARACTERS),
     "daily_routine": ComponentSpec(DailyRoutineComponent, _CHARACTERS),
+    "routine_mobility": ComponentSpec(RoutineMobilityComponent, _CHARACTERS),
     "known_places": ComponentSpec(list[UUID], _CHARACTERS, replaceable=False),
     "place": ComponentSpec(PlaceComponent, _PLACES),
     "market": ComponentSpec(MarketComponent, _PLACES | _ORGANIZATIONS | frozenset({"market"})),
@@ -1057,6 +1075,7 @@ AUTHOR_COMPONENT_NAME = Literal[
     "capabilities",
     "progression",
     "daily_routine",
+    "routine_mobility",
     "known_places",
     "place",
     "market",

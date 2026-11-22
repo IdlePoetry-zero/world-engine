@@ -20,6 +20,7 @@ from .components import (
     COMPONENT_NAME,
     CombatEncounterComponent,
     DailyRoutineComponent,
+    RoutineMobilityComponent,
     GovernanceComponent,
     GoalCondition,
     GoalRecord,
@@ -1406,6 +1407,16 @@ def _validate_entity_components(
                 require_place(window.place_id, f"daily routine window {window.window_id} place_id")
                 if entities[window.place_id].status in {"dead", "retired"}:
                     raise ValueError(f"daily routine window {window.window_id} cannot reference a retired place")
+        mobility = _component_as(entity, "routine_mobility", RoutineMobilityComponent)
+        if mobility is not None:
+            windows = {window.window_id: window for window in routine.windows} if routine is not None else {}
+            for window_id, alternatives in mobility.alternatives.items():
+                if window_id not in windows:
+                    raise ValueError(f"routine mobility references unknown daily window {window_id}")
+                for place_id in alternatives:
+                    require_place(place_id, f"routine mobility alternative for {window_id}")
+                    if place_id == windows[window_id].place_id:
+                        raise ValueError(f"routine mobility alternative for {window_id} must differ from its main place")
 
         life = _component_as(entity, "life", LifeComponent)
         if life is not None and life.birth_tick > current_tick:

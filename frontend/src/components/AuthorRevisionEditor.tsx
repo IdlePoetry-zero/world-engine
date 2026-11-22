@@ -5,12 +5,12 @@ import type { Notice } from '../App'
 import { errorMessage } from '../utils'
 import { Icon } from './Icon'
 
-type RevisionEntity = { id: string; kind: string; name?: string | null; components?: Record<string, unknown> }
+type RevisionEntity = { id: string; kind: string; name?: string | null; status?: string | null; components?: Record<string, unknown> }
 
 const componentLabels: Record<string, string> = {
   life: '生命资料', health: '健康', needs: '需求', skills: '技能', personality: '性格与价值',
   attributes: '自定义数值', capabilities: '能力', progression: '成长', known_places: '已知地点',
-  daily_routine: '每日作息',
+  daily_routine: '每日作息', routine_mobility: '作息出行',
   place: '地点', market: '市场', production: '生产', governance: '治理', treasury: '资金库',
   inventory: '物品清单', population: '人口', public_description: '公开描述', appearance: '外貌',
   public_role: '公开身份', hidden: '隐藏标记', parent_id: '父实体',
@@ -36,6 +36,9 @@ const revisionFieldLabels: Record<string, string> = {
   to_place_id: '目的地点',
   from_place_id: '出发地点',
   access_tags: '通行标签',
+  routine_mobility: '作息出行',
+  alternatives: '备选地点',
+  avoid_conditions: '避开天气',
 }
 
 export function AuthorRevisionEditor({
@@ -60,7 +63,9 @@ export function AuthorRevisionEditor({
   const componentKey = `${entity?.id ?? ''}:${componentName}`
   const originalValue = entity?.components?.[componentName]
   const [draftState, setDraftState] = useState<{ key: string; value: unknown } | null>(null)
-  const defaultDraft = componentName === 'daily_routine' ? { windows: [] } : componentName === 'capabilities' && isNpc ? {} : undefined
+  const defaultDraft = componentName === 'daily_routine' ? { windows: [] }
+    : componentName === 'routine_mobility' ? { enabled: false, alternatives: {}, avoid_conditions: [] }
+    : componentName === 'capabilities' && isNpc ? {} : undefined
   const draft = draftState?.key === componentKey ? draftState.value : cloneJsonValue(originalValue === undefined ? defaultDraft : originalValue)
   const [advancedState, setAdvancedState] = useState<{ key: string; enabled: boolean } | null>(null)
   const advanced = advancedState?.key === componentKey && advancedState.enabled
@@ -164,18 +169,20 @@ export function AuthorRevisionEditor({
   const isProgression = componentName === 'progression'
   const isHidden = componentName === 'hidden'
   const isRoutine = componentName === 'daily_routine'
+  const isRoutineMobility = componentName === 'routine_mobility'
   const rawPopulationSeatPolicy = asRecord(draft).seat_policy
   const hasPopulationSeatPolicy = componentName === 'population'
     && rawPopulationSeatPolicy !== null
     && typeof rawPopulationSeatPolicy === 'object'
     && !Array.isArray(rawPopulationSeatPolicy)
-  const simpleEditor = isPublicText || isPersonality || isAttributes || isHealth || isNpcCapabilities || isProgression || isHidden || isRoutine || componentName === 'place' || componentName === 'governance' || hasPopulationSeatPolicy
+  const simpleEditor = isPublicText || isPersonality || isAttributes || isHealth || isNpcCapabilities || isProgression || isHidden || isRoutine || isRoutineMobility || componentName === 'place' || componentName === 'governance' || hasPopulationSeatPolicy
   const editsJson = advanced || !simpleEditor
   const governanceError = componentName === 'governance' && !advanced ? governanceMembershipError(draft) : ''
   const routineError = isRoutine && !advanced ? routineValidationError(draft, daySeconds) : ''
+  const routineMobilityError = isRoutineMobility && !advanced ? routineWeatherValidationError(draft) : ''
   const waypointOpportunityError = componentName === 'place' && !advanced ? waypointOpportunityValidationError(draft) : ''
   const populationSeatPolicyError = hasPopulationSeatPolicy && !advanced ? populationSeatPolicyValidationError(draft) : ''
-  const canPreview = Boolean(entity && componentName && currentReason.trim() && !busy && !refreshRequired && !governanceError && !routineError && !waypointOpportunityError && !populationSeatPolicyError && branchId && (advanced || simpleEditor || draft !== undefined))
+  const canPreview = Boolean(entity && componentName && currentReason.trim() && !busy && !refreshRequired && !governanceError && !routineError && !routineMobilityError && !waypointOpportunityError && !populationSeatPolicyError && branchId && (advanced || simpleEditor || draft !== undefined))
 
   if (!entities.length || !entity) return <section className="author-revision-panel"><div className="author-revision-heading"><span className="panel-overline">AUTHOR REVISION</span><h3>组件修订</h3></div><p className="author-revision-muted">当前作者投影没有可编辑的实体。</p></section>
 
@@ -189,9 +196,12 @@ export function AuthorRevisionEditor({
       <div className="author-field-heading"><label htmlFor="author-revision-draft">修订内容</label>{simpleEditor && <button type="button" className="text-button author-advanced-toggle" onClick={toggleAdvanced}>{advanced ? '返回表单' : '高级 JSON'} <Icon name="layers" size={13} /></button>}</div>
       {editsJson ? <><textarea id="author-revision-draft" className="author-json-input" value={advancedText} onChange={(event) => { setAdvancedTextState({ key: componentKey, text: event.target.value }); setPreviewState(null); setFailure(null) }} spellCheck={false} aria-label={`${componentLabels[componentName]} JSON`} aria-invalid={fieldErrors.length > 0 || undefined} aria-describedby={fieldErrors.length > 0 ? errorId : undefined} /><p className="author-revision-help">提交整个组件的 JSON 值。修订号由服务端管理；精确小数请用字符串表达。</p></> : isPersonality
         ? <PersonalityComponentFields key={componentKey} draft={draft} originalValue={originalValue} onChange={setDraft} />
-        : <SimpleComponentFields name={componentName} draft={draft} onChange={setDraft} referenceEntities={referenceEntities} daySeconds={daySeconds} />}
+        : isRoutineMobility
+          ? <RoutineMobilityComponentFields key={componentKey} record={asRecord(draft)} routine={asRecord(entity.components?.daily_routine)} entities={referenceEntities} onChange={setDraft} />
+          : <SimpleComponentFields key={componentKey} name={componentName} draft={draft} onChange={setDraft} referenceEntities={referenceEntities} daySeconds={daySeconds} />}
       {governanceError && <p className="author-revision-inline-warning" role="status">{governanceError}</p>}
       {routineError && <p className="author-revision-inline-warning" role="status">{routineError}</p>}
+      {routineMobilityError && <p className="author-revision-inline-warning" role="status">{routineMobilityError}</p>}
       {waypointOpportunityError && <p className="author-revision-inline-warning" role="status">{waypointOpportunityError}</p>}
       {populationSeatPolicyError && <p className="author-revision-inline-warning" role="status">{populationSeatPolicyError}</p>}
       <label className="author-reason-field" htmlFor="author-revision-reason"><span>修订原因</span><textarea id="author-revision-reason" value={currentReason} onChange={(event) => setCurrentReason(event.target.value)} maxLength={1000} rows={2} placeholder="说明这项设定变更的原因" required /></label>
@@ -306,7 +316,7 @@ function RoutineComponentFields({ record, entities, daySeconds, onChange }: { re
     onChange({ ...record, windows: [...windows, { window_id: windowId, start_second: 0, duration_seconds: Math.min(3600, daySeconds), activity: 'rest', place_id: places[0]?.id ?? '' }] })
   }
   return <div className="author-routine-form">
-    <p className="author-revision-help">每日固定时段，仅保存作者设定；当前不会自动执行。时段使用世界历法的秒数，必须位于同一天且不可重叠。</p>
+    <p className="author-revision-help">按世界历法的秒数设置每日时段。时段必须位于同一天且不可重叠。可在「作息出行」中设置 NPC 前往时段地点的条件。</p>
     {windows.length ? <div className="author-routine-list">{windows.map((window, index) => {
       const prefix = `作息时段 ${index + 1}`
       return <fieldset className="author-routine-window" key={window.window_id ?? `window-${index}`}>
@@ -323,6 +333,79 @@ function RoutineComponentFields({ record, entities, daySeconds, onChange }: { re
     <button type="button" className="button button-secondary button-small" onClick={addWindow} disabled={!places.length || windows.length >= 64}><Icon name="plus" size={13} />添加每日时段</button>
     {!places.length && <p className="author-revision-help">作者投影中没有可选地点，请先创建或载入地点。</p>}
   </div>
+}
+
+function RoutineMobilityComponentFields({ record, routine, entities, onChange }: {
+  record: Record<string, unknown>
+  routine: Record<string, unknown>
+  entities: RevisionEntity[]
+  onChange: (value: unknown) => void
+}) {
+  const windows = Array.isArray(routine.windows) ? routine.windows.map(asRecord) : []
+  const alternatives = asRecord(record.alternatives)
+  const places = entities.filter((entity) => isPlaceKind(entity.kind))
+  const setAlternatives = (windowId: string, placeIds: string[]) => {
+    const next = { ...alternatives }
+    if (placeIds.length) next[windowId] = placeIds
+    else delete next[windowId]
+    onChange({ ...record, alternatives: next })
+  }
+
+  return <div className="author-routine-form">
+    <label className="author-toggle-field"><span>启用作息出行</span><input id="author-revision-draft" type="checkbox" checked={record.enabled === true} aria-describedby="author-routine-mobility-help" onChange={(event) => onChange({ ...record, enabled: event.target.checked })} /></label>
+    <p id="author-routine-mobility-help" className="author-revision-help">推进世界时，系统会尝试让 NPC 沿可通行的直达路线准时抵达。玩家角色由玩家自行行动。</p>
+    <label className="author-simple-field">
+      <span>避开的天气标签 <small>用逗号分隔</small></span>
+      <input defaultValue={stringList(record.avoid_conditions)} placeholder="暴雨，暴雪" onChange={(event) => onChange({ ...record, avoid_conditions: parseList(event.target.value.replaceAll('，', ',')) })} />
+      <small>匹配目的地的天气标签。目的地未设置时，使用所属区域的标签。</small>
+    </label>
+    <p className="author-revision-help">首选地点无法按时抵达时，按以下顺序尝试备选地点。删除作息时段前，请先清除该时段的备选地点并提交。</p>
+    {windows.length === 0 && <p className="author-routine-empty">请先在「每日作息」中设置并提交时段。</p>}
+    <div className="author-routine-list">{windows.map((window) => {
+      const windowId = nullableId(window.window_id)
+      if (!windowId) return null
+      const activity = typeof window.activity === 'string' ? routineActivities[window.activity] : undefined
+      const title = `${activity ?? '作息'} · 第 ${String(window.start_second ?? '—')} 秒`
+      const primary = places.find((place) => place.id === window.place_id)
+      const selected = idList(alternatives[windowId])
+      const available = places.filter((place) => place.status !== 'dead' && place.status !== 'retired' && place.id !== window.place_id && !selected.includes(place.id))
+      const move = (index: number, offset: number) => {
+        const next = [...selected]
+        const [placeId] = next.splice(index, 1)
+        next.splice(index + offset, 0, placeId)
+        setAlternatives(windowId, next)
+      }
+      return <fieldset className="author-routine-window" key={windowId}>
+        <legend>{title}</legend>
+        <p className="author-revision-help">首选地点 · {primary?.name || primary?.id || String(window.place_id ?? '—')}</p>
+        {selected.map((placeId, index) => {
+          const placeName = places.find((place) => place.id === placeId)?.name || placeId
+          return <div className="author-attribute-row" key={placeId}>
+            <div className="author-simple-field"><span>备选地点 {index + 1} · {placeName}</span></div>
+            <button type="button" className="button button-secondary button-small" disabled={index === 0} aria-label={`${title} · 上移 ${placeName}`} onClick={() => move(index, -1)}>上移</button>
+            <button type="button" className="button button-secondary button-small" disabled={index === selected.length - 1} aria-label={`${title} · 下移 ${placeName}`} onClick={() => move(index, 1)}>下移</button>
+            <button type="button" className="icon-button" aria-label={`${title} · 移除 ${placeName}`} onClick={() => setAlternatives(windowId, selected.filter((_, position) => position !== index))}><Icon name="close" size={14} /></button>
+          </div>
+        })}
+        {selected.length < 8 && available.length > 0 && <label className="author-simple-field">
+          <span>添加备选地点</span>
+          <select value="" aria-label={`${title} · 添加备选地点`} onChange={(event) => {
+            if (event.target.value) setAlternatives(windowId, [...selected, event.target.value])
+          }}>
+            <option value="">选择地点</option>
+            {available.map((place) => <option key={place.id} value={place.id}>{place.name || place.id}</option>)}
+          </select>
+        </label>}
+      </fieldset>
+    })}</div>
+  </div>
+}
+
+function routineWeatherValidationError(draft: unknown): string {
+  const tags = idList(asRecord(draft).avoid_conditions)
+  if (tags.length > 16) return '避开天气最多可设置 16 项。'
+  if (tags.some((tag) => Array.from(tag).length > 160)) return '每项天气标签最多 160 字。'
+  return ''
 }
 
 function routineValidationError(value: unknown, daySeconds: number): string {
@@ -408,9 +491,10 @@ function waypointOpportunityValidationError(value: unknown): string {
 }
 
 function getAvailableComponents(entity: RevisionEntity | undefined, isNpc: boolean): string[] {
-  const names = Object.keys(entity?.components ?? {}).filter((name) => componentLabels[name])
+  const names = Object.keys(entity?.components ?? {}).filter((name) => componentLabels[name] && (name !== 'routine_mobility' || isNpc))
   if (entity && isCharacterKind(entity.kind) && !names.includes('daily_routine')) names.push('daily_routine')
   if (isNpc && !names.includes('capabilities')) names.push('capabilities')
+  if (isNpc && !names.includes('routine_mobility')) names.push('routine_mobility')
   return names
 }
 
@@ -420,6 +504,13 @@ function PlaceComponentFields({ record, entities, onChange }: { record: Record<s
   const regionValue = nullableId(record.region_id)
   const parentValue = nullableId(record.parent_id)
   const update = (key: string, value: unknown) => onChange({ ...record, [key]: value })
+  const weather = asRecord(record.environment).weather
+  const updateWeather = (value: string) => {
+    const environment = { ...asRecord(record.environment) }
+    if (value.trim()) environment.weather = value.trim()
+    else delete environment.weather
+    update('environment', environment)
+  }
   const opportunities = Array.isArray(record.waypoint_opportunities) ? record.waypoint_opportunities.map(asRecord) : []
   const canGenerateOpportunityId = typeof globalThis.crypto?.randomUUID === 'function'
   const updateOpportunity = (index: number, key: string, value: unknown) => {
@@ -448,6 +539,7 @@ function PlaceComponentFields({ record, entities, onChange }: { record: Record<s
     </div>
     <EntityReferenceSelect label="所属区域" value={regionValue} entities={regions} preservedEntities={placeEntities} onChange={(value) => update('region_id', value)} emptyLabel="不指定区域" />
     <EntityReferenceSelect label="上级地点" value={parentValue} entities={placeEntities} onChange={(value) => update('parent_id', value)} emptyLabel="不指定上级地点" />
+    <label className="author-simple-field"><span>天气标签 <small>可留空</small></span><input defaultValue={typeof weather === 'string' ? weather : ''} maxLength={160} onChange={(event) => updateWeather(event.target.value)} placeholder="暴雨" /><small>用于作息出行。留空时使用所属区域的天气。</small></label>
     <div className="author-routine-form">
       <div className="author-field-heading"><strong>行程停留机会</strong><small>{opportunities.length} / 64</small></div>
       <p className="author-revision-help">机会只提供可选互动；角色实际到达地点并满足时间条件时才会询问。开放 tick 包含边界，关闭 tick 不包含边界；两者均可留空。</p>

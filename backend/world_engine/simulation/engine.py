@@ -59,6 +59,8 @@ from .contracts import (
     WorldAdvancePlan,
 )
 from .npc_work_schedule import NpcWorkTransition, next_npc_work_tick, npc_work_transition
+from .npc_routine_departure import plan_npc_routine_departure
+from .npc_routine_schedule import next_npc_routine_tick
 from .npc_meeting_attendance import (
     NPC_MEETING_ATTENDANCE_DECISION_KIND,
     next_npc_meeting_attendance_boundary,
@@ -1744,6 +1746,21 @@ class SimulationEngine:
                     reason_code="stop_condition_already_satisfied",
                 ),
             )
+        has_mobile_routines = any("routine_mobility" in actor.components for actor in state.entities.values())
+        if has_mobile_routines and context.command_actor_id is not None:
+            routine_departure = plan_npc_routine_departure(
+                state, RuleContext(
+                    world_id=context.world_id, branch_id=context.branch_id, command_id=context.command_id,
+                    actor_id=context.command_actor_id, ruleset_version=context.ruleset_version,
+                ), excluded_actor_ids=context.externally_controlled_actor_ids, rules=self.rule_engine,
+            )
+            if routine_departure is not None:
+                self._reject_unconsumed_decisions(context)
+                self._validate_rule_batch(state, routine_departure)
+                return self._resolved(
+                    state, context, routine_departure, outcome="advanced", boundary="npc_routine_departed",
+                    interruption=None, continuation=plan,
+                )
         if plan.target_tick == state.current_tick:
             self._reject_unconsumed_decisions(context)
             return self._empty(state, context, outcome="completed", reason="target_reached")
@@ -1795,9 +1812,17 @@ class SimulationEngine:
             to_tick, reason = work_tick, "npc_work_boundary"
             reference_id = subject_id = None
 
+        if has_mobile_routines and context.command_actor_id is not None:
+            routine_tick = next_npc_routine_tick(
+                state, to_tick, excluded_actor_ids=context.externally_controlled_actor_ids,
+            )
+            if routine_tick is not None and (routine_tick < to_tick or reason == "world_advance_window"):
+                to_tick, reason = routine_tick, "npc_routine_boundary"
+                reference_id = subject_id = None
+
         stop_boundary = self._next_background_stop_boundary(state, plan.stop_conditions)
         if stop_boundary is not None and state.current_tick < stop_boundary <= to_tick and (
-            stop_boundary < to_tick or external is None and reason != "npc_work_boundary"
+            stop_boundary < to_tick or external is None and reason not in {"npc_work_boundary", "npc_routine_boundary"}
         ):
             to_tick = stop_boundary
             reason = "stop_condition_boundary"
@@ -2034,7 +2059,7 @@ class SimulationEngine:
             isinstance(resolution.outcome.details.get("boundary_tick"), int)
             and resolution.outcome.details["boundary_tick"] == actual_tick
         )
-        if reason in {"background_deprivation_boundary", "npc_work_boundary", "npc_plan_due",
+        if reason in {"background_deprivation_boundary", "npc_work_boundary", "npc_routine_boundary", "npc_plan_due",
                       "autonomous_vacancy_year_boundary", "npc_meeting_start"} or exact_deprivation_due or any(
             isinstance(event, LifeEndedEvent) for event in resolution.events
         ):
