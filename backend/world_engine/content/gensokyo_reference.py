@@ -4,6 +4,7 @@ from uuid import UUID, uuid5
 
 from world_engine.application.world_packs import WorldPackManifest, write_world_pack
 from world_engine.domain.challenges import ChallengeDefinition
+from world_engine.domain.contests import ContestDefinition
 from world_engine.domain.components import PlaceComponent, PlaceRoute, ScheduledEventRecord
 from world_engine.domain.models import ResourceAccount, WorldEntity, WorldState
 from world_engine.domain.story_nodes import STORY_NODE_HANDLER, STORY_NODE_VERSION, StoryNode, StoryReaction
@@ -14,7 +15,7 @@ from .gensokyo_original_profiles import GEOGRAPHY, PROFILES, source_id, source_r
 
 PACK_ID = "author.gensokyo-reference"
 PACK_TITLE = "幻想乡原作资料与异变年代"
-PACK_VERSION = "0.4.0"
+PACK_VERSION = "0.5.0"
 _NAMESPACE = UUID("0d0063f6-45d8-4aaa-9873-135f3d9b5a5f")
 
 _WORKS = {
@@ -115,8 +116,8 @@ _PLACE_TYPES = {
     "netherworld": "region", "old-hell": "region", "sanzu-river": "site",
 }
 _PLACE_PARENTS = {"eientei": "bamboo", "mansion-library": "mansion", "saigyouji-residence": "netherworld"}
-_LATER_REGIONS = frozenset({"moriya-shrine", "old-hell", "myouren-temple"})
-_LATER_PERSON_PROFILES = frozenset({"kosuzu", "kasen", "sanae", "komachi"})
+_PLACE_SOURCE_ORDER = {"moriya-shrine": 10, "old-hell": 11, "myouren-temple": 12}
+_PROFILE_SOURCE_ORDER = {"kosuzu": 14, "kasen": 14, "sanae": 10, "komachi": 9}
 _UNCERTAINTIES = (
     ("scarlet-date", "红雾异变的具体日期", ("红雾日期", "红雾是哪一天"),
      "现已核对的官方故事简介未给出异变发生的世界内年月日。页面给出的发售日期另计。", "historical_event", "official.th06", "故事简介与发售日"),
@@ -161,6 +162,24 @@ def build_reference_entries() -> list[WorldBookEntry]:
           for key, title, aliases, content, source, locator in _RULE_REFERENCES),
         *(_entry(key, title, aliases, content, category, source, locator, status="unknown")
           for key, title, aliases, content, category, source, locator in _UNCERTAINTIES),
+        WorldBookEntry(
+            entry_id=_id("reference:ice-spirit-wording"), source_key="ice-spirit-wording", title="琪露诺的称谓差异",
+            keywords=("琪露诺的种族", "冰妖怪", "冰精"), always_on=False, visibility="public",
+            content="《妖妖梦》人物条目称她为冰的妖怪，《花映塚》的种族栏则登记为妖精。原文用词分别记载。",
+            provenance=WorldBookProvenance(category="person", status="conflicting", citations=(
+                WorldBookCitation(source_id="zun.th07.release-notes", work=_WORKS["zun.th07.release-notes"], locator="琪露诺条目"),
+                WorldBookCitation(source_id="zun.th09.release-notes", work=_WORKS["zun.th09.release-notes"], locator="琪露诺条目的种族栏"),
+            )),
+        ),
+        WorldBookEntry(
+            entry_id=_id("reference:mansion-lake-inference"), source_key="mansion-lake-inference", title="红魔馆湖畔与雾之湖",
+            keywords=("红魔馆旁是什么湖", "红魔馆和雾之湖"), always_on=False, visibility="public",
+            content="两段资料可用来讨论湖畔地形的联系。馆旁湖面与雾之湖的对应在这里保留为地理推断。",
+            provenance=WorldBookProvenance(category="place", status="inferred", citations=(
+                WorldBookCitation(source_id="zun.th07.release-notes", work=_WORKS["zun.th07.release-notes"], locator="十六夜咲夜条目的湖畔描述"),
+                WorldBookCitation(source_id="zun.th14.release-notes", work=_WORKS["zun.th14.release-notes"], locator="琪露诺条目的雾之湖居所"),
+            )),
+        ),
     ]
 
 
@@ -178,16 +197,42 @@ def build_source_index() -> dict[str, dict[str, str]]:
              for key, url in _DIRECT_URLS.items()} | source_register())
 
 
-def _scenario(*, incident: str, description: str, known_incidents: frozenset[str]) -> dict:
+def _opening_routes(places: dict[UUID, WorldEntity]) -> None:
+    # These travel links and durations are for the original roleplay map.
+    links = (
+        ("human-village", "village-observation-post", 60),
+        ("human-village", "bamboo", 360), ("human-village", "shrine", 240),
+        ("human-village", "mansion-lakeshore", 300), ("shrine", "forest", 360),
+        ("mansion-lakeshore", "mansion", 90), ("bamboo", "eientei", 600),
+        ("forest", "youkai-mountain", 180), ("youkai-mountain", "moriya-shrine", 120),
+    )
+    routes: dict[UUID, list[PlaceRoute]] = {}
+    for a, b, duration in links:
+        for start, end in ((a, b), (b, a)):
+            start_id, end_id = _id(f"place:{start}"), _id(f"place:{end}")
+            if start_id in places and end_id in places:
+                routes.setdefault(start_id, []).append(PlaceRoute(
+                    route_id=_id(f"path:{start}:{end}"), from_place_id=start_id, to_place_id=end_id, travel_ticks=duration,
+                ))
+    for ident, exits in routes.items():
+        entity = places[ident]
+        component = PlaceComponent.model_validate(entity.components["place"])
+        places[ident] = entity.model_copy(update={"components": entity.components | {
+            "place": component.model_copy(update={"routes": exits}).model_dump(mode="json"),
+        }})
+
+
+def _scenario(*, incident: str, description: str, document_limit: int, known_incidents: frozenset[str]) -> dict:
     historical_keys = {key for key, *_ in _HISTORY}
-    document_limit = 6 if incident == "scarlet-mist" else 8
     later_profiles = {key for number, profiles in PROFILES.items() if number > document_limit for key, *_ in profiles}
     later_places = {key for number, records in GEOGRAPHY.items() if number > document_limit for key, *_ in records}
     later_rules = {"tech-and-market"} | ({"youkai-powers"} if document_limit < 7 else set())
+    later_notes = {key for key, order in (("ice-spirit-wording", 9), ("mansion-lake-inference", 14)) if order > document_limit}
     entries = [entry for entry in build_reference_entries()
-               if entry.source_key not in _LATER_REGIONS and entry.source_key not in _LATER_PERSON_PROFILES
+               if _PLACE_SOURCE_ORDER.get(entry.source_key, 0) <= document_limit
+               and _PROFILE_SOURCE_ORDER.get(entry.source_key, 0) <= document_limit
                and entry.source_key not in later_profiles and entry.source_key not in later_places
-               and entry.source_key not in later_rules
+               and entry.source_key not in later_rules and entry.source_key not in later_notes
                and (entry.source_key not in historical_keys or entry.source_key in known_incidents)]
     village = _id("place:human-village")
     station = _id("place:village-observation-post")
@@ -203,20 +248,26 @@ def _scenario(*, incident: str, description: str, known_incidents: frozenset[str
         else:
             ident = _id(f"place:{key}")
             places[ident] = WorldEntity(id=ident, name=titles[key], kind="place", components={
-                "place": PlaceComponent(place_type=kind, parent_id=parent_id).model_dump(mode="json"),
+                "place": PlaceComponent(place_type=kind, parent_id=parent_id,
+                    access_policy="private" if key in {"mansion", "eientei"} else "open").model_dump(mode="json"),
             })
-    places[station] = WorldEntity(id=station, name="里外观测棚", kind="place")
-    for location, target in ((village, station), (station, village)):
-        route = PlaceRoute(route_id=_id(f"path:{location}"), from_place_id=location, to_place_id=target, travel_ticks=60)
-        place_type = "settlement" if location == village else "building"
-        places[location] = places[location].model_copy(update={"components": {
-            "place": PlaceComponent(place_type=place_type, routes=[route]).model_dump(mode="json"),
-        }})
+    places[station] = WorldEntity(id=station, name="里外观测棚", kind="place", components={
+        "place": {"place_type": "building"}, "public_description": "值簿、试灯砂和登记牌放在棚里。",
+    })
+    lakeshore = _id("place:mansion-lakeshore")
+    places[lakeshore] = WorldEntity(id=lakeshore, name="红魔馆外湖岸", kind="place", components={
+        "place": {"place_type": "site"}, "public_description": "这里能望见馆墙。通向馆内的门需要访客许可。",
+    })
+    _opening_routes(places)
+    known_places = [_id(f"place:{key}") for key in ("village-observation-post", "bamboo", "shrine", "forest",
+                    "mansion-lakeshore", "youkai-mountain", "moriya-shrine")]
     player = _id("actor:resident")
     assistant = _id("actor:records-keeper")
+    observer = _id("actor:card-assistant")
     materials = "practice.lamp_powder"
     learner_stock, station_stock = _id("account:practice-resident"), _id("account:practice-station")
     spell_challenge = _id("challenge:spell-declaration")
+    contest_id = _id("contest:lamp-spell-cards")
     practices = (
         ("arcana", "灯符术法演练", "术法", "practice.arcana", "12", "11", None),
         ("aura", "妖力辨识", "妖力辨识", "practice.aura", "11", "10", None),
@@ -224,11 +275,16 @@ def _scenario(*, incident: str, description: str, known_incidents: frozenset[str
         ("spell-declaration", "符卡登记演练", "仪式规则", "practice.declaration", "12", "10", _id("challenge:arcana")),
     )
     places[player] = WorldEntity(id=player, name="乡里的观测员", kind="character", location_id=village, components={
-        "capabilities": {"grants": ["world.travel", "practice.clearance"]}, "known_places": [str(station)],
+        "capabilities": {"grants": ["world.travel", "practice.clearance"]},
+        "known_places": [str(ident) for ident in known_places if ident in places],
         "skills": {"skills": {skill_id: {"level": initial_level} for _, _, _, skill_id, initial_level, _, _ in practices}},
     })
     places[assistant] = WorldEntity(id=assistant, name="守簿人笠秋", kind="character", location_id=station,
-                                    components={"public_role": "观测棚值事"})
+        components={"public_role": "观测棚值事", "skills": {"skills": {
+            "practice.arcana": {"level": "11"}, "practice.aura": {"level": "13"}, "practice.declaration": {"level": "10"},
+        }}})
+    places[observer] = WorldEntity(id=observer, name="绘牌学徒秦澄", kind="character", location_id=station,
+                                  components={"public_role": "值班观摩者"})
     observation = _id(f"{incident}:local-observation")
     note = _id(f"{incident}:public-notice")
     node_definitions = [
@@ -250,6 +306,18 @@ def _scenario(*, incident: str, description: str, known_incidents: frozenset[str
             "fallback": {"key": "tentative", "effect": "occurred", "summary": "布告只公布初步情况，注明有待复核。"},
         })),
     ]
+    if incident == "mountain-shrine":
+        mountain = _id("place:youkai-mountain")
+        keeper = _id("actor:mountain-keeper")
+        places[keeper] = WorldEntity(id=keeper, name="山径水尺员蒲一径", kind="character", location_id=mountain,
+            components={"public_role": "给山路来客登记溪水水位的值事"})
+        node_definitions.append((_id("mountain-shrine:pass-notice"), 1020, StoryNode.model_validate({
+            "title": "山路水位簿合页", "visibility": "public", "participant_ids": [keeper],
+            "variants": [{"when": [{"kind": "world_condition", "owner_id": player,
+                "condition": {"kind": "reach_location", "subject_id": player, "target_id": mountain}}],
+                "outcome": {"key": "witnessed", "effect": "mitigated", "summary": "蒲一径把你见证的水位随来客记录一同登记。"}}],
+            "fallback": {"key": "unwitnessed", "effect": "occurred", "summary": "蒲一径先按值班记录封册，见证栏留空。"},
+        })))
     return WorldState(
         player_id=player, entities=places, world_book_entries=entries,
         resources={learner_stock: ResourceAccount(resource_id=materials, owner_id=player, balance=4),
@@ -259,20 +327,36 @@ def _scenario(*, incident: str, description: str, known_incidents: frozenset[str
             "description": "观测棚的原创演练。门槛与材料是本包的游玩配置。", "skill_id": skill_id,
             "skill_label": skill_label, "pass_level": pass_level, "required_capability": "practice.clearance",
             "prerequisite_id": prerequisite,
+            "note_on_pass": "在观测棚练习时，先登记技艺名称和双方的同意，再开始对练。" if key == "arcana" else None,
+            "required_note_from": prerequisite if key == "spell-declaration" else None,
             "fee": {"receiving_account_id": station_stock, "resource_id": materials, "quantity": "1"},
         }) for key, title, skill_label, skill_id, _, pass_level, prerequisite in practices],
+        contest_definitions=[ContestDefinition.model_validate({
+            "definition_id": contest_id, "venue_id": station, "title": "观测棚符卡切磋",
+            "terms": "原创道场规程。双方各声明一项命名技艺并确认，进行三轮无伤练习。按赢下的轮数判定结果，同分为平局。",
+            "proposer_challenge_id": spell_challenge, "npc_routine": {assistant: "lamp.control", observer: None},
+            "routines": [
+                {"key": "lamp.step", "title": "灯纹步", "skills": ["practice.arcana", "practice.aura", "practice.declaration"]},
+                {"key": "lamp.control", "title": "归焰式", "skills": ["practice.declaration", "practice.aura", "practice.arcana"]},
+            ],
+        })],
         story_reactions=[StoryReaction.model_validate({
             "reaction_id": _id(f"{incident}:spell-registration"),
             "when": [{"kind": "challenge_passed", "actor_id": player, "challenge_id": spell_challenge}],
             "node": {"title": "符卡演练登记", "visibility": "public", "participant_ids": [player, assistant],
                      "fallback": {"key": "registered", "effect": "occurred", "summary": "值事登记了这次命名演练的通过记录。"}},
+        }), StoryReaction.model_validate({
+            "reaction_id": _id(f"{incident}:practice-completed"),
+            "when": [{"kind": "contest_result", "actor_id": player, "definition_id": contest_id, "result": "settled"}],
+            "node": {"title": "观测棚切磋纪事", "visibility": "public", "participant_ids": [player, assistant],
+                     "fallback": {"key": "completed", "effect": "occurred", "summary": "观测棚记录了经双方确认完成的命名切磋。"}},
         })],
         scheduled_events=[ScheduledEventRecord(
             id=schedule_id, due_tick=tick, phase="observation", handler_id=STORY_NODE_HANDLER,
             handler_version=STORY_NODE_VERSION, payload=node.model_dump(mode="json"),
         ) for schedule_id, tick, node in node_definitions],
         metadata={"pack_id": PACK_ID, "pack_version": PACK_VERSION, "public_title": PACK_TITLE,
-                  "public_description": description + " 可在观测棚合簿前去找守簿人笠秋。观测棚和合簿是本包原创玩法。",
+                  "public_description": description + " 观测棚和出入口的通行时长属于本包游玩配置。",
                   "resource_catalog": {materials: "试灯砂"},
                   "reference_incident": incident},
     ).model_dump(mode="json")
@@ -282,12 +366,17 @@ def build_archive() -> bytes:
     openings = [
         {"opening_id": "scarlet-mist", "title": "红雾出现后", "position": "红雾已影响日照，世界内日期未定。",
          "known_history": ["幻想乡出现遮挡日照的浓雾。"],
-         "scenario": _scenario(incident="scarlet-mist", description="你在里内负责记录雾的影响。",
+         "scenario": _scenario(incident="scarlet-mist", document_limit=6, description="你在里内负责记录雾的影响。可在合簿前找笠秋。",
                                known_incidents=frozenset({"scarlet-mist"}))},
         {"opening_id": "false-moon", "title": "满月异变之夜", "position": "异常月亮已出现，黎明之前。",
          "known_history": ["今晚的满月与平日不同，人类与妖怪正在查明缘由。"],
-         "scenario": _scenario(incident="false-moon", description="你在里内记录今夜的月相和照明变化。",
+         "scenario": _scenario(incident="false-moon", document_limit=8, description="你在里内记录今夜的月相和照明变化。可在合簿前找笠秋。",
                                known_incidents=frozenset({"scarlet-mist", "late-spring", "false-moon"}))},
+        {"opening_id": "mountain-shrine", "title": "山上新神社出现之后", "position": "新的山上神社已出现，世界内日期未定。",
+         "known_history": ["博丽神社参拜者稀少。", "山上出现一座新神社，两方发生交涉。"],
+         "scenario": _scenario(incident="mountain-shrine", document_limit=10,
+             description="你从人里出发，经过博丽神社和魔法森林可到妖怪之山。蒲一径在山路封水位簿前需要一名见证人。",
+             known_incidents=frozenset({"scarlet-mist", "late-spring", "false-moon", "mountain-shrine"}))},
     ]
     return write_world_pack(manifest=WorldPackManifest(pack_id=PACK_ID, version=PACK_VERSION, title=PACK_TITLE),
                             template={"story_openings": openings})

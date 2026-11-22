@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, Strict
 
 from .components import ExactDecimal, GoalCondition, ResourceName, ScheduledEventRecord, SkillsComponent, Tick
 from .errors import InvalidEvent
+from .contests import contest_score
 from .json_types import JsonObject
 from .npc_goal_completion import goal_condition_met
 from .world_books import WorldBookCitation
@@ -76,9 +77,16 @@ class StoryChallengeGate(_StoryModel):
     challenge_id: UUID
 
 
+class StoryContestGate(_StoryModel):
+    kind: Literal["contest_result"]
+    actor_id: UUID
+    definition_id: UUID
+    result: Literal["win", "loss", "draw", "settled"]
+
+
 StoryGate = Annotated[
     StoryGoalGate | StoryCapabilityGate | StorySkillGate | StoryKnowledgeGate | StoryPriorOutcomeGate
-    | StoryEnvironmentGate | StoryChallengeGate,
+    | StoryEnvironmentGate | StoryChallengeGate | StoryContestGate,
     Field(discriminator="kind"),
 ]
 
@@ -196,6 +204,15 @@ def _gate_passes(state: WorldState, gate: StoryGate) -> bool:
     if isinstance(gate, StoryChallengeGate):
         return any(attempt.actor_id == gate.actor_id and attempt.challenge_id == gate.challenge_id and attempt.passed
                    for attempt in state.challenge_attempts)
+    if isinstance(gate, StoryContestGate):
+        for row in state.contests:
+            if row.status != "settled" or row.definition_id != gate.definition_id or gate.actor_id not in {row.proposer_id, row.recipient_id}:
+                continue
+            left, right = contest_score(row)
+            own, other = (left, right) if gate.actor_id == row.proposer_id else (right, left)
+            if gate.result in {"settled", "win" if own > other else "loss" if own < other else "draw"}:
+                return True
+        return False
     if isinstance(gate, StoryCapabilityGate):
         capabilities = actor.components.get("capabilities", {})
         return gate.capability in capabilities.get("grants", []) and gate.capability not in capabilities.get("restrictions", [])
@@ -290,6 +307,7 @@ def validate_story_state(state: WorldState) -> None:
             raise ValueError("A story milestone receipt conflicts with its schedule.")
     dependencies = TopologicalSorter()
     challenge_ids = {challenge.challenge_id for challenge in state.challenges}
+    contest_ids = {contest.definition_id for contest in state.contest_definitions}
     all_schedules = {schedule.id: schedule for schedule in state.scheduled_events}
     for key, followup in followups.items():
         if followup.after_id not in nodes or (
@@ -314,6 +332,8 @@ def validate_story_state(state: WorldState) -> None:
         for gate in gates:
             if isinstance(gate, StoryChallengeGate) and gate.challenge_id not in challenge_ids:
                 raise ValueError("Story gates may only reference a registered challenge.")
+            if isinstance(gate, StoryContestGate) and gate.definition_id not in contest_ids:
+                raise ValueError("Story gates may only reference a registered contest.")
             if not isinstance(gate, StoryPriorOutcomeGate):
                 continue
             prior = gate.schedule_id

@@ -4,6 +4,7 @@ import { api, ApiError, type Branch, type CharacterEntity, type Conversation, ty
 import { InlineState, PageEmpty } from '../components/States'
 import { Icon } from '../components/Icon'
 import { ChallengesPanel } from '../components/ChallengesPanel'
+import { ContestsPanel } from '../components/ContestsPanel'
 import { InvestigationJournal } from '../components/InvestigationJournal'
 import { InstitutionalCreditPanel } from '../components/InstitutionalCreditPanel'
 import { LeadershipBallotsPanel } from '../components/LeadershipBallotsPanel'
@@ -402,8 +403,11 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
           </li>)}</ul>
         </details>}
         {worldId && branchId && playerId && view && Boolean(state?.local_challenges?.length) &&
-          <ChallengesPanel key={`${branchId}:${playerId}`} worldId={worldId} branchId={branchId} actorId={playerId}
+          <ChallengesPanel key={`challenges:${branchId}:${playerId}`} worldId={worldId} branchId={branchId} actorId={playerId}
             version={view.world.state_version} options={state?.local_challenges ?? []} onRefresh={onRefresh} />}
+        {worldId && branchId && playerId && view && Boolean(state?.local_contests?.length) &&
+          <ContestsPanel key={`contests:${branchId}:${playerId}`} worldId={worldId} branchId={branchId} actorId={playerId}
+            version={view.world.state_version} options={state?.local_contests ?? []} onRefresh={onRefresh} />}
         {playerDead && continuationState && (continuationState.status === 'ready' || continuationState.status === 'error') && (
           <div className="scene-continuation">
             <PlayerContinuationPanel

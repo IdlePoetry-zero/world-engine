@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from graphlib import CycleError, TopologicalSorter
 from typing import TYPE_CHECKING, Annotated, Literal
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StringConstraints
 
-from .components import CapabilitiesComponent, ExactDecimal, ResourceName, SkillsComponent, Tick
+from .components import CapabilitiesComponent, ExactDecimal, KnowledgeRecord, ResourceName, SkillsComponent, Tick, VisibilityScope
 from .errors import InvalidEvent
 from .json_types import JsonObject
 from .story_nodes import StoryTransfer, transfer_is_affordable
@@ -42,6 +42,10 @@ class ChallengeDefinition(_ChallengeModel):
     required_capability: ResourceName | None = None
     prerequisite_id: UUID | None = None
     fee: ChallengeFee | None = None
+    note_on_pass: Annotated[str, StringConstraints(min_length=1, max_length=500)] | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+    required_note_from: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class ChallengeAttempt(_ChallengeModel):
@@ -67,10 +71,16 @@ def _available_at_venue(state: WorldState, actor_id: UUID, definition: Challenge
             and venue.components.get("hidden") is not True)
 
 
-def _prerequisite_passed(state: WorldState, actor_id: UUID, definition: ChallengeDefinition) -> bool:
-    return definition.prerequisite_id is None or any(
+def _has_prerequisites(state: WorldState, actor_id: UUID, definition: ChallengeDefinition) -> bool:
+    if definition.prerequisite_id is not None and not any(
         row.actor_id == actor_id and row.challenge_id == definition.prerequisite_id and row.passed
         for row in state.challenge_attempts
+    ):
+        return False
+    return definition.required_note_from is None or any(
+        record.holder_id == actor_id and record.id == uuid5(definition.required_note_from, f"note:{actor_id}")
+        and record.visibility.policy == "subject_ids" and actor_id in record.visibility.subject_ids
+        for record in state.knowledge
     )
 
 
@@ -79,7 +89,7 @@ def open_challenges(state: WorldState, actor_id: UUID) -> list[dict]:
     catalog = state.metadata.get("resource_catalog", {})
     options = []
     for row in state.challenges:
-        if not _available_at_venue(state, actor_id, row) or not _prerequisite_passed(state, actor_id, row):
+        if not _available_at_venue(state, actor_id, row) or not _has_prerequisites(state, actor_id, row):
             continue
         receipt = own_attempts.get(row.challenge_id)
         label = catalog.get(row.fee.resource_id, row.fee.resource_id) if row.fee and isinstance(catalog, dict) else None
@@ -96,7 +106,7 @@ def open_challenges(state: WorldState, actor_id: UUID) -> list[dict]:
 def settle_challenge(state: WorldState, challenge_id: UUID, actor_id: UUID, event_id: UUID) -> ChallengeResolvedEvent:
     definition = next((row for row in state.challenges if row.challenge_id == challenge_id), None)
     if (definition is None or not _available_at_venue(state, actor_id, definition)
-            or not _prerequisite_passed(state, actor_id, definition)):
+            or not _has_prerequisites(state, actor_id, definition)):
         raise InvalidEvent("当前角色在这里无法参加这项考核。")
     if any(row.actor_id == actor_id and row.challenge_id == challenge_id for row in state.challenge_attempts):
         raise InvalidEvent("当前角色已结算过这项考核。")
@@ -125,6 +135,21 @@ def settle_challenge(state: WorldState, challenge_id: UUID, actor_id: UUID, even
     ))
 
 
+def challenge_note(state: WorldState, event: ChallengeResolvedEvent) -> KnowledgeRecord | None:
+    if not event.attempt.passed:
+        return None
+    definition = next(row for row in state.challenges if row.challenge_id == event.attempt.challenge_id)
+    if definition.note_on_pass is None:
+        return None
+    actor_id = event.attempt.actor_id
+    return KnowledgeRecord(
+        id=uuid5(definition.challenge_id, f"note:{actor_id}"), holder_id=actor_id, subject_id=definition.venue_id,
+        claim=definition.note_on_pass, source_event_id=event.event_id, kind="observation", confidence="1",
+        received_tick=state.current_tick, valid_from_tick=state.current_tick,
+        visibility=VisibilityScope(policy="subject_ids", subject_ids=[actor_id]),
+    )
+
+
 def validate_challenge_state(state: WorldState) -> None:
     if not state.challenges and not state.challenge_attempts:
         return
@@ -144,6 +169,11 @@ def validate_challenge_state(state: WorldState) -> None:
             if row.prerequisite_id not in definitions:
                 raise ValueError("Challenge prerequisites must refer to a registered challenge.")
             prerequisites.add(row.challenge_id, row.prerequisite_id)
+        if row.required_note_from is not None:
+            source = definitions.get(row.required_note_from)
+            if source is None or source.note_on_pass is None:
+                raise ValueError("A required note must be taught by a registered challenge.")
+            prerequisites.add(row.challenge_id, source.challenge_id)
     try:
         prerequisites.prepare()
     except CycleError as error:

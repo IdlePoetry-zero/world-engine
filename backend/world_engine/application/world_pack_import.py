@@ -156,7 +156,15 @@ class WorldPackApplication:
                 return PreparedWorldPack(package, None, (f"介入点 {key} 的开局未通过世界规则校验。",))
             if initial.player_id is None:
                 return PreparedWorldPack(package, None, (f"介入点 {key} 缺少可操控的玩家角色。",))
-            summaries.append({field: item[field] for field in ("opening_id", "title", "position", "known_history")})
+            actor = initial.entities[initial.player_id]
+            place = initial.entities.get(actor.location_id)
+            summaries.append({
+                **{field: item[field] for field in ("opening_id", "title", "position", "known_history")},
+                "opening_state": {
+                    "player_name": actor.name,
+                    "place_name": place.name if place and not place.components.get("hidden") else None,
+                },
+            })
             if key == opening_id:
                 metadata = initial.metadata | {STORY_OPENING_METADATA: key}
                 selected = initial.model_copy(update={"metadata": metadata})

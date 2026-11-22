@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 from world_engine.adapters.models.contracts import Capability
 from world_engine.application.work_chat import WorkPurchaseTargetIntent
 from world_engine.domain.components import ExactDecimal
+from world_engine.domain.contests import ContestAction
 from world_engine.domain.travel_itinerary import MAX_TRAVEL_ITINERARY_LEGS
 
 
@@ -80,6 +81,13 @@ class ChallengeRequest(RequestModel):
     branch_id: UUID
     actor_id: UUID
     expected_state_version: Version
+
+
+class ContestRequest(RequestModel):
+    branch_id: UUID
+    actor_id: UUID
+    expected_state_version: Version
+    action: ContestAction
 
 
 class JobControlRequest(RequestModel):

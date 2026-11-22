@@ -42,6 +42,7 @@ from world_engine.domain.npc_attendance_events import NPC_ATTENDANCE_EVENTS, Npc
 from world_engine.domain.npc_plan_review_events import NpcPlanReviewScheduledEvent, validate_authored_npc_review_scope
 from world_engine.domain.story_nodes import StoryMilestoneResolvedEvent, ready_story_reaction, settle_story_reaction
 from world_engine.domain.challenges import CHALLENGE_COMMAND, ChallengeResolvedEvent
+from world_engine.domain.contests import CONTEST_COMMAND, ContestChangedEvent
 from world_engine.domain.relationship_invitation_events import RelationInvitationChangedEvent
 from world_engine.domain.private_gifts import PrivateGiftChangedEvent
 from world_engine.domain.private_gift_validation import NPC_GIFT_REPLY_COMMAND, validate_private_gift_batch
@@ -440,6 +441,8 @@ class WorldRepository:
             raise InvalidEvent("A new world cannot seed story outcomes without committed milestone events.")
         if state.challenge_attempts:
             raise InvalidEvent("A new world cannot seed challenge receipts without committed attempts.")
+        if state.contests:
+            raise InvalidEvent("A new world cannot seed active or completed contests without committed invitations.")
         if state.npc_plans:
             raise InvalidEvent("A new world cannot seed NPC plans without the registered simulation execution path.")
         if state.promise_trust is not None:
@@ -2039,6 +2042,12 @@ class WorldRepository:
         if len(events) > MAX_EVENTS_PER_COMMAND:
             raise InvalidEvent(f"A command may contain no more than {MAX_EVENTS_PER_COMMAND} events.")
         typed_events = tuple(parse_event(event) for event in events)
+        contest = typed_events[0] if isinstance(typed_events[0], ContestChangedEvent) else None
+        if command.command_type == CONTEST_COMMAND or any(isinstance(item, ContestChangedEvent) for item in typed_events):
+            if (command.command_type != CONTEST_COMMAND or lease is not None or len(typed_events) != 1 or contest is None
+                    or contest.actor_id != command.actor_id or contest.event_id != uuid5(command.command_id, "contest.change")
+                    or command.payload != contest.action.model_dump(mode="json")):
+                raise InvalidEvent("Contest settlement requires the exact controlling actor's explicit command.")
         if command.command_type == CHALLENGE_COMMAND or any(isinstance(item, ChallengeResolvedEvent) for item in typed_events):
             if (command.command_type != CHALLENGE_COMMAND or lease is not None or len(typed_events) != 1
                     or not isinstance(typed_events[0], ChallengeResolvedEvent)):
@@ -2497,6 +2506,10 @@ class WorldRepository:
                 )
 
                 state = npc_before_state if npc_before_state is not None else self._checked_branch_state(branch)
+                if contest is not None and contest.action.operation == "ask_npc":
+                    if contest.contest.recipient_id == state.player_id:
+                        raise AccessDenied("The current player must respond for themselves.")
+                    self._require_uncontrolled_npc(session, scope, world, role, contest.contest.recipient_id)
                 if npc_reflection_memory_batch:
                     npc_reflection_commit_pending = self._validate_npc_reflection_memory_commit_in_session(
                         session, world, branch, leased_job, role, scope, command, typed_events,

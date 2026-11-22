@@ -105,6 +105,7 @@ from .travel_journey_events import TravelJourneyChangedEvent
 from .world_books import WorldBookEntry, WorldBookImportedEvent
 from .story_nodes import StoryFollowup, StoryMilestone, StoryMilestoneResolvedEvent, StoryReaction, validate_story_state
 from .challenges import ChallengeAttempt, ChallengeDefinition, ChallengeResolvedEvent, validate_challenge_state
+from .contests import ContestChangedEvent, ContestDefinition, ContestRecord, validate_contest_state
 from .waypoint_opportunity_events import WaypointOpportunityDecision, WaypointOpportunityDecisionRecordedEvent
 
 ResourceId = Annotated[str, Field(min_length=1, max_length=160, pattern=r"^[a-zA-Z][a-zA-Z0-9_.-]*$")]
@@ -267,6 +268,8 @@ class WorldState(ContractModel):
     story_milestones: list[StoryMilestone] = Field(default_factory=list, exclude_if=lambda records: not records)
     challenges: list[ChallengeDefinition] = Field(default_factory=list, max_length=256, exclude_if=lambda records: not records)
     challenge_attempts: list[ChallengeAttempt] = Field(default_factory=list, exclude_if=lambda records: not records)
+    contest_definitions: list[ContestDefinition] = Field(default_factory=list, max_length=128, exclude_if=lambda records: not records)
+    contests: list[ContestRecord] = Field(default_factory=list, max_length=100_000, exclude_if=lambda records: not records)
     investigation_cases: list[InvestigationCaseFile] = Field(default_factory=list)
     public_accusation_corrections: list[PublicAccusationCorrection] = Field(
         default_factory=list,
@@ -353,6 +356,8 @@ class WorldState(ContractModel):
                 (StoryFollowup, self.story_followups),
                 (ChallengeDefinition, self.challenges),
                 (ChallengeAttempt, self.challenge_attempts),
+                (ContestDefinition, self.contest_definitions),
+                (ContestRecord, self.contests),
             ):
                 for value in records:
                     raw = value.model_dump(mode="json") if isinstance(value, BaseModel) else value
@@ -596,6 +601,7 @@ class WorldState(ContractModel):
                 raise ValueError(f"scheduled event {event.id} references missing dependencies")
         validate_story_state(self)
         validate_challenge_state(self)
+        validate_contest_state(self)
         validate_shipment_state(self)
         validate_promise_state(self)
         if self.relationship_invitations:
@@ -1100,6 +1106,7 @@ type DomainEvent = Annotated[
     | ScheduledEventCompletedEvent
     | StoryMilestoneResolvedEvent
     | ChallengeResolvedEvent
+    | ContestChangedEvent
     | ResourceAccountOpenedEvent
     | EnvironmentalSourceAccountOpenedEvent
     | NpcPlanCreatedEvent

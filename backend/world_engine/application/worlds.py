@@ -12,6 +12,7 @@ from uuid import UUID, uuid5
 from world_engine.domain.components import PlaceComponent
 from world_engine.domain.errors import AccessDenied, Conflict, InvalidEvent, NotFound, StaleVersion
 from world_engine.domain.challenges import CHALLENGE_COMMAND, CHALLENGE_RESOLVED, open_challenges, settle_challenge
+from world_engine.domain.contests import CONTEST_CHANGED, CONTEST_COMMAND, ContestAction, ContestRecord, contest_view, describe_contest, plan_contest
 from world_engine.domain.leadership_ballots import leadership_ballot_is_invalidated
 from world_engine.domain.models import (
     AccessScope, BranchRecord, CommandEnvelope, MembershipRole, NewWorld, WorldEntity, WorldRecord, WorldState,
@@ -189,6 +190,19 @@ class WorldApplication:
                 projected = self._build_player_projection(scope, view, actor_id)
                 self._store_player_projection(cache_key, projected)
             self._add_fresh_truce_authorization(scope, world_id, view.world, view.state.player_id, projected)
+            if view.state.contest_definitions:
+                choices = contest_view(view.state, actor_id)
+                for row in (row for choice in choices for row in choice["recent"] if row["can_ask_npc"]):
+                    recipient = UUID(row["recipient_id"])
+                    row["can_ask_npc"] = False
+                    if recipient != view.state.player_id and scope.user_id == view.world.owner_id:
+                        try:
+                            self.repository.authorize_hosted_npc(scope, world_id, recipient)
+                            row["can_ask_npc"] = True
+                        except AccessDenied:
+                            pass
+                if choices:
+                    projected["local_contests"] = choices
             return self._world_view_response(view, projected, mode="player")
 
         return self.repository.project_verified_player_view(scope, world_id, branch_id, project)
@@ -493,6 +507,35 @@ class WorldApplication:
 
     def list_branches(self, scope: AccessScope, world_id: UUID) -> dict[str, Any]:
         return {"items": [self._branch_header(b) for b in self.repository.list_branches(scope, world_id)]}
+
+    def change_contest(
+        self, scope: AccessScope, world_id: UUID, branch_id: UUID, actor_id: UUID, action: ContestAction,
+        expected_state_version: int, idempotency_key: str,
+    ) -> dict[str, Any]:
+        key = "contest:" + hashlib.sha256(idempotency_key.encode()).hexdigest()
+        command_id = uuid5(world_id, f"{scope.user_id}:{branch_id}:{key}")
+        payload = action.model_dump(mode="json")
+        result = self.repository.read_command_receipt(scope, world_id, branch_id, command_id, actor_id, key)
+        if result is None:
+            view = self.repository.read_world(scope, world_id, branch_id)
+            if self.resolve_player(scope, view) != actor_id:
+                raise AccessDenied("This contest operation requires the current player character.")
+            if view.branch.state_version != expected_state_version:
+                result = self.repository.read_command_receipt(scope, world_id, branch_id, command_id, actor_id, key)
+                if result is None:
+                    raise StaleVersion(expected_state_version, view.branch.state_version)
+        if result is None:
+            try:
+                event = plan_contest(view.state, actor_id, action, uuid5(command_id, "contest.change"))
+            except InvalidEvent as error:
+                raise ApplicationFailure("CONTEST_UNAVAILABLE", str(error), status_code=409) from error
+            command = CommandEnvelope(command_id=command_id, actor_id=actor_id, idempotency_key=key,
+                expected_state_version=expected_state_version, command_type=CONTEST_COMMAND, payload=payload)
+            result = self.repository.commit_command(scope, world_id, branch_id, command, [event])
+        receipt, = (item for item in result.events if item.type == CONTEST_CHANGED)
+        if receipt.payload["action"] != payload or result.state_version != expected_state_version + 1:
+            raise Conflict("This contest key was already used for a different action.")
+        return describe_contest(ContestRecord.model_validate(receipt.payload["contest"])) | {"state_version": str(result.state_version)}
 
     def fork_branch(
         self, scope: AccessScope, world_id: UUID, source_id: UUID, sequence: int,

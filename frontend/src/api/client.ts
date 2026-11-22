@@ -42,7 +42,13 @@ export type WorldPackPreview = {
   blockers: string[]
   contains_author_material: boolean
   archive_sha256: string
-  story_openings?: { opening_id: string; title: string; position: string; known_history: string[] }[]
+  story_openings?: {
+    opening_id: string
+    title: string
+    position: string
+    known_history: string[]
+    opening_state?: { player_name: string | null; place_name: string | null }
+  }[]
 }
 export type WorldPackImportResult = World & { duplicate: boolean }
 export type ChallengeOption = {
@@ -53,6 +59,29 @@ export type ChallengeOption = {
   pass_level: string
   fee: { resource_id: string; quantity: string; label: string } | null
   passed: boolean | null
+}
+export type ContestAction =
+  | { operation: 'invite'; definition_id: string; recipient_id: string; routine: string }
+  | { operation: 'reply'; contest_id: string; routine: string | null }
+  | { operation: 'ask_npc' | 'settle' | 'withdraw'; contest_id: string }
+export type ContestResult = {
+  contest_id: string
+  status: 'invited' | 'accepted' | 'declined' | 'withdrawn' | 'settled'
+  proposer_id: string
+  recipient_id: string
+  winner_id: string | null
+  proposer_wins: number
+  recipient_wins: number
+  rounds: number
+}
+export type ContestOption = {
+  definition_id: string
+  title: string
+  terms: string
+  can_invite: boolean
+  opponents: { id: string; name: string }[]
+  routines: { key: string; title: string }[]
+  recent: (ContestResult & { can_ask_npc: boolean })[]
 }
 export type TemplateUpdateChange = {
   entity_id: string
@@ -551,6 +580,7 @@ export type WorldState = {
   world_book_entries?: WorldBookEntry[] | null
   story_milestones?: { record_id: string; title: string; summary: string; resolved_tick: string }[]
   local_challenges?: ChallengeOption[]
+  local_contests?: ContestOption[]
   metadata?: Record<string, unknown>
   resources: Record<string, ResourceAccount>
   own_shipments?: OwnShipment[]
@@ -1101,6 +1131,8 @@ export const api = {
   }, key: string) => post<{ passed: boolean; state_version: string }>(
     `/worlds/${encodeURIComponent(worldId)}/challenges/${encodeURIComponent(challengeId)}/attempt`, body, key,
   ),
+  changeContest: (worldId: string, body: { branch_id: string; actor_id: string; expected_state_version: string; action: ContestAction }, key: string) =>
+    post<ContestResult & { state_version: string }>(`/worlds/${encodeURIComponent(worldId)}/contests`, body, key),
   command: (commandId: string) => get<CommandStatus>(`/commands/${encodeURIComponent(commandId)}`),
   listProviders: () => get<{ items: Provider[] }>('/providers'),
   createProvider: (body: ProviderDraft) => post<Provider>('/providers', body, crypto.randomUUID()),

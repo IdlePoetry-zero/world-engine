@@ -9,9 +9,10 @@ from world_engine.content.distant_station_story import build_archive as build_st
 from world_engine.content.gensokyo_reference import build_archive
 from world_engine.domain.components import ScheduledEventRecord
 from world_engine.domain.challenges import ChallengeDefinition, settle_challenge
+from world_engine.domain.contests import ReplyContest
 from world_engine.domain.errors import InvalidEvent
 from world_engine.domain.gameplay_events import ScheduledEventCompletedEvent
-from world_engine.domain.models import JobStatus, TimeAdvancedEvent, WorldEntity, WorldState
+from world_engine.domain.models import AccessScope, JobStatus, MembershipRole, TimeAdvancedEvent, WorldEntity, WorldState
 from world_engine.domain.reducers import apply_event, ledger_postings
 from world_engine.domain.story_nodes import (
     STORY_NODE_HANDLER, STORY_NODE_VERSION, StoryNode, StoryMilestoneResolvedEvent, settle_story_milestone,
@@ -38,6 +39,19 @@ def _run_http_job(client, repository, jobs, scope, world_id, branch, endpoint, d
         if repository.read_job(scope, job_id).status == JobStatus.SUCCEEDED:
             return
     pytest.fail("Simulation did not settle the story boundaries")
+
+
+def _contest_http(client, repository, scope, world_id, branch, action, *, expected=200):
+    view = repository.read_world(scope, world_id, branch)
+    headers = {"Idempotency-Key": str(uuid4())}
+    payload = {"branch_id": str(branch), "actor_id": str(view.state.player_id),
+               "expected_state_version": str(view.branch.state_version), "action": action}
+    url = f"/api/v1/worlds/{world_id}/contests"
+    response = client.post(url, json=payload, headers=headers)
+    assert response.status_code == expected, response.text
+    if expected == 200:
+        assert client.post(url, json=payload, headers=headers).raise_for_status().json() == response.json()
+    return response.json()
 
 
 def test_gensokyo_milestones_follow_committed_player_travel_across_forks_and_restore(tmp_path):
@@ -71,10 +85,12 @@ def test_gensokyo_milestones_follow_committed_player_travel_across_forks_and_res
 
         assert "story_milestones" not in state(main)
         assert "local_challenges" not in state(main)
-        route, = state(other)["travel_options"]
+        route = next(row for row in state(other)["travel_options"] if row["destination_name"] == "里外观测棚")
         perform(other, "long-actions", 60, activity="travel", route_id=route["route_id"])
         local = state(other)
         exercises = {row["title"]: row for row in local["local_challenges"]}
+        contest, = local["local_contests"]
+        assert not contest["can_invite"]
         assert "符卡登记演练" not in exercises
         assert exercises["灯符术法演练"]["fee"]["label"] == "试灯砂"
 
@@ -89,6 +105,9 @@ def test_gensokyo_milestones_follow_committed_player_travel_across_forks_and_res
             return result["passed"]
 
         assert attempt(exercises["灯符术法演练"], "arcana")
+        notes = state(other)["knowledge"]
+        assert any("登记技艺名称" in row["claim"] for row in notes)
+        assert not any("登记技艺名称" in row["claim"] for row in state(main)["knowledge"])
         assert attempt(exercises["妖力辨识"], "aura")
         assert not attempt(exercises["外界仪具辨用"], "tools")
         unlocked = next(row for row in state(other)["local_challenges"] if row["title"] == "符卡登记演练")
@@ -98,6 +117,41 @@ def test_gensokyo_milestones_follow_committed_player_travel_across_forks_and_res
         assert len(after_practice.state.challenge_attempts) == 4
         assert [row.balance for row in after_practice.state.resources.values() if row.owner_id == after_practice.state.player_id] == [0]
         assert any(row["title"] == "符卡演练登记" for row in state(other)["story_milestones"])
+        contest, = state(other)["local_contests"]
+        assert contest["can_invite"]
+        opponents = {row["name"]: row["id"] for row in contest["opponents"]}
+
+        def invite(name):
+            return _contest_http(client, repository, scope, world_id, other, {
+                "operation": "invite", "definition_id": contest["definition_id"], "recipient_id": opponents[name], "routine": "lamp.step",
+            })["contest_id"]
+
+        def change(ident, operation, expected=200, **extras):
+            return _contest_http(client, repository, scope, world_id, other,
+                                 {"operation": operation, "contest_id": ident, **extras}, expected=expected)
+
+        declined = invite("绘牌学徒秦澄")
+        assert change(declined, "ask_npc")["status"] == "declined"
+        assigned = invite("绘牌学徒秦澄")
+        second_user = uuid4()
+        controlled = UUID(opponents["绘牌学徒秦澄"])
+        repository.grant_membership(scope, world_id, second_user, MembershipRole.PLAYER, controlled_actor_ids=[controlled])
+        change(assigned, "ask_npc", expected=403)
+        waiting = next(row for row in state(other)["local_contests"][0]["recent"] if row["contest_id"] == assigned)
+        assert not waiting["can_ask_npc"]
+        version = repository.read_world(scope, world_id, other).branch.state_version
+        reply = app.state.worlds.change_contest(AccessScope(tenant_id=scope.tenant_id, user_id=second_user), world_id, other,
+            controlled, ReplyContest(operation="reply", contest_id=UUID(assigned)), version, "own-decline")
+        assert reply["status"] == "declined"
+
+        practice = invite("守簿人笠秋")
+        change(practice, "settle", expected=409)
+        change(practice, "reply", expected=409, routine="lamp.control")
+        assert change(practice, "ask_npc")["status"] == "accepted"
+        result = change(practice, "settle")
+        assert (result["proposer_wins"], result["recipient_wins"], result["rounds"]) == (2, 1, 3)
+        assert result["winner_id"] == str(after_practice.state.player_id)
+        assert any(row["title"] == "观测棚切磋纪事" for row in state(other)["story_milestones"])
         perform(other, "long-actions", 120, activity="wait")
         perform(main, "world-advance", 180)
         main_records = state(main)["story_milestones"]
@@ -177,6 +231,12 @@ def test_station_arrival_cascades_at_the_action_tick_and_moves_real_stock(tmp_pa
                 "expected_state_version": str(arrived.branch.state_version),
             }).raise_for_status().json()
         assert assessed["passed"] is True
+        contest, = state(main)["local_contests"]
+        notice = _contest_http(client, repository, scope, world_id, main, {"operation": "invite", "definition_id": contest["definition_id"],
+            "recipient_id": contest["opponents"][0]["id"], "routine": "station.readout"})
+        _contest_http(client, repository, scope, world_id, main, {"operation": "ask_npc", "contest_id": notice["contest_id"]})
+        result = _contest_http(client, repository, scope, world_id, main, {"operation": "settle", "contest_id": notice["contest_id"]})
+        assert result["status"] == "settled" and result["winner_id"] == str(arrived.state.player_id)
         pending_audit, = [row for row in arrived.state.scheduled_events if row.due_tick == 90]
         assert pending_audit.status == "queued"
         assert "应急电路复查" not in str(state(main))
@@ -206,6 +266,50 @@ def test_station_arrival_cascades_at_the_action_tick_and_moves_real_stock(tmp_pa
                 assert restored.replay(scope, world_id, delayed, from_genesis=True).state_hash == delayed_state.state_hash
             finally:
                 db.dispose()
+
+
+def test_later_opening_has_a_traversable_mountain_and_private_estate_entrance(tmp_path):
+    app = build_application(data_directory=tmp_path, run_simulation_worker=False)
+    scope = local_identity(tmp_path)
+    repository = app.state.worlds.repository
+    jobs = SimulationJobs(repository)
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        client.get("/api/v1/session").raise_for_status()
+        source = build_archive()
+        headers = {"Content-Type": "application/zip", "Origin": "http://127.0.0.1:8000"}
+        preview = client.post("/api/v1/packs/import/preview", content=source, headers=headers).raise_for_status().json()
+        assert [row["opening_id"] for row in preview["story_openings"]] == ["scarlet-mist", "false-moon", "mountain-shrine"]
+        world = client.post("/api/v1/packs/import", content=source, headers=headers | {
+            "Idempotency-Key": "mountain-opening", "X-World-Pack-Sha256": preview["archive_sha256"], "X-Story-Opening": "mountain-shrine",
+        }).raise_for_status().json()
+        world_id, main = UUID(world["world_id"]), UUID(world["active_branch_id"])
+        path = f"/api/v1/worlds/{world_id}"
+        shore_branch = UUID(client.post(f"{path}/branches", headers={"Idempotency-Key": "lakeshore"}, json={
+            "branch_id": str(main), "sequence": "0", "label": "Visit the lakeshore",
+        }).raise_for_status().json()["branch_id"])
+
+        def view(branch):
+            return client.get(f"{path}/view", params={"branch_id": str(branch)}).raise_for_status().json()["state"]
+
+        def travel(branch, title):
+            route = next(item for item in view(branch)["travel_options"] if item["destination_name"] == title)
+            _run_http_job(client, repository, jobs, scope, world_id, branch, "long-actions",
+                          int(route["travel_ticks"]), activity="travel", route_id=route["route_id"])
+
+        travel(shore_branch, "红魔馆外湖岸")
+        assert "红魔馆" not in {item["destination_name"] for item in view(shore_branch)["travel_options"]}
+        for name in ("博丽神社", "魔法森林", "妖怪之山"):
+            travel(main, name)
+        state = view(main)
+        assert any(row["name"] == "山径水尺员蒲一径" for row in state["entities"].values())
+        assert any(row["destination_name"] == "守矢神社" for row in state["travel_options"])
+        _run_http_job(client, repository, jobs, scope, world_id, main, "world-advance", 240)
+        assert "你见证的水位" in view(main)["story_milestones"][-1]["summary"]
+        travel(main, "守矢神社")
+        arrived = repository.read_world(scope, world_id, main)
+        player = arrived.state.entities[arrived.state.player_id]
+        assert arrived.state.entities[player.location_id].name == "守矢神社"
+        assert repository.replay(scope, world_id, main, from_genesis=True).state_hash == arrived.state_hash
 
 
 def test_milestone_reducer_enforces_conditions_and_immutable_event_scope():

@@ -124,6 +124,8 @@ export function WorldPackImport({ connecting, onImported }: { connecting: boolea
             </label>
             {selectedOpening && <div className="author-revision-help">
               <p>{selectedOpening.position}</p>
+              {selectedOpening.opening_state?.player_name && <p>开场角色 {selectedOpening.opening_state.player_name}</p>}
+              {selectedOpening.opening_state?.place_name && <p>开场地点 {selectedOpening.opening_state.place_name}</p>}
               {selectedOpening.known_history.length > 0 && <><strong>开局已知历史</strong>
                 <ul>{selectedOpening.known_history.map((item, index) => <li key={index}>{item}</li>)}</ul>
               </>}

@@ -14,7 +14,8 @@ from pydantic import TypeAdapter
 from pydantic_core import to_jsonable_python
 
 from .errors import InsufficientResources, InvalidEvent
-from .challenges import ChallengeResolvedEvent, settle_challenge
+from .challenges import ChallengeResolvedEvent, challenge_note, settle_challenge
+from .contests import ContestChangedEvent, plan_contest
 from .story_nodes import (
     STORY_NODE_HANDLER, StoryMilestone, StoryMilestoneResolvedEvent, ready_story_reaction,
     settle_story_milestone, settle_story_reaction, story_followup_schedules,
@@ -1361,7 +1362,20 @@ def apply_event(state: WorldState, raw_event: DomainEvent | dict[str, object]) -
             raise InvalidEvent("The challenge attempt does not match its registered terms.")
         if event.fee is not None:
             state = apply_event(state, ResourceTransferredEvent(event_id=event.event_id, **event.fee.model_dump()))
-        return _validated_state(state, {"challenge_attempts": [*state.challenge_attempts, attempt]})
+        note = challenge_note(state, event)
+        updates = {"challenge_attempts": [*state.challenge_attempts, attempt]}
+        if note is not None:
+            updates["knowledge"] = [*state.knowledge, note]
+        return _validated_state(state, updates)
+
+    if isinstance(event, ContestChangedEvent):
+        if event != plan_contest(state, event.actor_id, event.action, event.event_id):
+            raise InvalidEvent("The contest result does not match its participants, terms, and current state.")
+        if event.action.operation == "invite":
+            contests = [*state.contests, event.contest]
+        else:
+            contests = [event.contest if item.contest_id == event.contest.contest_id else item for item in state.contests]
+        return _validated_state(state, {"contests": contests})
 
     if isinstance(event, StoryMilestoneResolvedEvent):
         ident = event.milestone.schedule_id

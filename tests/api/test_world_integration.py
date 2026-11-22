@@ -122,8 +122,13 @@ def test_story_world_pack_previews_history_and_starts_a_selected_genesis(service
     response = client.post("/api/v1/packs/import/preview", headers=upload, content=source).raise_for_status()
     report = response.json()
     assert report["can_import"]
-    assert report["story_openings"] == [{key: value for key, value in item.items() if key != "scenario"}
-                                        for item in (opening, later)]
+    actor = baseline.entities[baseline.player_id]
+    place = baseline.entities[actor.location_id]
+    assert report["story_openings"] == [
+        {key: value for key, value in item.items() if key != "scenario"}
+        | {"opening_state": {"player_name": "Traveler", "place_name": place.name}}
+        for item in (opening, later)
+    ]
     assert "future betrayal" not in response.text
     headers = upload | {"X-World-Pack-Sha256": report["archive_sha256"], "Idempotency-Key": "story-1"}
     no_selection = client.post("/api/v1/packs/import", headers=headers, content=source)
