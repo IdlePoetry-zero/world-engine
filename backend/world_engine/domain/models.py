@@ -1410,6 +1410,8 @@ def _validate_entity_components(
         mobility = _component_as(entity, "routine_mobility", RoutineMobilityComponent)
         if mobility is not None:
             windows = {window.window_id: window for window in routine.windows} if routine is not None else {}
+            if not mobility.cadences.keys() <= windows.keys():
+                raise ValueError("routine mobility cadence must reference an existing daily window")
             for window_id, alternatives in mobility.alternatives.items():
                 if window_id not in windows:
                     raise ValueError(f"routine mobility references unknown daily window {window_id}")

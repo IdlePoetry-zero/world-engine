@@ -109,7 +109,7 @@ def test_catalog_lists_three_distinct_full_packs(catalog: ContentCatalog) -> Non
     }
     assert len({pack["summary"] for pack in packs}) == 3
     assert {pack["version"] for pack in packs} == {"2.0.0"}
-    assert all(pack["available_versions"] == ["2.0.0", "2.2.0", "2.3.0", "2.8.0"] for pack in packs)
+    assert all(pack["available_versions"] == ["2.0.0", "2.2.0", "2.3.0", "2.8.0", "2.12.0"] for pack in packs)
     assert all(pack["capacity"] == {
         "countries": 24,
         "organizations": 24,

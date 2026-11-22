@@ -53,7 +53,7 @@ def test_feudal_2_9_is_only_listed_for_sustained_low_magic() -> None:
     catalog = ContentCatalog()
     listed = {pack["pack_id"]: pack for pack in catalog.list_packs()}
 
-    assert listed["low_magic_feudal"]["available_versions"] == ["2.0.0", "2.2.0", "2.3.0", "2.8.0"]
+    assert listed["low_magic_feudal"]["available_versions"] == ["2.0.0", "2.2.0", "2.3.0", "2.8.0", "2.12.0"]
     assert listed["low_magic_feudal"]["sustained_available_versions"] == ["2.4.0", _PACK_VERSION]
     assert listed["long_life_cultivation"]["sustained_available_versions"] == ["2.4.0", "2.11.0"]
     assert listed["modern_city"]["sustained_available_versions"] == [

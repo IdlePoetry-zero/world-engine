@@ -19,17 +19,27 @@ from world_engine.simulation.contracts import WorldAdvancePlan
 from world_engine.simulation.engine import SimulationEngine, SimulationPolicy
 
 
-@pytest.mark.parametrize("weather,choose_alternative", [("clear", False), ("storm", True)])
-def test_world_advance_commits_actual_routine_route_and_replays(tmp_path, weather, choose_alternative):
+@pytest.mark.parametrize(("job_activity", "weather", "choose_alternative", "phase_day"), [
+    ("world-advance", "clear", False, 0), ("world-advance", "storm", True, 0),
+    ("rest", "storm", True, 0), ("wait", "clear", False, 0), ("travel", "storm", True, 0),
+    ("wait", "clear", False, 1),
+])
+def test_simulation_commits_actual_routine_route_and_replays(tmp_path, job_activity, weather, choose_alternative, phase_day):
     app = build_application(data_directory=tmp_path, run_simulation_worker=False)
     with TestClient(app, base_url="http://127.0.0.1:8000") as client:
         client.get("/api/v1/session").raise_for_status()
         scope = local_identity(tmp_path)
         repo = app.state.worlds.repository
-        player, npc, origin, outside, inside, window = (uuid4() for _ in range(6))
+        player, npc, origin, outside, inside, window, trail_end = (uuid4() for _ in range(7))
         routes = [PlaceRoute(route_id=uuid4(), from_place_id=origin, to_place_id=place, travel_ticks=30)
                   for place in (outside, inside)]
-        state = WorldState(player_id=player, entities={
+        player_route = PlaceRoute(route_id=uuid4(), from_place_id=origin, to_place_id=trail_end, travel_ticks=180)
+        routes.append(player_route)
+        day_seconds = 1200
+        mobility = {"alternatives": {str(window): [str(inside)]}, "avoid_conditions": ["storm"]}
+        if phase_day:
+            mobility["cadences"] = {str(window): {"every_days": 2, "phase_day": phase_day}}
+        state = WorldState(player_id=player, calendar={"day_seconds": day_seconds}, entities={
             origin: WorldEntity(id=origin, kind="place", components={
                 "place": PlaceComponent(place_type="settlement", routes=routes).model_dump(mode="json"),
             }),
@@ -37,12 +47,15 @@ def test_world_advance_commits_actual_routine_route_and_replays(tmp_path, weathe
                 "place": {"place_type": "settlement", "environment": {"weather": weather}},
             }),
             inside: WorldEntity(id=inside, kind="place", components={"place": {"place_type": "settlement"}}),
-            player: WorldEntity(id=player, kind="character", location_id=origin),
+            trail_end: WorldEntity(id=trail_end, kind="place", components={"place": {"place_type": "settlement"}}),
+            player: WorldEntity(id=player, kind="character", location_id=origin, components={
+                "capabilities": {"grants": ["world.travel"]}, "needs": {"rest": {"value": 40}},
+            }),
             npc: WorldEntity(id=npc, kind="character", location_id=origin, components={
                 "capabilities": {"grants": ["world.travel"]},
                 "daily_routine": {"windows": [{"window_id": str(window), "start_second": 120,
                                                "duration_seconds": 600, "activity": "study", "place_id": str(outside)}]},
-                "routine_mobility": {"alternatives": {str(window): [str(inside)]}, "avoid_conditions": ["storm"]},
+                "routine_mobility": mobility,
             }),
         })
         created = repo.create_world(scope, NewWorld(title="Routine routes", state=state))
@@ -51,8 +64,14 @@ def test_world_advance_commits_actual_routine_route_and_replays(tmp_path, weathe
         before_projection = client.get(player_view).raise_for_status().json()["state"]["entities"]
         assert str(npc) in before_projection
         assert "routine_mobility" not in before_projection[str(npc)]["components"]
-        response = client.post(f"/api/v1/worlds/{world_id}/world-advance", headers={"Idempotency-Key": "routine"},
-                               json={"branch_id": str(branch_id), "expected_state_version": "0", "duration_seconds": 120})
+        endpoint = "world-advance" if job_activity == "world-advance" else "long-actions"
+        occurrence = day_seconds * phase_day + 120
+        body = {"branch_id": str(branch_id), "expected_state_version": "0", "duration_seconds": occurrence}
+        if job_activity != "world-advance":
+            body["activity"] = job_activity
+        if job_activity == "travel":
+            body.update(duration_seconds=180, route_id=str(player_route.route_id))
+        response = client.post(f"/api/v1/worlds/{world_id}/{endpoint}", headers={"Idempotency-Key": "routine"}, json=body)
         job_id = UUID(response.raise_for_status().json()["job_id"])
         lease = repo.claim_job("routine-worker")
         assert lease is not None and lease.job_id == job_id
@@ -64,13 +83,35 @@ def test_world_advance_commits_actual_routine_route_and_replays(tmp_path, weathe
         else:
             pytest.fail("Routine world advance did not finish")
         final = repo.read_world(scope, world_id, branch_id)
-        journey, = final.state.travel_journeys
-        assert journey.departed_tick == 90 and journey.resolved_tick == 120
+        journey, = [entry for entry in final.state.travel_journeys if entry.actor_id == npc]
+        assert journey.departed_tick == occurrence - 30 and journey.resolved_tick == occurrence
         assert journey.status == "arrived" and journey.actor_id == npc
         assert final.state.entities[npc].location_id == (inside if choose_alternative else outside)
+        details, = [event.payload["routine_choice"] for event in repo.list_events(scope, world_id, branch_id).events
+                    if event.type == "core.travel_journey_changed.v1" and event.payload.get("routine_choice")]
+        assert details["window_id"] == str(window)
+        assert details["reason"] == ("weather" if choose_alternative else "scheduled_destination")
+        player_history = client.get(f"/api/v1/worlds/{world_id}/history?branch_id={branch_id}&mode=player").raise_for_status().text
+        assert "routine_choice" not in player_history
+        assert final.state.current_tick == body["duration_seconds"]
+        if job_activity == "travel":
+            assert final.state.entities[player].location_id == trail_end
         final_projection = client.get(player_view).raise_for_status().json()["state"]["entities"]
         assert str(npc) not in final_projection
         assert repo.replay(scope, world_id, branch_id, from_genesis=True).state_hash == final.state_hash
+        if job_activity == "world-advance" and choose_alternative:
+            backups = BackupApplication(repo)
+            archive = backups.validate_archive(backups.export_world(scope, world_id, format_version="2.0"))
+            restored_db = Database(f"sqlite:///{(tmp_path / 'routine-restore.db').as_posix()}")
+            try:
+                restored_db.create_schema()
+                restored = WorldRepository(restored_db)
+                WorldBackupImporter(restored).import_verified_backup(scope, archive)
+                assert restored.replay(scope, world_id, branch_id, from_genesis=True).state_hash == final.state_hash
+                assert any(event.payload.get("routine_choice") == details
+                           for event in restored.list_events(scope, world_id, branch_id).events)
+            finally:
+                restored_db.dispose()
 
 
 def test_real_simulation_window_commits_with_job_progress_and_replays(tmp_path):

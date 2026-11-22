@@ -283,7 +283,7 @@ def test_public_create_selects_optional_family_23_and_persists_occupations(tmp_p
         client.get("/api/v1/session").raise_for_status()
         packs = client.get("/api/v1/packs").raise_for_status().json()["items"]
         assert all(pack["version"] == "2.0.0" for pack in packs)
-        assert all(pack["available_versions"] == ["2.0.0", "2.2.0", "2.3.0", "2.8.0"] for pack in packs)
+        assert all(pack["available_versions"] == ["2.0.0", "2.2.0", "2.3.0", "2.8.0", "2.12.0"] for pack in packs)
 
         endpoint = "/api/v1/worlds"
         headers = {"Idempotency-Key": "family-occupation-23"}

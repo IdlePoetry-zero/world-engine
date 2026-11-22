@@ -6,6 +6,7 @@ from collections.abc import Collection
 from uuid import UUID, uuid5
 
 from world_engine.domain.models import WorldState
+from world_engine.domain.travel_journey_events import RoutineJourneyChoice, TravelJourneyChangedEvent
 from world_engine.rules.contracts import RuleContext, RuleResolution
 from world_engine.rules.engine import RuleEngine
 
@@ -32,4 +33,11 @@ def plan_npc_routine_departure(
         state, candidate.route_id, context.model_copy(update={"actor_id": candidate.actor_id}),
         itinerary_journey_id=journey_id,
     )
-    return result if result.outcome.status == "succeeded" else None
+    if result.outcome.status != "succeeded":
+        return None
+    departure, = result.events
+    if not isinstance(departure, TravelJourneyChangedEvent):
+        raise RuntimeError("A routine departure must use the registered journey event.")
+    choice = RoutineJourneyChoice(window_id=candidate.window_id, occurrence_tick=candidate.occurrence_tick,
+                                 reason=candidate.reason_code)
+    return result.model_copy(update={"events": [departure.model_copy(update={"routine_choice": choice})]})

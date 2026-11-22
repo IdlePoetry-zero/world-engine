@@ -14,6 +14,24 @@ export type CreateWorldDraft = {
   npc_autonomy_mode: 'off' | 'limited_v1' | 'diverse_v1'
 }
 
+const packVersionDescriptions: Record<string, string> = {
+  '2.2.0': '市场报价与逾期补还',
+  '2.3.0': '家庭与职业',
+  '2.4.0': '具名居民扩充',
+  '2.5.0': '地区职业与技能',
+  '2.8.0': '途中机会',
+  '2.9.0': '地区组织驻地与职业供给',
+  '2.10.0': '地区组织招募',
+  '2.11.0': '地区职业与招募候选',
+  '2.12.0': 'NPC 作息与出行',
+}
+
+function packVersionLabel(version: string, defaultVersion: string) {
+  if (version === defaultVersion) return `默认版本 · v${version}`
+  const description = packVersionDescriptions[version]
+  return description ? `v${version} · ${description}` : `v${version}`
+}
+
 function packVersions(pack: Pack, populationMode: 'natural' | 'sustained') {
   const advertisedVersions = Array.isArray(pack.available_versions) ? pack.available_versions : []
   const sustainedVersions = populationMode === 'sustained' && Array.isArray(pack.sustained_available_versions)
@@ -47,6 +65,7 @@ export function CreateWorldDialog({ packs, onClose, onSubmit }: { packs: Pack[];
   const advertisesSustainedV24 = populationMode === 'sustained' && sustainedVersions.includes('2.4.0')
   const advertisesSustainedV25 = populationMode === 'sustained' && sustainedVersions.includes('2.5.0')
   const advertisesV28 = availableVersions.includes('2.8.0')
+  const advertisesV212 = availableVersions.includes('2.12.0')
   const advertisesSustainedV29 = populationMode === 'sustained'
     && selectedPack?.pack_id === 'low_magic_feudal'
     && sustainedVersions.includes('2.9.0')
@@ -58,6 +77,7 @@ export function CreateWorldDialog({ packs, onClose, onSubmit }: { packs: Pack[];
     && sustainedVersions.includes('2.11.0')
   const waypointVersions = [
     ...(advertisesV28 ? ['v2.8.0'] : []),
+    ...(advertisesV212 ? ['v2.12.0'] : []),
     ...(advertisesSustainedV29 ? ['v2.9.0'] : []),
     ...(advertisesSustainedModern210 ? ['v2.10.0'] : []),
     ...(advertisesSustainedCultivation211 ? ['v2.11.0'] : []),
@@ -106,11 +126,11 @@ export function CreateWorldDialog({ packs, onClose, onSubmit }: { packs: Pack[];
             <label className="field-label" htmlFor="pack-version">设定包版本</label>
             <select id="pack-version" value={selectedVersion} aria-describedby="pack-version-help" onChange={(event) => updateDraft(() => setPackVersion(event.target.value))}>
               {availableVersions.map((version) => <option key={version} value={version}>
-                {version === selectedPack.version ? `默认版本 · v${version}` : version === '2.2.0' ? 'v2.2.0 · 市场报价与逾期补还' : version === '2.3.0' && advertisesV23 ? 'v2.3.0 · 家庭与职业' : version === '2.4.0' && advertisesSustainedV24 ? 'v2.4.0 · 具名居民扩充' : version === '2.5.0' && advertisesSustainedV25 ? 'v2.5.0 · 地区职业与技能' : version === '2.8.0' && advertisesV28 ? 'v2.8.0 · 途中机会' : version === '2.9.0' && advertisesSustainedV29 ? 'v2.9.0 · 地区组织驻地与职业供给' : version === '2.10.0' && advertisesSustainedModern210 ? 'v2.10.0 · 地区组织招募' : version === '2.11.0' && advertisesSustainedCultivation211 ? 'v2.11.0 · 地区职业与招募候选' : `v${version}`}
+                {packVersionLabel(version, selectedPack.version)}
               </option>)}
             </select>
             <div className="pack-description" id="pack-version-help">
-              默认选项沿用设定包当前版本。{availableVersions.includes('2.2.0') && ' v2.2.0 增加市场报价与逾期承诺补还。'}{advertisesV23 && ' v2.3.0 包含家庭关系、入职和付薪班次。'}{advertisesSustainedV24 && ' v2.4.0 在持续模式下缓冲具名角色的正常更替。'}{advertisesSustainedV25 && ' v2.5.0 提供地区职业与技能配置。'}{advertisesSustainedV29 && ' v2.9.0 为组织标注地区驻地，并补充地区职业供给。'}{advertisesSustainedModern210 && ' v2.10.0 在持续模式下为地区组织维护符合条件的招募候选人。'}{advertisesSustainedCultivation211 && ' v2.11.0 为 12 个地区配置职业，按当地组织章程认可的职业筛选席位候选人；席位补员本身不会自动授予组织成员资格。'}{advertisesWaypointFeatures && ` ${waypointVersionLabel} 均包含途中机会：连续行程中会在少数实际抵达且符合条件的地点遇到可选停留；无需自定义作者设定。`}选择其他版本会固定写入新存档。
+              默认选项沿用设定包当前版本。{availableVersions.includes('2.2.0') && ' v2.2.0 增加市场报价与逾期承诺补还。'}{advertisesV23 && ' v2.3.0 包含家庭关系、入职和付薪班次。'}{advertisesSustainedV24 && ' v2.4.0 在持续模式下缓冲具名角色的正常更替。'}{advertisesSustainedV25 && ' v2.5.0 提供地区职业与技能配置。'}{advertisesSustainedV29 && ' v2.9.0 为组织标注地区驻地，并补充地区职业供给。'}{advertisesSustainedModern210 && ' v2.10.0 在持续模式下为地区组织维护符合条件的招募候选人。'}{advertisesSustainedCultivation211 && ' v2.11.0 为 12 个地区配置职业，按当地组织章程认可的职业筛选席位候选人；席位补员本身不会自动授予组织成员资格。'}{advertisesV212 && ' v2.12.0 包含一位有固定作息和替代地点的 NPC。'}{advertisesWaypointFeatures && ` ${waypointVersionLabel} 均包含途中机会：连续行程中会在少数实际抵达且符合条件的地点遇到可选停留；无需自定义作者设定。`}选择其他版本会固定写入新存档。
             </div>
           </>}
           <label className="field-label" htmlFor="world-title">世界名称</label><input id="world-title" data-dialog-initial-focus value={title} onChange={(event) => updateDraft(() => setTitle(event.target.value))} placeholder="例如：雾港之后" maxLength={80} required />

@@ -389,6 +389,7 @@ const knownEventTitles: Record<string, string> = {
   combat_truce_changed: '遭遇停战',
   cultivation_breakthrough_resolved: '修炼突破',
   waypoint_opportunity_decision_recorded: '中途停留选择',
+  travel_journey_changed: '旅程更新',
   governance_leadership_handed_over: '移交领导职务', organization_member_resigned: '退出势力',
   meeting_reflection_recorded: '记录会面后的私人感受',
   relationship_partnership_changed: '处理伴侣关系',
@@ -407,6 +408,19 @@ function eventTitle(type: string) {
 function eventSummary(type: string, payload: unknown) {
   if (!payload || typeof payload !== 'object') return '事件载荷暂无摘要。'
   const fields = payload as Record<string, unknown>
+  if (type === 'core.travel_journey_changed.v1') {
+    if (typeof fields.routine_choice === 'object' && fields.routine_choice !== null) {
+      const choice = fields.routine_choice as Record<string, unknown>
+      if (choice.reason === 'weather') return '遇到作者登记的天气限制，人物改往备用地点。'
+      if (choice.reason === 'destination_capacity') return '原定地点已满，人物改往备用地点。'
+      if (choice.reason === 'route_or_timing') return '原定路线或时段不适用，人物改往备用地点。'
+      if (choice.reason === 'scheduled_destination') return '人物按作息出发，前往原定地点。'
+    }
+    const journey = typeof fields.journey === 'object' && fields.journey !== null ? fields.journey as Record<string, unknown> : {}
+    if (journey.status === 'arrived') return '已抵达旅程目的地。'
+    if (journey.status === 'interrupted') return '途中中断，目的地尚未抵达。'
+    if (journey.status === 'in_transit') return '已登记在途旅程。'
+  }
   if (type === 'core.waypoint_opportunity_decision_recorded.v1') {
     const record = typeof fields.record === 'object' && fields.record !== null ? fields.record as Record<string, unknown> : fields
     if (record.choice === 'stop') return '玩家选择在已抵达的地点停留。'

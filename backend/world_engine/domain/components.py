@@ -274,6 +274,18 @@ class DailyRoutineComponent(ComponentModel):
         return self
 
 
+class RoutineMobilityCadence(ComponentModel):
+    every_days: StrictInt = Field(default=1, ge=1, le=28)
+    phase_day: StrictInt = Field(default=0, ge=0, le=27)
+    priority: StrictInt = Field(default=0, ge=-10, le=10)
+
+    @model_validator(mode="after")
+    def phase_within_cycle(self) -> RoutineMobilityCadence:
+        if self.phase_day >= self.every_days:
+            raise ValueError("routine phase day must be inside its recurrence cycle")
+        return self
+
+
 class RoutineMobilityComponent(ComponentModel):
     """Author opt-in for recurring travel to daily routine windows."""
 
@@ -283,6 +295,7 @@ class RoutineMobilityComponent(ComponentModel):
         default_factory=dict, max_length=64,
     )
     avoid_conditions: list[BoundedName] = Field(default_factory=list, max_length=16)
+    cadences: dict[UUID, RoutineMobilityCadence] = Field(default_factory=dict, max_length=64, exclude_if=lambda value: not value)
 
     @model_validator(mode="after")
     def distinct_alternatives(self) -> RoutineMobilityComponent:

@@ -60,7 +60,7 @@ from .contracts import (
 )
 from .npc_work_schedule import NpcWorkTransition, next_npc_work_tick, npc_work_transition
 from .npc_routine_departure import plan_npc_routine_departure
-from .npc_routine_schedule import next_npc_routine_tick
+from .npc_routine_schedule import next_npc_routine_tick, npc_routine_candidate
 from .npc_meeting_attendance import (
     NPC_MEETING_ATTENDANCE_DECISION_KIND,
     next_npc_meeting_attendance_boundary,
@@ -455,6 +455,9 @@ class SimulationEngine:
                         ),
                     )
                 if wage_account.balance >= quote:
+                    routine = self._resolve_npc_routine(state, plan, context)
+                    if routine is not None:
+                        return routine
                     self._reject_unconsumed_decisions(context)
                     return self._empty(
                         state, context, outcome="completed", reason="work_purchase_target_affordable",
@@ -471,6 +474,9 @@ class SimulationEngine:
                 plan.work_schedule.balance_target is not None
                 and wage_account.balance >= plan.work_schedule.balance_target
             ):
+                routine = self._resolve_npc_routine(state, plan, context)
+                if routine is not None:
+                    return routine
                 self._reject_unconsumed_decisions(context)
                 return self._empty(
                     state, context, outcome="completed", reason="work_balance_target_reached",
@@ -574,6 +580,13 @@ class SimulationEngine:
             return self._advance_travel_journey(state, plan, context, journey)
 
         if plan.target_tick == state.current_tick:
+            may_close = plan.activity in {"work", "study", "wait"} or (
+                plan.activity == "rest" and plan.started_tick is not None and plan.started_tick < state.current_tick
+            )
+            if may_close:
+                routine = self._resolve_npc_routine(state, plan, context)
+                if routine is not None:
+                    return routine
             self._reject_unconsumed_decisions(context)
             if plan.activity == "rest" and plan.started_tick is not None and plan.started_tick < state.current_tick:
                 # An annual decision can be resolved at the exact terminal
@@ -708,6 +721,22 @@ class SimulationEngine:
                 interruption=Interruption(kind="rule_required", tick=state.current_tick, reason_code=f"activity_{activity}_has_no_registered_rule", subject_id=plan.actor_id),
             )
         intent, natural_duration, one_shot = action
+        splittable_for_routine = not one_shot and activity in {"wait", "rest"}
+        if splittable_for_routine or work_shift_due or activity == "study":
+            protected_interval = None
+            if next_work_shift_tick is not None and work_terms is not None:
+                protected_interval = (next_work_shift_tick, next_work_shift_tick + work_terms.duration_seconds)
+            elif activity == "study" and natural_duration is not None:
+                # Training awards experience per registered action. A fresh
+                # commute must not create a new arrival inside that interval.
+                training_end = min(
+                    plan.target_tick,
+                    state.current_tick + min(natural_duration, context.max_step_ticks, self.policy.max_macro_step_seconds),
+                )
+                protected_interval = (state.current_tick, training_end)
+            routine = self._resolve_npc_routine(state, plan, context, protected_interval=protected_interval)
+            if routine is not None:
+                return routine
 
         remaining_plan_ticks = plan.target_tick - state.current_tick
         requested_action_exceeds_window = (
@@ -826,6 +855,19 @@ class SimulationEngine:
                 external = None
                 if actor_care_tick is not None and actor_care_tick > candidate:
                     actor_care_tick = None
+        routine_tick = None
+        if splittable_for_routine:
+            routine_tick = self._next_npc_routine_tick(state, min(horizon, external_horizon), plan, context)
+            if routine_tick is not None and (
+                external is not None and external[0] <= routine_tick
+                or actor_care_tick is not None and actor_care_tick < routine_tick
+            ):
+                routine_tick = None
+            if routine_tick is not None:
+                horizon = routine_tick
+                external = None
+                if actor_care_tick is not None and actor_care_tick > routine_tick:
+                    actor_care_tick = None
         if external is not None and (actor_care_tick is None or external[0] <= actor_care_tick):
             boundary_tick, reason, reference_id, subject_id = external
             if boundary_tick <= state.current_tick:
@@ -915,7 +957,12 @@ class SimulationEngine:
                 if available_ticks <= 0:
                     return self._empty(state, context, outcome="completed", reason="target_reached")
                 if activity == "rest" and available_ticks < 60:
-                    if activity == plan.activity and autonomous_vacancy_tick != state.current_tick + available_ticks:
+                    slice_end = state.current_tick + available_ticks
+                    routine_split = routine_tick == slice_end and plan.target_tick - state.current_tick >= 60
+                    if (
+                        activity == plan.activity and autonomous_vacancy_tick != slice_end and not routine_split
+                        and not self._recent_hosted_trip_during_rest(state, plan, context)
+                    ):
                         self._reject_unconsumed_decisions(context)
                         reason = "rest_below_minimum_duration"
                         return self._empty(
@@ -933,7 +980,7 @@ class SimulationEngine:
                     # RestIntent has a 60-second minimum. A shorter incidental
                     # rest slice becomes a bounded wait, preserving survival
                     # checks and the original plan target. The same conversion
-                    # handles a sub-minute annual review boundary without
+                    # handles a sub-minute governance or routine boundary without
                     # discarding the already-authorized rest window.
                     activity = "wait"
                     intent = WaitIntent(duration_ticks=available_ticks)
@@ -1093,6 +1140,16 @@ class SimulationEngine:
                 pending_at_completion is not None
                 and pending_at_completion[0] == to_tick
             ) or vacancy_due_after_shift
+            settled_state = None
+            if not same_tick_boundary_pending and self._npc_routine_hosted(context) and any(
+                "routine_mobility" in entity.components for entity in state.entities.values()
+            ):
+                settled_state = state
+                for event in resolution.events:
+                    settled_state = apply_event(settled_state, event)
+                same_tick_boundary_pending = npc_routine_candidate(
+                    settled_state, excluded_actor_ids=self._npc_routine_exclusions(plan, context),
+                ) is not None
             if (
                 not same_tick_boundary_pending
                 and balance_target is not None
@@ -1104,9 +1161,10 @@ class SimulationEngine:
                 )
             purchase_target = plan.work_schedule.purchase_target if plan.work_schedule is not None else None
             if not same_tick_boundary_pending and purchase_target is not None:
-                settled_state = state
-                for event in resolution.events:
-                    settled_state = apply_event(settled_state, event)
+                if settled_state is None:
+                    settled_state = state
+                    for event in resolution.events:
+                        settled_state = apply_event(settled_state, event)
                 try:
                     purchase_quote = self._work_purchase_quote(
                         settled_state, purchase_target, actor_id=plan.actor_id,
@@ -1196,6 +1254,22 @@ class SimulationEngine:
                 interruption=None,
                 continuation=self._continuation(plan, to_tick),
             )
+        if routine_tick is not None and to_tick == routine_tick:
+            return self._resolved(
+                state, context, resolution, outcome="advanced", boundary="npc_routine_boundary",
+                interruption=None, continuation=self._continuation(plan, state.current_tick),
+            )
+        if activity == "study" and target_reached and self._npc_routine_hosted(context) and any(
+            "routine_mobility" in entity.components for entity in state.entities.values()
+        ):
+            studied_state = state
+            for event in resolution.events:
+                studied_state = apply_event(studied_state, event)
+            if npc_routine_candidate(studied_state, excluded_actor_ids=self._npc_routine_exclusions(plan, context)) is not None:
+                return self._resolved(
+                    state, context, resolution, outcome="advanced", boundary="npc_routine_boundary",
+                    interruption=None, continuation=self._continuation(plan, state.current_tick),
+                )
         if requested_one_shot_completed or target_reached:
             outcome = "completed"
             continuation = None
@@ -1318,11 +1392,15 @@ class SimulationEngine:
                     subject_id=journey.actor_id,
                 ),
             )
+        routine = self._resolve_npc_routine(state, plan, context)
+        if routine is not None:
+            return routine
         external = self._next_external_boundary(
             state, horizon, actor_id=plan.actor_id,
             externally_controlled_actor_ids=context.externally_controlled_actor_ids,
             include_meeting_start=context.allow_autonomous_meeting_attendance,
         )
+        external = self._with_npc_routine_boundary(state, horizon, plan, context, external)
         if external is not None:
             boundary, reason, reference, subject = external
             return self._advance_to_boundary(state, plan, context, boundary, reason, reference, subject, "travel")
@@ -1406,6 +1484,9 @@ class SimulationEngine:
                 state, plan, context, journey, RestIntent(duration_ticks=duration), duration,
             )
 
+        routine = self._resolve_npc_routine(state, plan, context)
+        if routine is not None:
+            return routine
         # Atomic food and water care above completes on its registered tick.
         # Once care is current again, ordinary in-transit progress stops at
         # the annual review tick so the same lease can resolve governance
@@ -1423,6 +1504,7 @@ class SimulationEngine:
             externally_controlled_actor_ids=context.externally_controlled_actor_ids,
             include_meeting_start=context.allow_autonomous_meeting_attendance,
         )
+        external = self._with_npc_routine_boundary(state, horizon, plan, context, external)
         if external is not None and (care_tick is None or external[0] <= care_tick):
             boundary, reason, reference, subject = external
             if boundary <= state.current_tick:
@@ -1746,21 +1828,9 @@ class SimulationEngine:
                     reason_code="stop_condition_already_satisfied",
                 ),
             )
-        has_mobile_routines = any("routine_mobility" in actor.components for actor in state.entities.values())
-        if has_mobile_routines and context.command_actor_id is not None:
-            routine_departure = plan_npc_routine_departure(
-                state, RuleContext(
-                    world_id=context.world_id, branch_id=context.branch_id, command_id=context.command_id,
-                    actor_id=context.command_actor_id, ruleset_version=context.ruleset_version,
-                ), excluded_actor_ids=context.externally_controlled_actor_ids, rules=self.rule_engine,
-            )
-            if routine_departure is not None:
-                self._reject_unconsumed_decisions(context)
-                self._validate_rule_batch(state, routine_departure)
-                return self._resolved(
-                    state, context, routine_departure, outcome="advanced", boundary="npc_routine_departed",
-                    interruption=None, continuation=plan,
-                )
+        routine = self._resolve_npc_routine(state, plan, context)
+        if routine is not None:
+            return routine
         if plan.target_tick == state.current_tick:
             self._reject_unconsumed_decisions(context)
             return self._empty(state, context, outcome="completed", reason="target_reached")
@@ -1812,13 +1882,10 @@ class SimulationEngine:
             to_tick, reason = work_tick, "npc_work_boundary"
             reference_id = subject_id = None
 
-        if has_mobile_routines and context.command_actor_id is not None:
-            routine_tick = next_npc_routine_tick(
-                state, to_tick, excluded_actor_ids=context.externally_controlled_actor_ids,
-            )
-            if routine_tick is not None and (routine_tick < to_tick or reason == "world_advance_window"):
-                to_tick, reason = routine_tick, "npc_routine_boundary"
-                reference_id = subject_id = None
+        routine_tick = self._next_npc_routine_tick(state, to_tick, plan, context)
+        if routine_tick is not None and (routine_tick < to_tick or reason == "world_advance_window"):
+            to_tick, reason = routine_tick, "npc_routine_boundary"
+            reference_id = subject_id = None
 
         stop_boundary = self._next_background_stop_boundary(state, plan.stop_conditions)
         if stop_boundary is not None and state.current_tick < stop_boundary <= to_tick and (
@@ -1830,6 +1897,70 @@ class SimulationEngine:
 
         return self._advance_world_window(
             state, plan, context, to_tick, reason, reference_id, subject_id,
+        )
+
+    def _npc_routine_hosted(self, context: SimulationContext) -> bool:
+        return (
+            context.allow_npc_routine_mobility and context.command_actor_id is not None
+            and callable(getattr(self.rule_engine, "evaluate_travel_departure", None))
+        )
+
+    @staticmethod
+    def _npc_routine_exclusions(plan: SimulationPlan, context: SimulationContext) -> frozenset[UUID]:
+        controlled = context.externally_controlled_actor_ids
+        return controlled | {plan.actor_id} if isinstance(plan, LongActionPlan) else controlled
+
+    def _next_npc_routine_tick(self, state, horizon, plan, context) -> int | None:
+        if not self._npc_routine_hosted(context):
+            return None
+        return next_npc_routine_tick(state, horizon, excluded_actor_ids=self._npc_routine_exclusions(plan, context))
+
+    def _recent_hosted_trip_during_rest(self, state: WorldState, plan: LongActionPlan, context: SimulationContext) -> bool:
+        if not self._npc_routine_hosted(context) or plan.started_tick is None or plan.started_tick >= state.current_tick:
+            return False
+        excluded = self._npc_routine_exclusions(plan, context)
+        earliest = max(plan.started_tick, state.current_tick - 59)
+        return any(
+            journey.actor_id not in excluded
+            and (journey.departed_tick >= earliest or journey.resolved_tick is not None and journey.resolved_tick >= earliest)
+            and "routine_mobility" in state.entities[journey.actor_id].components
+            for journey in state.travel_journeys
+        )
+
+    def _with_npc_routine_boundary(self, state, horizon, plan, context, external):
+        limit = min(horizon, external[0]) if external is not None else horizon
+        routine_tick = self._next_npc_routine_tick(state, limit, plan, context)
+        if routine_tick is not None and (external is None or routine_tick < external[0]):
+            return routine_tick, "npc_routine_boundary", None, None
+        return external
+
+    def _resolve_npc_routine(
+        self, state: WorldState, plan: SimulationPlan, context: SimulationContext, *,
+        protected_interval: tuple[int, int] | None = None,
+    ) -> SimulationResolution | None:
+        if not self._npc_routine_hosted(context):
+            return None
+        resolution = plan_npc_routine_departure(
+            state, RuleContext(
+                world_id=context.world_id, branch_id=context.branch_id, command_id=context.command_id,
+                actor_id=context.command_actor_id, ruleset_version=context.ruleset_version,
+            ), excluded_actor_ids=self._npc_routine_exclusions(plan, context), rules=self.rule_engine,
+        )
+        if resolution is None:
+            return None
+        if protected_interval is not None:
+            # Work and study preserve their original settlement intervals.
+            # The routine may resolve at either endpoint.
+            departure = next(event for event in resolution.events if isinstance(event, TravelJourneyChangedEvent))
+            journey = departure.journey
+            due = journey.hazard_tick if journey.hazard_tick is not None else journey.arrival_tick
+            if protected_interval[0] < due < protected_interval[1]:
+                return None
+        self._reject_unconsumed_decisions(context)
+        self._validate_rule_batch(state, resolution)
+        return self._resolved(
+            state, context, resolution, outcome="advanced", boundary="npc_routine_departed",
+            interruption=None, continuation=plan,
         )
 
     def resolve_autonomous_meeting_attendance(
@@ -3134,7 +3265,7 @@ class SimulationEngine:
             "background_deprivation_boundary", "background_self_care_boundary", "travel_in_progress",
             "routine_work_shift_start", "routine_work_rest_start", "stop_condition_boundary",
             "itinerary_auto_care_threshold", "autonomous_vacancy_year_boundary",
-            "npc_meeting_start",
+            "npc_meeting_start", "npc_routine_boundary",
         }:
             result = self._resolved(
                 state, context, combined, outcome="advanced", boundary=reason,

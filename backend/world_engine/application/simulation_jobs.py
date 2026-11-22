@@ -260,6 +260,7 @@ class SimulationJobs:
             externally_controlled_actor_ids=controlled_actor_ids,
             allow_autonomous_vacancy=view.world.owner_id == scope.user_id,
             allow_autonomous_meeting_attendance=view.world.owner_id == scope.user_id,
+            allow_npc_routine_mobility=view.world.owner_id == scope.user_id,
             decision_responses=(decision,) if decision is not None else (),
             causal_death_event_ids=causal_deaths,
             journey_resolution_receipts=journey_receipts,
@@ -341,6 +342,8 @@ class SimulationJobs:
                 paid_shift = next((event for event in resolution.events if isinstance(event, WorkShiftPaidEvent)), None)
             command_type = "simulation.window"
             command_payload = {"job_id": str(job.job_id), "next_tick": str(resolution.next_tick)}
+            if resolution.metrics.integration_boundary == "npc_routine_departed":
+                command_actor_id = scope.user_id
             if resolution.metrics.integration_boundary == "autonomous_vacancy_processed":
                 from world_engine.domain.leadership_ballot_state import AUTONOMOUS_VACANCY_COMMAND, autonomous_vacancy_command_payload
 

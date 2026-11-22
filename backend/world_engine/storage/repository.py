@@ -2421,14 +2421,21 @@ class WorldRepository:
                         if (lease is None or leased_job.job_type not in {"simulation.long_action", "simulation.world_advance"}
                             or command.command_type != "simulation.window"):
                             raise AccessDenied("Travel journey transitions require a simulation worker lease.")
+                        if travel.routine_choice is not None and npc_validation is not None:
+                            raise InvalidEvent("An NPC plan departure cannot carry a routine choice.")
                         if travel.operation == "depart" and npc_validation is None:
-                            if leased_job.job_type == "simulation.world_advance":
+                            # A hosted routine shares the active job lease, but it
+                            # cannot act as the account's current long-action actor.
+                            if (leased_job.job_type == "simulation.world_advance"
+                                    or job_plan.get("actor_id") != str(travel.actor_id)):
                                 from world_engine.rules.contracts import RuleContext
                                 from world_engine.rules.engine import RuleEngine
                                 from world_engine.simulation.npc_routine_departure import plan_npc_routine_departure
 
                                 self._require_uncontrolled_npc(session, scope, world, role, travel.actor_id)
                                 routine_state = self._checked_branch_state(branch)
+                                if job_plan.get("consumption") is not None:
+                                    raise AccessDenied("An exact consumption job cannot host a routine departure.")
                                 if (command.actor_id != scope.user_id or command.payload != {
                                     "job_id": str(leased_job.job_id), "next_tick": str(routine_state.current_tick),
                                 } or len(typed_events) != 1):
@@ -2445,6 +2452,8 @@ class WorldRepository:
                                 if expected is None or list(expected.events) != [travel]:
                                     raise InvalidEvent("The departure must match the currently due NPC routine and its registered route.")
                                 continue
+                            if travel.routine_choice is not None:
+                                raise InvalidEvent("A player departure cannot carry an NPC routine choice.")
                             if (leased_job.job_type != "simulation.long_action"
                                 or job_plan.get("activity") != "travel"
                                 or job_plan.get("actor_id") != str(travel.actor_id)

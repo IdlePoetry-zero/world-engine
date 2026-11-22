@@ -1,17 +1,18 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, type Branch, type Pack, type Session, type World, type WorldView } from './api/client'
 import { Icon, type IconName } from './components/Icon'
 import { CreateWorldDialog, type CreateWorldDraft } from './components/CreateWorldDialog'
-import { EditorPage } from './pages/EditorPage'
 import { HistoryPage } from './pages/HistoryPage'
 import { LibraryPage } from './pages/LibraryPage'
-import { OperationsPage } from './pages/OperationsPage'
-import { PlayPage } from './pages/PlayPage'
 import { errorMessage, toError, initials } from './utils'
 import './App.css'
 
 export type Page = 'library' | 'play' | 'world' | 'history' | 'operations'
 export type Notice = { kind: 'success' | 'error' | 'info'; text: string }
+
+const EditorPage = lazy(() => import('./pages/EditorPage').then(({ EditorPage }) => ({ default: EditorPage })))
+const OperationsPage = lazy(() => import('./pages/OperationsPage').then(({ OperationsPage }) => ({ default: OperationsPage })))
+const PlayPage = lazy(() => import('./pages/PlayPage').then(({ PlayPage }) => ({ default: PlayPage })))
 
 const navigation: { page: Page; label: string; icon: IconName }[] = [
   { page: 'library', label: '世界库', icon: 'layers' },
@@ -167,11 +168,13 @@ export default function App() {
       <main className="main-column">
         <header className="topbar"><div className="topbar-leading"><button className="icon-button mobile-menu" aria-label="打开导航" onClick={() => setDrawerOpen(true)}><Icon name="menu" /></button><div className="breadcrumb"><span>世界引擎</span><Icon name="chevron" size={13} /><strong>{selectedPage}</strong></div></div><div className="topbar-actions">{selectedWorld && <button className="context-pill" onClick={() => setPage('play')}><span className="context-led" />{selectedWorld.title}<Icon name="chevron" size={13} /></button>}<span className={`api-status ${connected ? 'online' : 'offline'}`}><i />{connected ? '本地 API 正常' : 'API 离线'}</span><button className="avatar-button" title={session?.principal.display_name ?? '本地身份'}>{initials(session?.principal.display_name ?? 'W E')}</button></div></header>
         <div className="page-frame">
+          <Suspense fallback={<p className="quiet-loading" role="status">正在打开页面…</p>}>
           {page === 'library' && <LibraryPage worlds={worlds} packs={packs} loading={loading} error={error} onSelect={openWorld} onCreate={() => setCreateOpen(true)} onRetry={refreshWorkspace} />}
           {page === 'play' && <PlayPage key={`${selectedWorldId ?? 'none'}:${branchId ?? 'none'}`} world={selectedWorld} view={viewMatchesSelection ? view : null} viewError={selectedViewError?.message ?? null} branches={branches} branchId={branchId} loading={Boolean(selectedWorldId && !viewMatchesSelection && !selectedViewError)} onSelectWorld={() => setPage('library')} onOpenHistory={() => setPage('history')} onBranchChange={setBranch} onNotice={flash} onRefresh={refreshWorkspace} />}
           {page === 'world' && <EditorPage key={`${selectedWorldId ?? 'none'}:${branchId ?? 'none'}`} world={selectedWorld} branchId={branchId} onSelectWorld={() => setPage('library')} onNotice={flash} />}
           {page === 'history' && <HistoryPage key={`${selectedWorldId ?? 'none'}:${branchId ?? 'none'}`} world={selectedWorld} branches={branches} branchId={branchId} onBranchChange={setBranch} onBranchCreated={refreshBranchesAndSelect} />}
           {page === 'operations' && <OperationsPage onNotice={flash} />}
+          </Suspense>
         </div>
       </main>
       {createOpen && <CreateWorldDialog packs={packs} onClose={() => setCreateOpen(false)} onSubmit={createWorld} />}

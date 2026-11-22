@@ -135,7 +135,7 @@ export function AuthorRevisionEditor({
   }
   const previewRevision = async (event: FormEvent) => {
     event.preventDefault()
-    if (!entity || !componentName || !branchId || !currentReason.trim()) return
+    if (!canPreview || !entity || !componentName || !branchId || !currentReason.trim()) return
     setBusy(true); setFailure(null); setPreviewState(null); setRefreshRequired(false)
     try {
       const replacement = editsJson ? JSON.parse(advancedText) as unknown : draft
@@ -179,7 +179,7 @@ export function AuthorRevisionEditor({
   const editsJson = advanced || !simpleEditor
   const governanceError = componentName === 'governance' && !advanced ? governanceMembershipError(draft) : ''
   const routineError = isRoutine && !advanced ? routineValidationError(draft, daySeconds) : ''
-  const routineMobilityError = isRoutineMobility && !advanced ? routineWeatherValidationError(draft) : ''
+  const routineMobilityError = isRoutineMobility && !advanced ? routineMobilityValidationError(draft, entity?.components?.daily_routine) : ''
   const waypointOpportunityError = componentName === 'place' && !advanced ? waypointOpportunityValidationError(draft) : ''
   const populationSeatPolicyError = hasPopulationSeatPolicy && !advanced ? populationSeatPolicyValidationError(draft) : ''
   const canPreview = Boolean(entity && componentName && currentReason.trim() && !busy && !refreshRequired && !governanceError && !routineError && !routineMobilityError && !waypointOpportunityError && !populationSeatPolicyError && branchId && (advanced || simpleEditor || draft !== undefined))
@@ -300,6 +300,8 @@ function SimpleComponentFields({ name, draft, onChange, referenceEntities, daySe
 
 type RoutineWindowDraft = { window_id?: string; start_second?: number | string; duration_seconds?: number | string; activity?: string; place_id?: string }
 const routineActivities: Record<string, string> = { rest: '休息', work: '工作', study: '学习', socialize: '社交' }
+const routineCadenceDefaults = { every_days: 1, phase_day: 0, priority: 0 }
+type RoutineCadenceField = keyof typeof routineCadenceDefaults
 
 function RoutineComponentFields({ record, entities, daySeconds, onChange }: { record: Record<string, unknown>; entities: RevisionEntity[]; daySeconds: number; onChange: (value: unknown) => void }) {
   const windows: RoutineWindowDraft[] = Array.isArray(record.windows) ? record.windows.map((item) => asRecord(item) as RoutineWindowDraft) : []
@@ -343,12 +345,25 @@ function RoutineMobilityComponentFields({ record, routine, entities, onChange }:
 }) {
   const windows = Array.isArray(routine.windows) ? routine.windows.map(asRecord) : []
   const alternatives = asRecord(record.alternatives)
+  const cadences = asRecord(record.cadences)
   const places = entities.filter((entity) => isPlaceKind(entity.kind))
   const setAlternatives = (windowId: string, placeIds: string[]) => {
     const next = { ...alternatives }
     if (placeIds.length) next[windowId] = placeIds
     else delete next[windowId]
     onChange({ ...record, alternatives: next })
+  }
+  const setCadence = (windowId: string, cadence?: Record<string, unknown>) => {
+    const next = { ...cadences }
+    if (cadence && Object.entries(cadence).some(([field, value]) => routineCadenceDefaults[field as RoutineCadenceField] !== value)) {
+      next[windowId] = cadence
+    } else {
+      delete next[windowId]
+    }
+    const replacement = { ...record }
+    if (Object.keys(next).length) replacement.cadences = next
+    else delete replacement.cadences
+    onChange(replacement)
   }
 
   return <div className="author-routine-form">
@@ -359,14 +374,19 @@ function RoutineMobilityComponentFields({ record, routine, entities, onChange }:
       <input defaultValue={stringList(record.avoid_conditions)} placeholder="暴雨，暴雪" onChange={(event) => onChange({ ...record, avoid_conditions: parseList(event.target.value.replaceAll('，', ',')) })} />
       <small>匹配目的地的天气标签。目的地未设置时，使用所属区域的标签。</small>
     </label>
-    <p className="author-revision-help">首选地点无法按时抵达时，按以下顺序尝试备选地点。删除作息时段前，请先清除该时段的备选地点并提交。</p>
+    <p className="author-revision-help">作息默认每日重复，优先级为 0。世界首日编号为 0，再按重复周期循环。多名 NPC 在同一时刻准备出发时，数值较大的优先处理，已有安排优先于作息。</p>
+    <p className="author-revision-help">首选地点无法按时抵达时，按列表顺序尝试备选地点。删除作息时段前，请先恢复该时段的默认周期与优先级，移除备选地点并提交。</p>
     {windows.length === 0 && <p className="author-routine-empty">请先在「每日作息」中设置并提交时段。</p>}
     <div className="author-routine-list">{windows.map((window) => {
       const windowId = nullableId(window.window_id)
       if (!windowId) return null
-      const activity = typeof window.activity === 'string' ? routineActivities[window.activity] : undefined
-      const title = `${activity ?? '作息'} · 第 ${String(window.start_second ?? '—')} 秒`
+      const title = routineWindowTitle(window)
       const primary = places.find((place) => place.id === window.place_id)
+      const cadence = { ...routineCadenceDefaults, ...asRecord(cadences[windowId]) }
+      const lastPhaseDay = isRoutineCadenceInteger(cadence.every_days, 1, 28) ? cadence.every_days - 1 : 27
+      const updateCadence = (field: RoutineCadenceField, value: string) => {
+        setCadence(windowId, { ...cadence, [field]: value === '' ? '' : Number(value) })
+      }
       const selected = idList(alternatives[windowId])
       const available = places.filter((place) => place.status !== 'dead' && place.status !== 'retired' && place.id !== window.place_id && !selected.includes(place.id))
       const move = (index: number, offset: number) => {
@@ -378,6 +398,12 @@ function RoutineMobilityComponentFields({ record, routine, entities, onChange }:
       return <fieldset className="author-routine-window" key={windowId}>
         <legend>{title}</legend>
         <p className="author-revision-help">首选地点 · {primary?.name || primary?.id || String(window.place_id ?? '—')}</p>
+        <div className="author-trait-grid">
+          <label className="author-simple-field"><span>重复周期（世界日） <small>1–28</small></span><input type="number" min={1} max={28} step={1} value={String(cadence.every_days ?? '')} aria-label={`${title} · 重复周期`} onChange={(event) => updateCadence('every_days', event.target.value)} /></label>
+          <label className="author-simple-field"><span>周期内出发日 <small>0–{lastPhaseDay}</small></span><input type="number" min={0} max={lastPhaseDay} step={1} value={String(cadence.phase_day ?? '')} aria-label={`${title} · 周期内出发日`} onChange={(event) => updateCadence('phase_day', event.target.value)} /></label>
+          <label className="author-simple-field"><span>优先级 <small>−10 至 10</small></span><input type="number" min={-10} max={10} step={1} value={String(cadence.priority ?? '')} aria-label={`${title} · 优先级`} onChange={(event) => updateCadence('priority', event.target.value)} /></label>
+          {Object.hasOwn(cadences, windowId) && <button className="button button-secondary button-small" type="button" aria-label={`${title} · 恢复默认周期与优先级`} onClick={() => setCadence(windowId)}>恢复默认</button>}
+        </div>
         {selected.map((placeId, index) => {
           const placeName = places.find((place) => place.id === placeId)?.name || placeId
           return <div className="author-attribute-row" key={placeId}>
@@ -401,10 +427,34 @@ function RoutineMobilityComponentFields({ record, routine, entities, onChange }:
   </div>
 }
 
-function routineWeatherValidationError(draft: unknown): string {
-  const tags = idList(asRecord(draft).avoid_conditions)
+function routineWindowTitle(window: Record<string, unknown>): string {
+  const activity = typeof window.activity === 'string' ? routineActivities[window.activity] : undefined
+  return `${activity ?? '作息'} · 第 ${String(window.start_second ?? '—')} 秒`
+}
+
+function isRoutineCadenceInteger(value: unknown, minimum: number, maximum: number): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= minimum && value <= maximum
+}
+
+function routineMobilityValidationError(draft: unknown, dailyRoutine: unknown): string {
+  const record = asRecord(draft)
+  const tags = idList(record.avoid_conditions)
   if (tags.length > 16) return '避开天气最多可设置 16 项。'
   if (tags.some((tag) => Array.from(tag).length > 160)) return '每项天气标签最多 160 字。'
+  if (record.cadences === undefined) return ''
+  if (!record.cadences || typeof record.cadences !== 'object' || Array.isArray(record.cadences)) return '出行周期必须按作息时段填写。'
+  const routine = asRecord(dailyRoutine)
+  const windows = Array.isArray(routine.windows) ? routine.windows.map(asRecord) : []
+  for (const [windowId, cadence] of Object.entries(record.cadences)) {
+    const window = windows.find((item) => item.window_id === windowId)
+    if (!window) return '出行周期必须对应已提交的作息时段。请在高级 JSON 中移除无效引用。'
+    const title = routineWindowTitle(window)
+    if (!cadence || typeof cadence !== 'object' || Array.isArray(cadence)) return `「${title}」的出行周期格式无效。`
+    const { every_days: everyDays, phase_day: phaseDay, priority } = { ...routineCadenceDefaults, ...asRecord(cadence) }
+    if (!isRoutineCadenceInteger(everyDays, 1, 28)) return `「${title}」的重复周期必须是 1 至 28 的整数。`
+    if (!isRoutineCadenceInteger(phaseDay, 0, everyDays - 1)) return `「${title}」的出发日必须是 0 至 ${everyDays - 1} 的整数。`
+    if (!isRoutineCadenceInteger(priority, -10, 10)) return `「${title}」的优先级必须是 −10 至 10 的整数。`
+  }
   return ''
 }
 

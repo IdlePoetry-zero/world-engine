@@ -45,6 +45,7 @@ from .modern_occupation_profiles_260 import (
     validate_modern_city_occupation_contract_260,
 )
 from .recruitment_roles import RECRUITMENT_ROLES
+from .routine_openings import ROUTINE_OPENING_PACK_VERSION, ROUTINE_OPENINGS, RoutineOpening, prepare_routine_opening
 from .waypoint_openings import build_waypoint_openings, waypoint_opening_notice
 
 
@@ -64,11 +65,12 @@ _WAYPOINT_OPENING_PACK_VERSION = "2.8.0"
 _FEUDAL_OCCUPATION_PACK_VERSION_290 = "2.9.0"
 _MODERN_CIVIC_RECRUITMENT_PACK_VERSION_210 = "2.10.0"
 _CULTIVATION_OCCUPATION_PACK_VERSION_211 = CULTIVATION_OCCUPATION_PROFILES_211_VERSION
+_PUBLIC_WAYPOINT_PACK_VERSIONS = {_WAYPOINT_OPENING_PACK_VERSION, ROUTINE_OPENING_PACK_VERSION}
 _MODERN_OCCUPATION_PROFILE_VERSIONS = {
     _MODERN_OCCUPATION_PACK_VERSION, _MODERN_OCCUPATION_260_PACK_VERSION, _MODERN_CIVIC_OCCUPATION_PACK_VERSION,
 }
 _FAMILY_PACK_VERSIONS = {
-    _FAMILY_PACK_VERSION, _DENSE_SUSTAINED_PACK_VERSION, _WAYPOINT_OPENING_PACK_VERSION,
+    _FAMILY_PACK_VERSION, _DENSE_SUSTAINED_PACK_VERSION, *_PUBLIC_WAYPOINT_PACK_VERSIONS,
     _FEUDAL_OCCUPATION_PACK_VERSION_290, _MODERN_CIVIC_RECRUITMENT_PACK_VERSION_210,
     _CULTIVATION_OCCUPATION_PACK_VERSION_211,
     *_MODERN_OCCUPATION_PROFILE_VERSIONS,
@@ -92,7 +94,7 @@ _ORGANIZATION_COUNT = 24
 
 def _named_resident_capacity(version: str | None, population_mode: str | None) -> int:
     if version in {
-        _WAYPOINT_OPENING_PACK_VERSION, _FEUDAL_OCCUPATION_PACK_VERSION_290,
+        *_PUBLIC_WAYPOINT_PACK_VERSIONS, _FEUDAL_OCCUPATION_PACK_VERSION_290,
         _MODERN_CIVIC_RECRUITMENT_PACK_VERSION_210,
         _CULTIVATION_OCCUPATION_PACK_VERSION_211,
     }:
@@ -116,6 +118,7 @@ class ContentCatalog:
                 "version": _CASE_PACK_VERSION,
                 "available_versions": [
                     _CASE_PACK_VERSION, _TRUST_PACK_VERSION, _FAMILY_PACK_VERSION, _WAYPOINT_OPENING_PACK_VERSION,
+                    ROUTINE_OPENING_PACK_VERSION,
                 ],
                 "sustained_available_versions": (
                     [
@@ -207,9 +210,9 @@ class ContentCatalog:
                 regional_occupation_profiles=profiles,
             )
         elif pack_version in {_MODERN_OCCUPATION_260_PACK_VERSION, _MODERN_CIVIC_OCCUPATION_PACK_VERSION} or (
-            pack_id == "modern_city" and pack_version == _WAYPOINT_OPENING_PACK_VERSION
+            pack_id == "modern_city" and pack_version in _PUBLIC_WAYPOINT_PACK_VERSIONS
         ):
-            if pack_version != _WAYPOINT_OPENING_PACK_VERSION and population_mode != "sustained":
+            if pack_version not in _PUBLIC_WAYPOINT_PACK_VERSIONS and population_mode != "sustained":
                 raise ValueError(f"Pack version {pack_version} is supported only with sustained population mode.")
             if pack_id != "modern_city":
                 raise ValueError(f"Pack version {pack_version} is supported only for the modern_city background.")
@@ -312,8 +315,9 @@ class _WorldSeedBuilder:
         self.generation_seed = generation_seed
         self.population_mode = population_mode
         self.resident_count = _named_resident_capacity(pack.version, population_mode)
+        self.routine_opening = ROUTINE_OPENINGS[pack.pack_id] if pack.version == ROUTINE_OPENING_PACK_VERSION else None
         self.uses_modern_occupation_profiles = pack.pack_id == "modern_city" and pack.version in {
-            *_MODERN_OCCUPATION_PROFILE_VERSIONS, _WAYPOINT_OPENING_PACK_VERSION,
+            *_MODERN_OCCUPATION_PROFILE_VERSIONS, *_PUBLIC_WAYPOINT_PACK_VERSIONS,
             _MODERN_CIVIC_RECRUITMENT_PACK_VERSION_210,
         }
         self.uses_feudal_occupation_profiles = (
@@ -361,7 +365,7 @@ class _WorldSeedBuilder:
     def build(self) -> WorldState:
         self._build_places()
         if self.pack.version in {
-            _WAYPOINT_OPENING_PACK_VERSION, _FEUDAL_OCCUPATION_PACK_VERSION_290,
+            *_PUBLIC_WAYPOINT_PACK_VERSIONS, _FEUDAL_OCCUPATION_PACK_VERSION_290,
             _MODERN_CIVIC_RECRUITMENT_PACK_VERSION_210,
             _CULTIVATION_OCCUPATION_PACK_VERSION_211,
         }:
@@ -377,6 +381,8 @@ class _WorldSeedBuilder:
                     )
         self._seed_system_resource_accounts()
         self._build_characters()
+        if self.routine_opening is not None:
+            self._build_routine_opening(self.routine_opening)
         self._build_organizations()
         self._build_population_groups()
         self._build_population_schedule()
@@ -476,6 +482,8 @@ class _WorldSeedBuilder:
         }
         if self.generation_seed is not None:
             metadata["generation_seed"] = self.generation_seed
+        if self.routine_opening is not None:
+            metadata["time_units"]["route_durations"] += "; short local routine links are measured in minutes"
         if self._has_membership_recruitment():
             metadata["content_index"]["other_resident_population_groups"] = {
                 str(resident_id): self.entities[str(resident_id)]["components"]["life"]["population_group_id"]
@@ -852,6 +860,8 @@ class _WorldSeedBuilder:
                 region_index = place_index // _SETTLEMENTS_PER_REGION
                 local_index = self._seeded_int(f"key-place:{index}", 0, _SETTLEMENTS_PER_REGION - 1)
                 place_index = region_index * _SETTLEMENTS_PER_REGION + local_index
+            if self.routine_opening is not None and profile.role == self.routine_opening.role:
+                place_index = 1
             home = self.settlement_ids[place_index]
             characters_at[home].append(self.key_ids[index])
             self.key_names.append(name)
@@ -939,6 +949,20 @@ class _WorldSeedBuilder:
             )
 
         self.characters_at = characters_at
+
+    def _build_routine_opening(self, opening: RoutineOpening) -> None:
+        (actor_id,) = (key_id for key_id, profile in zip(self.key_ids, self.key_profiles, strict=True)
+                       if profile.role == opening.role)
+        primary_id, home_id, fallback_id = self.settlement_ids[:3]
+        notice = prepare_routine_opening(
+            opening, self.entities[str(actor_id)], self.entities[str(primary_id)],
+            self.entities[str(home_id)], self.entities[str(fallback_id)],
+        )
+        self.entities[str(self.player_id)]["components"]["known_places"].append(str(fallback_id))
+        self._put_entity(
+            self.entity_id("item", "routine-opening-notice"), "item", "告示｜例行会面时间",
+            location_id=primary_id, components={"public_description": notice},
+        )
 
 
     def _build_family_links(self) -> list[dict[str, Any]]:
@@ -1447,7 +1471,7 @@ class _WorldSeedBuilder:
                 if (
                     self.uses_modern_occupation_profiles
                     and self.pack.version in {
-                        _MODERN_CIVIC_OCCUPATION_PACK_VERSION, _WAYPOINT_OPENING_PACK_VERSION,
+                        _MODERN_CIVIC_OCCUPATION_PACK_VERSION, *_PUBLIC_WAYPOINT_PACK_VERSIONS,
                         _MODERN_CIVIC_RECRUITMENT_PACK_VERSION_210,
                     }
                 ) or self.uses_feudal_occupation_profiles or self.uses_cultivation_population_profiles:

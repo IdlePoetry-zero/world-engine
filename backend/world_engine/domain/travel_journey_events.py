@@ -52,6 +52,12 @@ class TravelJourneyEventModel(BaseModel):
     )
 
 
+class RoutineJourneyChoice(TravelJourneyEventModel):
+    window_id: UUID
+    occurrence_tick: TravelJourneyTick
+    reason: Literal["scheduled_destination", "weather", "destination_capacity", "route_or_timing"]
+
+
 class TravelJourneyChangedEvent(TravelJourneyEventModel):
     """Record a persistent journey departure, arrival, or interruption."""
 
@@ -68,6 +74,7 @@ class TravelJourneyChangedEvent(TravelJourneyEventModel):
     stationary_from_tick: TravelJourneyTick | None = Field(default=None, exclude_if=lambda value: value is None)
     stationary_until_tick: TravelJourneyTick | None = Field(default=None, exclude_if=lambda value: value is None)
     hazard_timing: TravelHazardTiming | None = Field(default=None, exclude_if=lambda value: value is None)
+    routine_choice: RoutineJourneyChoice | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def transition_is_bound_and_private(self) -> TravelJourneyChangedEvent:
@@ -91,6 +98,10 @@ class TravelJourneyChangedEvent(TravelJourneyEventModel):
             self.operation != "depart" or self.journey.hazard_tick is None
         ):
             raise ValueError("travel hazard timing is permitted only on a hazardous departure")
+        if self.routine_choice is not None and (
+            self.operation != "depart" or self.routine_choice.occurrence_tick != self.journey.arrival_tick
+        ):
+            raise ValueError("routine choice must match a departure's scheduled arrival")
         if self.operation == "delay":
             if (self.stationary_from_tick is None or self.stationary_until_tick is None
                 or self.stationary_from_tick >= self.stationary_until_tick):

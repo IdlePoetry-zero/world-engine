@@ -42,7 +42,7 @@ def test_modern_2_10_is_listed_only_for_sustained_modern_city_and_rejects_other_
     listed = {pack["pack_id"]: pack for pack in catalog.list_packs()}
 
     assert listed[_MODERN_CITY]["version"] == "2.0.0"
-    assert listed[_MODERN_CITY]["available_versions"] == ["2.0.0", "2.2.0", "2.3.0", "2.8.0"]
+    assert listed[_MODERN_CITY]["available_versions"] == ["2.0.0", "2.2.0", "2.3.0", "2.8.0", "2.12.0"]
     assert listed[_MODERN_CITY]["sustained_available_versions"] == [
         "2.4.0", "2.5.0", "2.6.0", "2.7.0", _VERSION,
     ]

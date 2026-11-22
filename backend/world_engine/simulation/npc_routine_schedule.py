@@ -15,6 +15,7 @@ from world_engine.domain.components import (
     NeedsComponent,
     PlaceComponent,
     PlaceRoute,
+    RoutineMobilityCadence,
     RoutineMobilityComponent,
 )
 from world_engine.domain.models import WorldEntity, WorldState
@@ -25,6 +26,7 @@ _MAX_TICK = 2**63 - 1
 _CHARACTERS = {"character", "person"}
 _PLACES = {"place", "location"}
 RoutineDestination = Literal["primary", "fallback"]
+RoutineReason = Literal["scheduled_destination", "weather", "destination_capacity", "route_or_timing"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +36,8 @@ class NpcRoutineCandidate:
     occurrence_tick: int
     route_id: UUID
     reason: RoutineDestination
+    priority: int = 0
+    reason_code: RoutineReason = "scheduled_destination"
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +134,7 @@ def _first_trip(
         for window in routine.windows:
             if not _needs_allow_travel(window, needs):
                 continue
+            cadence = mobility.cadences.get(window.window_id)
             options = tuple(_options(state, actor, window, mobility, routes, places, occupants, inbound))
             if not any(option.route is not None for option in options):
                 continue
@@ -139,7 +144,7 @@ def _first_trip(
                 if route is None:
                     continue
                 occurrence = _next_occurrence(
-                    window, day_seconds, earliest, route.travel_ticks, commitments, prior_occurrences[actor.id],
+                    window, day_seconds, earliest, route.travel_ticks, commitments, prior_occurrences[actor.id], cadence,
                 )
                 departure = occurrence - route.travel_ticks
                 if departure > horizon or occurrence + window.duration_seconds > _MAX_TICK:
@@ -148,12 +153,16 @@ def _first_trip(
                     state, actor, window, options, occurrence, departure, commitments, route_release_ticks,
                 )
                 if chosen == option:
+                    reason_code = _routine_reason(
+                        state, window.place_id, mobility, places, occupants, inbound, option.reason,
+                    )
                     candidates.append((departure, NpcRoutineCandidate(
                         actor.id, window.window_id, occurrence, route.route_id, option.reason,
+                        cadence.priority if cadence else 0, reason_code,
                     )))
 
     return min(candidates, key=lambda item: (
-        item[0], item[1].occurrence_tick, str(item[1].actor_id), str(item[1].window_id),
+        item[0], -item[1].priority, item[1].occurrence_tick, str(item[1].actor_id), str(item[1].window_id),
     )) if candidates else None
 
 
@@ -178,6 +187,30 @@ def _needs_allow_travel(window: DailyRoutineWindow, needs: NeedsComponent) -> bo
     return window.activity == "rest" or needs.rest is None or needs.rest.value > needs.rest.critical_below
 
 
+def _weather(state: WorldState, place: PlaceComponent, places: dict[UUID, PlaceComponent]) -> object:
+    weather = place.environment.get("weather")
+    if weather is not None:
+        return weather
+    region = _place(state, place.region_id, places)
+    return region.environment.get("weather") if region is not None else None
+
+
+def _routine_reason(
+    state: WorldState, primary_id: UUID, mobility: RoutineMobilityComponent,
+    places: dict[UUID, PlaceComponent], occupants: Counter, inbound: Counter,
+    destination: RoutineDestination,
+) -> RoutineReason:
+    if destination == "primary":
+        return "scheduled_destination"
+    primary = _place(state, primary_id, places)
+    if primary is not None:
+        if _weather(state, primary, places) in mobility.avoid_conditions:
+            return "weather"
+        if primary.capacity is not None and occupants[primary_id] + inbound[primary_id] >= primary.capacity:
+            return "destination_capacity"
+    return "route_or_timing"
+
+
 def _options(
     state: WorldState, actor: WorldEntity, window: DailyRoutineWindow, mobility: RoutineMobilityComponent,
     routes: dict[UUID, list[PlaceRoute]], places: dict[UUID, PlaceComponent],
@@ -191,11 +224,7 @@ def _options(
         if destination is None:
             continue
         # An explicit climate at the destination overrides its regional label.
-        weather = destination.environment.get("weather")
-        if weather is None:
-            region = _place(state, destination.region_id, places)
-            weather = region.environment.get("weather") if region is not None else None
-        if weather in mobility.avoid_conditions:
+        if _weather(state, destination, places) in mobility.avoid_conditions:
             continue
         reason: RoutineDestination = "primary" if index == 0 else "fallback"
         if place_id == actor.location_id:
@@ -209,22 +238,25 @@ def _options(
 
 def _next_occurrence(
     window: DailyRoutineWindow, day_seconds: int, earliest: int, travel_ticks: int,
-    commitments: list[tuple[int, int]], prior_occurrences: set[int],
+    commitments: list[tuple[int, int]], prior_occurrences: set[int], cadence: RoutineMobilityCadence | None,
 ) -> int:
+    cycle = day_seconds * (cadence.every_days if cadence else 1)
+    phase = window.start_second + day_seconds * (cadence.phase_day if cadence else 0)
+
     def at_or_after(departure: int) -> int:
         arrival = departure + travel_ticks
-        return arrival + (window.start_second - arrival) % day_seconds
+        return arrival + (phase - arrival) % cycle
 
     occurrence = at_or_after(earliest)
     for start, end in commitments:
         while occurrence in prior_occurrences:
-            occurrence += day_seconds
+            occurrence += cycle
         if occurrence + window.duration_seconds <= start:
             return occurrence
         if occurrence - travel_ticks < end:
             occurrence = at_or_after(end)
     while occurrence in prior_occurrences:
-        occurrence += day_seconds
+        occurrence += cycle
     return occurrence
 
 
