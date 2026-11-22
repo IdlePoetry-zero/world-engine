@@ -14,7 +14,10 @@ from pydantic import TypeAdapter
 from pydantic_core import to_jsonable_python
 
 from .errors import InsufficientResources, InvalidEvent
-from .story_nodes import STORY_NODE_HANDLER, StoryMilestone, StoryMilestoneResolvedEvent, settle_story_milestone
+from .story_nodes import (
+    STORY_NODE_HANDLER, StoryMilestone, StoryMilestoneResolvedEvent, ready_story_reaction,
+    settle_story_milestone, settle_story_reaction,
+)
 from .npc_plan_events import NpcPlanCreatedEvent, NpcPlanRevisedEvent
 from .npc_plans import apply_npc_plan_created, apply_npc_plan_revised, occupied_npc_ids
 from .npc_plan_review_events import (
@@ -1352,10 +1355,20 @@ def apply_event(state: WorldState, raw_event: DomainEvent | dict[str, object]) -
         return _apply_scheduled_event_completion(state, event)
 
     if isinstance(event, StoryMilestoneResolvedEvent):
-        schedule = next((item for item in state.scheduled_events if item.id == event.milestone.schedule_id), None)
-        if (schedule is None or event.visibility != {"policy": "author_only"}
-                or settle_story_milestone(state, schedule) != event.milestone):
+        ident = event.milestone.schedule_id
+        schedule = next((item for item in state.scheduled_events if item.id == ident), None)
+        if schedule is not None:
+            expected = settle_story_milestone(state, schedule, event.event_id)
+        else:
+            reaction = ready_story_reaction(state)
+            expected = (settle_story_reaction(state, reaction, event.event_id)
+                        if reaction is not None and reaction.reaction_id == ident else None)
+        if expected != event:
             raise InvalidEvent("The story outcome does not match the registered world-state conditions.")
+        if event.transfer is not None:
+            state = apply_event(state, ResourceTransferredEvent(event_id=event.event_id, **event.transfer.model_dump()))
+        if schedule is None:
+            return _validated_state(state, {"story_milestones": [*state.story_milestones, event.milestone]})
         completion = ScheduledEventCompletedEvent(
             event_id=event.event_id, scheduled_event_id=schedule.id, expected_revision=schedule.revision,
         )
@@ -3233,6 +3246,12 @@ def ledger_postings(event: DomainEvent) -> tuple[LedgerPosting, ...]:
         postings = (
             LedgerPosting(event.from_account_id, event.resource_id, event.quantity.copy_negate()),
             LedgerPosting(event.to_account_id, event.resource_id, event.quantity),
+        )
+    elif isinstance(event, StoryMilestoneResolvedEvent) and event.transfer is not None:
+        transfer = event.transfer
+        postings = (
+            LedgerPosting(transfer.from_account_id, transfer.resource_id, transfer.quantity.copy_negate()),
+            LedgerPosting(transfer.to_account_id, transfer.resource_id, transfer.quantity),
         )
     elif isinstance(event, ShipmentReliefDistributedEvent):
         plan = event.plan

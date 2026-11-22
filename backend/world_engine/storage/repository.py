@@ -40,6 +40,7 @@ from world_engine.domain.occupation_legacy_vacancies import (
 )
 from world_engine.domain.npc_attendance_events import NPC_ATTENDANCE_EVENTS, NpcAttendanceStartedEvent
 from world_engine.domain.npc_plan_review_events import NpcPlanReviewScheduledEvent, validate_authored_npc_review_scope
+from world_engine.domain.story_nodes import StoryMilestoneResolvedEvent, ready_story_reaction, settle_story_reaction
 from world_engine.domain.relationship_invitation_events import RelationInvitationChangedEvent
 from world_engine.domain.private_gifts import PrivateGiftChangedEvent
 from world_engine.domain.private_gift_validation import NPC_GIFT_REPLY_COMMAND, validate_private_gift_batch
@@ -2060,6 +2061,10 @@ class WorldRepository:
             raise InvalidEvent("NPC reflection memory requires one leased private knowledge event.")
         if any(isinstance(event, OccupationDeathVacanciesResolvedEvent) for event in typed_events):
             raise InvalidEvent("Employment closures are derived by the repository from committed deaths.")
+        if any(isinstance(event, StoryMilestoneResolvedEvent) for event in typed_events) and (
+            lease is None or command.command_type != "simulation.window"
+        ):
+            raise AccessDenied("A supplied story milestone requires its simulation worker lease.")
         event_ids = [event.event_id for event in typed_events]
         if len(set(event_ids)) != len(event_ids):
             raise InvalidEvent("Event IDs must be unique within a command.")
@@ -2656,6 +2661,10 @@ class WorldRepository:
                     if len(typed_events) == MAX_EVENTS_PER_COMMAND or vacancies.event_id in event_ids:
                         raise InvalidEvent("Derived employment closure exceeds the batch limit or repeats an event ID.")
                     typed_events = (*typed_events, vacancies)
+                reaction_ids = {item.reaction_id for item in state.story_reactions}
+                if any(isinstance(event, StoryMilestoneResolvedEvent) and event.milestone.schedule_id in reaction_ids
+                       for event in typed_events):
+                    raise InvalidEvent("Story reactions are derived from the completed command projection.")
                 version_after = branch.state_version + 1
                 first_seq = branch.head_seq + 1
                 event_records: list[EventRecord] = []
@@ -2670,6 +2679,7 @@ class WorldRepository:
                 if (
                     itinerary_care_projection is not None
                     and vacancies is None
+                    and not reaction_ids
                     and lease is not None
                     and leased_job.job_type == "simulation.long_action"
                     and command.command_type == "simulation.window"
@@ -2696,7 +2706,7 @@ class WorldRepository:
                         projection_payload = candidate_payload
                         projection_hash = candidate_hash
                         projection_reused = True
-                if not projection_reused and itinerary_transit_projection_receipt is not None:
+                if not projection_reused and not reaction_ids and itinerary_transit_projection_receipt is not None:
                     from world_engine.simulation.engine import (
                         _ItineraryTransitProjectionReceipt,
                         _is_ordinary_itinerary_transit_batch,
@@ -2786,9 +2796,20 @@ class WorldRepository:
                             projection_hash = candidate_hash
                             projection_reused = True
                             itinerary_transit_projection_reused = True
-                for index, event in enumerate(typed_events):
+                # Once the supplied batch is fully reduced, append ready reactions
+                # in priority order. Each appended event can unlock another.
+                committed_events = list(typed_events)
+                for index, event in enumerate(committed_events):
                     if not projection_reused:
                         next_state = apply_event(next_state, event)
+                    if reaction_ids and index == len(committed_events) - 1:
+                        reaction = ready_story_reaction(next_state)
+                        if reaction is not None:
+                            reaction_event_id = uuid5(command.command_id, f"story.reaction:{reaction.reaction_id}")
+                            if len(committed_events) == MAX_EVENTS_PER_COMMAND or reaction_event_id in event_ids:
+                                raise InvalidEvent("Derived story reaction exceeds the batch limit or repeats an event ID.")
+                            committed_events.append(settle_story_reaction(next_state, reaction, reaction_event_id))
+                            event_ids.append(reaction_event_id)
                     event_tick = (
                         itinerary_transit_projection_receipt.event_ticks[index]
                         if itinerary_transit_projection_reused
@@ -2816,10 +2837,11 @@ class WorldRepository:
                             payload=event_payload(event),
                             visibility=event.visibility,
                             state_version_after=version_after,
-                            commit_boundary=(index == len(typed_events) - 1),
+                            commit_boundary=(index == len(committed_events) - 1),
                             committed_at=now,
                         )
                     )
+                typed_events = tuple(committed_events)
                 validate_ledger_postings(tuple(postings))
                 next_payload = projection_payload if projection_reused else state_json(next_state)
                 next_hash = projection_hash if projection_reused else state_payload_hash(next_payload)

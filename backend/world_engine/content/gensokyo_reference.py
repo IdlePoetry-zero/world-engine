@@ -8,10 +8,12 @@ from world_engine.domain.models import WorldEntity, WorldState
 from world_engine.domain.story_nodes import STORY_NODE_HANDLER, STORY_NODE_VERSION, StoryNode
 from world_engine.domain.world_books import WorldBookCitation, WorldBookEntry, WorldBookProvenance
 
+from .gensokyo_original_profiles import GEOGRAPHY, PROFILES, source_id, source_register
+
 
 PACK_ID = "author.gensokyo-reference"
 PACK_TITLE = "幻想乡原作资料与异变年代"
-PACK_VERSION = "0.2.0"
+PACK_VERSION = "0.3.0"
 _NAMESPACE = UUID("0d0063f6-45d8-4aaa-9873-135f3d9b5a5f")
 
 _WORKS = {
@@ -28,8 +30,21 @@ _WORKS = {
     "official.th14": "《东方辉针城》官方简介",
     "official.th16": "《东方天空璋》官方简介",
     "ichijinsha.wild-horned-hermit": "一迅社《东方茨歌仙》人物介绍",
+    "anniversary.keywords": "东方 Project 25 年纪念站用语页",
     "kadokawa.suzunaan.1": "KADOKAWA《东方铃奈庵》第一卷简介",
     "kadokawa.suzunaan.7": "KADOKAWA《东方铃奈庵》第七卷馆藏书目",
+} | {key: record["work"] for key, record in source_register().items()}
+
+_DIRECT_URLS = {
+    "zun.th08.characters": "https://www16.big.or.jp/~zun/html/th08man/html/chara.html",
+    "ichijinsha.silent-sinner.characters": "https://www.ichijinsha.co.jp/special/toho/character/index.html",
+    "ichijinsha.silent-sinner.world": "https://www.ichijinsha.co.jp/special/toho/world/index.html",
+    "ichijinsha.wild-horned-hermit": "https://www.ichijinsha.co.jp/special/toho_ibarakasen/index.html",
+    "anniversary.keywords": "https://touhou-x.jp/keywords/",
+    "kadokawa.suzunaan.1": "https://www.kadokawa.co.jp/product/321211000203/",
+    "kadokawa.suzunaan.7": "https://opac.kadcul.com/en/library/search/000081904",
+    **{key: f"https://touhou-project.news/titles/{key.removeprefix('official.')}/"
+       for key in _WORKS if key.startswith("official.")},
 }
 
 # Entries summarize supported facts. Identical names in other contexts need separate source checks.
@@ -62,7 +77,7 @@ _PLACES = (
     ("netherworld", "冥界", "冥界", "西行寺家宅邸所在的异界。", "ichijinsha.silent-sinner.world", "西行寺宅邸段"),
     ("kourindou", "香霖堂", "香霖堂", "森林入口附近的道具店，经营多类道具。", "ichijinsha.silent-sinner.world", "香霖堂段"),
     ("mansion-library", "红魔馆地下图书馆", "大図書館", "红魔馆下方的藏书处。《东方儚月抄》人物资料记载帕秋莉居于此处。", "ichijinsha.silent-sinner.characters", "帕秋莉条目"),
-    ("saigyouji-residence", "西行寺家宅邸", "西行寺家の屋敷", "位于冥界的西行寺家宅邸，有庭园和樱树。", "ichijinsha.silent-sinner.world", "西行寺宅邸段"),
+    ("saigyouji-residence", "白玉楼", "白玉楼", "位于冥界的西行寺家宅邸，庭园内有樱树。", "zun.th07.release-notes", "魂魄妖梦、西行寺幽幽子条目"),
     ("sanzu-river", "三途河", "三途の河", "小野塚小町在此担任渡守。", "ichijinsha.wild-horned-hermit", "小野塚小町条目"),
     ("moriya-shrine", "守矢神社", "守矢神社", "《东方风神录》中出现在山上的新神社。", "official.th10", "故事简介"),
     ("old-hell", "旧地狱", "旧地獄", "《东方地灵殿》介绍中曾是地狱的一片废墟。", "official.th11", "故事简介"),
@@ -82,6 +97,18 @@ _HISTORY = (
 )
 
 _SEARCH_ALIASES = {"reimu": ("灵梦",), "marisa": ("魔理沙",), "human-village": ("人里",)}
+_RULE_REFERENCES = (
+    ("spell-card-duel", "弹幕游戏与符卡", ("符卡", "弹幕决斗"),
+     "纪念站用语页将弹幕游戏概述为处理纠纷的一种有规则的决斗，符卡用于以纸记录命名后的弹幕。", "anniversary.keywords", "弹幕游戏、符卡"),
+    ("learned-magic", "魔法与魔法使", ("学魔法", "魔法师"),
+     "《东方儚月抄》人物介绍区分魔理沙后天习得的魔法与帕秋莉的种族身份。", "ichijinsha.silent-sinner.characters", "魔理沙、帕秋莉条目"),
+    ("youkai-powers", "妖力的个体条件", ("妖力", "式神"),
+     "《东方妖妖梦》记载橙在带式时力量有变化，接触水会令式脱离。这条限制适用于橙的资料。", "zun.th07.release-notes", "橙条目"),
+    ("outside-artifacts", "外界技术与道具知识", ("科技", "外界道具"),
+     "《东方儚月抄》人物介绍明确区分香霖堂店主能辨认道具的名称与用途，和是否知道怎么使用道具。", "ichijinsha.silent-sinner.characters", "香霖堂店主条目"),
+    ("tech-and-market", "能力卡的市场供给", ("能力卡", "市场神"),
+     "《东方虹龙洞》人物背景记载市场神促成的部分交易关系到能力卡补充魔力。", "zun.th18.release-notes", "饭纲丸龙条目"),
+)
 _PLACE_TYPES = {
     "human-village": "settlement", "bamboo": "wilderness", "forest": "wilderness",
     "netherworld": "region", "old-hell": "region", "sanzu-river": "site",
@@ -89,19 +116,27 @@ _PLACE_TYPES = {
 _PLACE_PARENTS = {"eientei": "bamboo", "mansion-library": "mansion", "saigyouji-residence": "netherworld"}
 _LATER_REGIONS = frozenset({"moriya-shrine", "old-hell", "myouren-temple"})
 _LATER_PERSON_PROFILES = frozenset({"kosuzu", "kasen", "sanae", "komachi"})
+_UNCERTAINTIES = (
+    ("scarlet-date", "红雾异变的具体日期", ("红雾日期", "红雾是哪一天"),
+     "现已核对的官方故事简介未给出异变发生的世界内年月日。页面给出的发售日期另计。", "historical_event", "official.th06", "故事简介与发售日"),
+    ("bamboo-route", "迷途竹林到永远亭的步行路线", ("永远亭路线", "怎么去永远亭"),
+     "原文支持永远亭在竹林深处。目前核对的段落没有为游戏提供固定从哪一侧进入、走多久或经过哪些路口。", "place", "ichijinsha.silent-sinner.world", "永远亭段"),
+    ("power-units", "跨能力的统一度量", ("妖力等级", "妖力数值", "统一法力"),
+     "人物文档说明不同角色的能力和限制，当前引用未给出可通用于所有种族和能力的数值换算。", "rule", "zun.th08.characters", "各人物的能力说明"),
+)
 
 
 def _id(key: str) -> UUID:
     return uuid5(_NAMESPACE, key)
 
 
-def _entry(key, title, aliases, content, category, source_id, locator) -> WorldBookEntry:
+def _entry(key, title, aliases, content, category, source_id, locator, *, status="documented") -> WorldBookEntry:
     return WorldBookEntry(
         entry_id=_id(f"reference:{key}"), source_key=key, title=title,
         keywords=tuple(dict.fromkeys((title, *aliases, *_SEARCH_ALIASES.get(key, ())))),
         content=content, always_on=False, visibility="public",
         provenance=WorldBookProvenance(
-            category=category, status="documented",
+            category=category, status=status,
             citations=(WorldBookCitation(source_id=source_id, work=_WORKS[source_id], locator=locator),),
         ),
     )
@@ -112,28 +147,63 @@ def build_reference_entries() -> list[WorldBookEntry]:
     return [
         *(_entry(key, title, (alias,), content, "person", source, alias)
           for key, title, alias, content, source in _PEOPLE),
+        *(_entry(key, title, (alias,), content, "person", source_id(number), f"人物章 · {alias}")
+          for number, records in PROFILES.items() for key, title, alias, content in records),
         *(_entry(key, title, (alias,), content, "place", source, locator)
           for key, title, alias, content, source, locator in _PLACES),
+        *(_entry(key, title, (alias,), content, "organization" if kind == "organization" else "place",
+                 source_id(number), locator)
+          for number, records in GEOGRAPHY.items() for key, title, alias, kind, _, locator, content in records),
         *(_entry(key, title, (), content, "historical_event", source, "故事简介")
           for key, title, content, source in _HISTORY),
+        *(_entry(key, title, aliases, content, "rule", source, locator)
+          for key, title, aliases, content, source, locator in _RULE_REFERENCES),
+        *(_entry(key, title, aliases, content, category, source, locator, status="unknown")
+          for key, title, aliases, content, category, source, locator in _UNCERTAINTIES),
     ]
+
+
+def build_geography_index() -> list[dict]:
+    return [
+        *({"ref": key, "kind": _PLACE_TYPES.get(key, "building"), "parent": _PLACE_PARENTS.get(key)}
+          for key, *_ in _PLACES),
+        *({"ref": key, "kind": kind, "parent": parent, "source_document": source_id(number)}
+          for number, records in GEOGRAPHY.items() for key, _, _, kind, parent, *_ in records),
+    ]
+
+
+def build_source_index() -> dict[str, dict[str, str]]:
+    return ({key: {"work": _WORKS[key], "url": url, "host": "创作者、官方站点或出版社"}
+             for key, url in _DIRECT_URLS.items()} | source_register())
 
 
 def _scenario(*, incident: str, description: str, known_incidents: frozenset[str]) -> dict:
     historical_keys = {key for key, *_ in _HISTORY}
+    document_limit = 6 if incident == "scarlet-mist" else 8
+    later_profiles = {key for number, profiles in PROFILES.items() if number > document_limit for key, *_ in profiles}
+    later_places = {key for number, records in GEOGRAPHY.items() if number > document_limit for key, *_ in records}
+    later_rules = {"tech-and-market"} | ({"youkai-powers"} if document_limit < 7 else set())
     entries = [entry for entry in build_reference_entries()
                if entry.source_key not in _LATER_REGIONS and entry.source_key not in _LATER_PERSON_PROFILES
+               and entry.source_key not in later_profiles and entry.source_key not in later_places
+               and entry.source_key not in later_rules
                and (entry.source_key not in historical_keys or entry.source_key in known_incidents)]
     village = _id("place:human-village")
     station = _id("place:village-observation-post")
-    places = {
-        _id(f"place:{key}"): WorldEntity(id=_id(f"place:{key}"), name=title, kind="place", components={
-            "place": PlaceComponent(
-                place_type=_PLACE_TYPES.get(key, "building"),
-                parent_id=_id(f"place:{_PLACE_PARENTS[key]}") if key in _PLACE_PARENTS else None,
-            ).model_dump(mode="json"),
-        }) for key, title, *_ in _PLACES if key not in _LATER_REGIONS
-    }
+    titles = {entry.source_key: entry.title for entry in entries}
+    atlas = [row for row in build_geography_index() if row["ref"] in titles]
+    places = {}
+    for row in atlas:
+        key, kind, parent = row["ref"], row["kind"], row["parent"]
+        parent_id = _id(f"place:{parent}") if parent in titles else None
+        if kind == "organization":
+            ident = _id(f"organization:{key}")
+            places[ident] = WorldEntity(id=ident, name=titles[key], kind="organization", location_id=parent_id)
+        else:
+            ident = _id(f"place:{key}")
+            places[ident] = WorldEntity(id=ident, name=titles[key], kind="place", components={
+                "place": PlaceComponent(place_type=kind, parent_id=parent_id).model_dump(mode="json"),
+            })
     places[station] = WorldEntity(id=station, name="里外观测棚", kind="place")
     for location, target in ((village, station), (station, village)):
         route = PlaceRoute(route_id=_id(f"path:{location}"), from_place_id=location, to_place_id=target, travel_ticks=60)

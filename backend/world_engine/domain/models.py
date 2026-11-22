@@ -103,7 +103,7 @@ from .travel_journeys import (
 )
 from .travel_journey_events import TravelJourneyChangedEvent
 from .world_books import WorldBookEntry, WorldBookImportedEvent
-from .story_nodes import StoryMilestone, StoryMilestoneResolvedEvent, validate_story_state
+from .story_nodes import StoryMilestone, StoryMilestoneResolvedEvent, StoryReaction, validate_story_state
 from .waypoint_opportunity_events import WaypointOpportunityDecision, WaypointOpportunityDecisionRecordedEvent
 
 ResourceId = Annotated[str, Field(min_length=1, max_length=160, pattern=r"^[a-zA-Z][a-zA-Z0-9_.-]*$")]
@@ -261,6 +261,7 @@ class WorldState(ContractModel):
     knowledge: list[KnowledgeRecord] = Field(default_factory=list)
     goals: list[GoalRecord] = Field(default_factory=list)
     scheduled_events: list[ScheduledEventRecord] = Field(default_factory=list)
+    story_reactions: list[StoryReaction] = Field(default_factory=list, max_length=128, exclude_if=lambda records: not records)
     story_milestones: list[StoryMilestone] = Field(default_factory=list, exclude_if=lambda records: not records)
     investigation_cases: list[InvestigationCaseFile] = Field(default_factory=list)
     public_accusation_corrections: list[PublicAccusationCorrection] = Field(
@@ -344,6 +345,7 @@ class WorldState(ContractModel):
                 (NpcMeetingAttendanceDecision, self.npc_meeting_attendance_decisions),
                 (InstitutionalCreditContract, self.institutional_credit_contracts),
                 (WorldBookEntry, self.world_book_entries),
+                (StoryReaction, self.story_reactions),
             ):
                 for value in records:
                     raw = value.model_dump(mode="json") if isinstance(value, BaseModel) else value

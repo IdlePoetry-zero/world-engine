@@ -453,6 +453,8 @@ def project_player_state(state: dict[str, Any], actor_id: str) -> dict[str, Any]
     if state.get("story_milestones"):
         public_nodes = {item["id"]: item["payload"] for item in state.get("scheduled_events", [])
                         if item["handler_id"] == STORY_NODE_HANDLER and item["payload"].get("visibility") == "public"}
+        public_nodes.update({item["reaction_id"]: item["node"] for item in state.get("story_reactions", [])
+                             if item["node"]["visibility"] == "public"})
         chronicle = []
         for record in state["story_milestones"]:
             node = public_nodes.get(record["schedule_id"])
