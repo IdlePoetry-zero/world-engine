@@ -35,7 +35,7 @@ def npc_goal_conditions_met(
     return (
         bool(goal.conditions)
         and (goal.deadline is None or state.current_tick <= goal.deadline)
-        and all(_condition_met(state, goal.owner_id, condition, fulfilled) for condition in goal.conditions)
+        and all(goal_condition_met(state, goal.owner_id, condition, fulfilled=fulfilled) for condition in goal.conditions)
     )
 
 
@@ -55,8 +55,8 @@ def npc_goal_fulfillment_closure(
     return fulfilled
 
 
-def _condition_met(
-    state: WorldState, owner_id: UUID, condition: GoalCondition, fulfilled: frozenset[UUID],
+def goal_condition_met(
+    state: WorldState, owner_id: UUID, condition: GoalCondition, *, fulfilled: frozenset[UUID] = frozenset(),
 ) -> bool:
     subject = state.entities.get(condition.subject_id)
     if condition.kind == "reach_location":

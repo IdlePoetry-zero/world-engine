@@ -202,6 +202,11 @@
 .scene-journey-status { min-width: 0; scroll-margin-top: 76px; }
 .scene-journey-status:focus-visible { outline: 2px solid #a7d1b7; outline-offset: 3px; border-radius: 6px; }
 .scene-journey-status > .long-action-panel { margin-top: 0; }
+
+.scene-story-chronicle { padding: 0.75rem 1rem; border-bottom: 1px solid #30483d; }
+.scene-story-chronicle summary { cursor: pointer; }
+.scene-story-chronicle ul { max-height: 13rem; overflow-y: auto; margin-bottom: 0; }
+.scene-story-chronicle p { margin: 0.2rem 0 0.6rem; }
 .scene-tool-links { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 
 @media (max-width: 1050px) {

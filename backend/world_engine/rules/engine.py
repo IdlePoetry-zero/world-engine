@@ -29,6 +29,7 @@ from world_engine.domain.market_pricing import PRICE_REVIEW_HANDLER_ID, MarketPr
 from world_engine.domain.institutional_credit import InstitutionalCreditError
 from world_engine.domain.institutional_credit_state import CREDIT_MATURITY_HANDLER, plan_institutional_credit_maturity_event
 from world_engine.domain.promise_trust_settlement import build_trusted_promise_settlement
+from world_engine.domain.story_nodes import STORY_NODE_HANDLER, StoryMilestoneResolvedEvent, settle_story_milestone
 from world_engine.domain.shipment_relief import plan_shipment_relief
 from world_engine.domain.shipment_relief_events import (
     ShipmentReliefDistributedEvent,
@@ -381,6 +382,15 @@ class RuleEngine:
         by_id = {item.id: item for item in state.scheduled_events}
         if any(by_id[dependency].status != "completed" for dependency in scheduled.dependencies):
             return self._rejected(context, "scheduled_dependencies_pending", "The scheduled event has unfinished dependencies.")
+        if scheduled.handler_id == STORY_NODE_HANDLER:
+            milestone = settle_story_milestone(state, scheduled)
+            event = StoryMilestoneResolvedEvent(
+                event_id=self._event_id(context, f"story.milestone:{scheduled.id}"), milestone=milestone,
+            )
+            return self._resolution(
+                state, context, status="succeeded", code="story_milestone_resolved",
+                message="A story milestone reached its scheduled boundary.", events=[event],
+            )
         if scheduled.handler_id == "population.year_advance":
             return self._resolve_population_year(state, scheduled, context)
         if scheduled.handler_id == "environmental.harvest":

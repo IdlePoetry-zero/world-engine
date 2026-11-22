@@ -540,6 +540,7 @@ export type WorldState = {
   player_id?: string
   calendar?: { name?: string; calendar_id?: string; day_seconds?: number; year_days?: number; [key: string]: unknown }
   world_book_entries?: WorldBookEntry[] | null
+  story_milestones?: { record_id: string; title: string; summary: string; resolved_tick: string }[]
   metadata?: Record<string, unknown>
   resources: Record<string, ResourceAccount>
   own_shipments?: OwnShipment[]

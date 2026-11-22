@@ -20,6 +20,7 @@
 - `ichijinsha.silent-sinner.characters` 和 `ichijinsha.silent-sinner.world` 对应一迅社的《东方儚月抄》介绍。用于核实永远亭位于迷途竹林内、红魔馆有地下图书馆，以及与这些地点有关的人物。神社的数量等随作品时期变化的说法按当时语境记录。 [人物](https://www.ichijinsha.co.jp/special/toho/character/index.html) · [世界](https://www.ichijinsha.co.jp/special/toho/world/index.html)
 - `kadokawa.suzunaan.1` 和 `kadokawa.suzunaan.7` 对应书目中的角色和地点简介。 [第一卷](https://www.kadokawa.co.jp/product/321211000203/) · [第七卷馆藏书目](https://opac.kadcul.com/en/library/search/000081904?author%5Bini%5D=ZUN%EF%BD%9C%E5%8E%9F%E4%BD%9C&author_option=and&bookplate_display=hide&free_option=and&like_option=partial&page=2&publisher_option=and&sort=year_desc)
 - `official.th06`、`official.th07`、`official.th08` 对应上表三部作品的官网简介。公开简介只支持故事概要，档案里的作品顺序保留为编目顺序。
+- `ichijinsha.wild-horned-hermit` 对应《东方茨歌仙》出版社人物页。`official.th10` 至本轮核对的 `official.th16` 对应异变概要及其中明确命名的地点。 [茨歌仙](https://www.ichijinsha.co.jp/special/toho_ibarakasen/index.html) · [风神录](https://touhou-project.news/titles/th10/) · [地灵殿](https://touhou-project.news/titles/th11/) · [星莲船](https://touhou-project.news/titles/th12/) · [神灵庙](https://touhou-project.news/titles/th13/) · [辉针城](https://touhou-project.news/titles/th14/) · [天空璋](https://touhou-project.news/titles/th16/)
 
 ## 接入方向
 
@@ -34,3 +35,10 @@
 - 世界包可提供多份介入点初态。预览显示时间位置与可公开的先前事实。确认选择后启用对应的创世快照，重试同一请求时会核对介入点。时间位置可以按原作事件描述，开场世界时钟从该存档起算。
 - 本地资料包 `0.1.0` 收录首批 13 名角色资料、8 个地点和 3 个异变资料条目，提供红雾出现后、满月异常夜两个开场。运行 `.runtime/venv313/Scripts/python.exe scripts/build-gensokyo-reference.py` 生成 ZIP。人物录入和世界地图还需继续扩充，后续剧情触发与能力判定仍需接入。
 - 两个开场分别通过 SQLite 导入、创世回放及 2.0 备份恢复。红雾开场的 GM 检索无法取得后续满月异变条目。以「灵梦」「魔理沙」「八云紫」「迷途竹林」搜索均可取得带出处的记录。世界包和作者相关联合回归 87 项通过，前端类型检查与 lint 通过。《回灯之约》1.2 重新打包与此前归档的 SHA-256 一致。
+
+## 剧情结算与 0.2.0 样例
+
+- 作者用 `story.milestone` 登记一次性观察节点，可列出人物、参考出处、公开范围、默认结果和有序变体。在约定的世界时点执行。结果可以检查位于某地、资源余额、人物状态、既有目标、技能、资格、已有知识、地点环境或前一剧情回执。按首个全部满足条件的变体结算。禁止跳过到期节点，通用完成事件不能代替剧情回执。
+- 节点可指定外部事件本身是否允许阻止。外部事件仍会发生时，变体可以定义局部损失或应对结果。当前结算产生分支剧情回执并供后续节点、GM 和「已发生的剧情」使用。时间由已登记的世界时点驱动，状态条件何时能触发和后果如何落到账目等正式规则仍需继续实现。
+- 幻想乡样例在两个介入点分别提供原创观测任务。可以用正式行路到观测棚，在到期前参与复核，或留在村里。两种选择改变后续公告。实测分支独立，世界快进与玩家等待均可结算，两个分支可从创世回放和备份恢复。
+- 完整出处索引现为 16 名具名人物、14 个地点和 9 条异变概要，与 ZIP 一并生成。两个早期开场仅带各自可用的资料。地图已登记永远亭与竹林、地下图书馆与红魔馆、西行寺家宅邸与冥界的包含关系。观测棚与村里的行走时间属于本包配置。

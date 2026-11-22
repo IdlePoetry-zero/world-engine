@@ -14,6 +14,7 @@ from pydantic import TypeAdapter
 from pydantic_core import to_jsonable_python
 
 from .errors import InsufficientResources, InvalidEvent
+from .story_nodes import STORY_NODE_HANDLER, StoryMilestone, StoryMilestoneResolvedEvent, settle_story_milestone
 from .npc_plan_events import NpcPlanCreatedEvent, NpcPlanRevisedEvent
 from .npc_plans import apply_npc_plan_created, apply_npc_plan_revised, occupied_npc_ids
 from .npc_plan_review_events import (
@@ -1350,6 +1351,16 @@ def apply_event(state: WorldState, raw_event: DomainEvent | dict[str, object]) -
     if isinstance(event, ScheduledEventCompletedEvent):
         return _apply_scheduled_event_completion(state, event)
 
+    if isinstance(event, StoryMilestoneResolvedEvent):
+        schedule = next((item for item in state.scheduled_events if item.id == event.milestone.schedule_id), None)
+        if (schedule is None or event.visibility != {"policy": "author_only"}
+                or settle_story_milestone(state, schedule) != event.milestone):
+            raise InvalidEvent("The story outcome does not match the registered world-state conditions.")
+        completion = ScheduledEventCompletedEvent(
+            event_id=event.event_id, scheduled_event_id=schedule.id, expected_revision=schedule.revision,
+        )
+        return _apply_scheduled_event_completion(state, completion, story_milestone=event.milestone)
+
     if isinstance(event, EnvironmentalSourceAccountOpenedEvent):
         return apply_environmental_source_account_opened(state, event)
 
@@ -1772,6 +1783,9 @@ def apply_event(state: WorldState, raw_event: DomainEvent | dict[str, object]) -
     if isinstance(event, TimeAdvancedEvent):
         if event.to_tick <= state.current_tick:
             raise InvalidEvent("World time must advance monotonically.")
+        if any(item.handler_id == STORY_NODE_HANDLER and item.status == "queued" and item.due_tick < event.to_tick
+               for item in state.scheduled_events):
+            raise InvalidEvent("World time cannot skip a queued story milestone.")
         # The parsed event validates the range. A strictly higher tick preserves
         # state invariants, including timestamp bounds on existing records.
         return state.model_copy(update={"current_tick": event.to_tick})
@@ -3107,7 +3121,10 @@ def _apply_renewable_resource_harvest(
     return _validated_state(state, {"entities": entities, "resources": resources})
 
 
-def _apply_scheduled_event_completion(state: WorldState, event: ScheduledEventCompletedEvent, *, npc_review_validated=False) -> WorldState:
+def _apply_scheduled_event_completion(
+    state: WorldState, event: ScheduledEventCompletedEvent, *, npc_review_validated=False,
+    story_milestone: StoryMilestone | None = None,
+) -> WorldState:
     scheduled_events = list(state.scheduled_events)
     index = next((i for i, item in enumerate(scheduled_events) if item.id == event.scheduled_event_id), None)
     if index is None:
@@ -3117,6 +3134,8 @@ def _apply_scheduled_event_completion(state: WorldState, event: ScheduledEventCo
         raise InvalidEvent("NPC plan reviews require their typed, validated review result.")
     if scheduled.handler_id == PRICE_REVIEW_HANDLER_ID:
         raise InvalidEvent("Market price reviews require the typed atomic review event.")
+    if scheduled.handler_id == STORY_NODE_HANDLER and story_milestone is None:
+        raise InvalidEvent("Story milestones require their typed, validated outcome receipt.")
     if scheduled.revision != event.expected_revision:
         raise InvalidEvent("Scheduled completion expected_revision does not match stored state.")
     if scheduled.status != "queued" or scheduled.due_tick != state.current_tick:
@@ -3173,6 +3192,9 @@ def _apply_scheduled_event_completion(state: WorldState, event: ScheduledEventCo
         return state.model_copy(update={"scheduled_events": scheduled_events})
 
     scheduled_events[index] = replacement
+    if story_milestone is not None:
+        return _validated_state(state, {"scheduled_events": scheduled_events,
+                                        "story_milestones": [*state.story_milestones, story_milestone]})
     return _validated_state(state, {"scheduled_events": scheduled_events})
 
 

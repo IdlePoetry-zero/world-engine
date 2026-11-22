@@ -1,0 +1,136 @@
+from uuid import UUID, uuid4
+
+from fastapi.testclient import TestClient
+import pytest
+
+from world_engine.application.backups import BackupApplication
+from world_engine.application.simulation_jobs import SimulationJobs
+from world_engine.content.gensokyo_reference import build_archive
+from world_engine.domain.components import ScheduledEventRecord
+from world_engine.domain.errors import InvalidEvent
+from world_engine.domain.gameplay_events import ScheduledEventCompletedEvent
+from world_engine.domain.models import JobStatus, TimeAdvancedEvent, WorldEntity, WorldState
+from world_engine.domain.reducers import apply_event
+from world_engine.domain.story_nodes import (
+    STORY_NODE_HANDLER, STORY_NODE_VERSION, StoryNode, StoryMilestoneResolvedEvent, settle_story_milestone,
+)
+from world_engine.runtime import build_application, local_identity
+from world_engine.storage.backup_import import WorldBackupImporter
+from world_engine.storage.database import Database
+from world_engine.storage.repository import WorldRepository
+
+
+def test_gensokyo_milestones_follow_committed_player_travel_across_forks_and_restore(tmp_path):
+    app = build_application(data_directory=tmp_path, run_simulation_worker=False)
+    scope = local_identity(tmp_path)
+    repository = app.state.worlds.repository
+    jobs = SimulationJobs(repository)
+
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        client.get("/api/v1/session").raise_for_status()
+        source = build_archive()
+        headers = {"Content-Type": "application/zip", "Origin": "http://127.0.0.1:8000"}
+        preview = client.post("/api/v1/packs/import/preview", content=source, headers=headers).raise_for_status().json()
+        created = client.post("/api/v1/packs/import", content=source, headers=headers | {
+            "Idempotency-Key": "gensokyo-story",
+            "X-World-Pack-Sha256": preview["archive_sha256"], "X-Story-Opening": "scarlet-mist",
+        }).raise_for_status().json()
+        world_id = UUID(created["world_id"])
+        main = UUID(created["active_branch_id"])
+        path = f"/api/v1/worlds/{world_id}"
+        fork = client.post(f"{path}/branches", headers={"Idempotency-Key": "the-fork"}, json={
+            "branch_id": str(main), "sequence": "0", "label": "Go to the observation post",
+        }).raise_for_status().json()
+        other = UUID(fork["branch_id"])
+
+        def state(branch):
+            return client.get(f"{path}/view", params={"branch_id": str(branch)}).raise_for_status().json()["state"]
+
+        def perform(branch, endpoint, duration, **params):
+            version = repository.read_world(scope, world_id, branch).branch.state_version
+            response = client.post(f"{path}/{endpoint}", headers={"Idempotency-Key": str(uuid4())}, json={
+                "branch_id": str(branch), "expected_state_version": str(version),
+                "duration_seconds": duration, **params,
+            }).raise_for_status().json()
+            job_id = UUID(response["job_id"])
+            lease = repository.claim_job("story-worker")
+            assert lease and lease.job_id == job_id
+            for _ in range(12):
+                jobs.advance(scope, lease)
+                if repository.read_job(scope, job_id).status == JobStatus.SUCCEEDED:
+                    return
+            pytest.fail("Simulation did not settle the story boundaries")
+
+        assert "story_milestones" not in state(main)
+        route, = state(other)["travel_options"]
+        perform(other, "long-actions", 60, activity="travel", route_id=route["route_id"])
+        perform(other, "long-actions", 120, activity="wait")
+        perform(main, "world-advance", 180)
+        main_records = state(main)["story_milestones"]
+        other_records = state(other)["story_milestones"]
+        assert [row["resolved_tick"] for row in other_records] == ["120", "180"]
+        assert "独立留下一份" in main_records[0]["summary"]
+        assert "两名" in other_records[0]["summary"]
+        assert "有待复核" in main_records[1]["summary"] and "两人独立核验" in other_records[1]["summary"]
+        live = {branch: repository.read_world(scope, world_id, branch).state_hash for branch in (main, other)}
+        for branch, digest in live.items():
+            assert repository.replay(scope, world_id, branch, from_genesis=True).state_hash == digest
+
+    backups = BackupApplication(repository)
+    archive = backups.export_world(scope, world_id, format_version="2.0")
+    database = Database(f"sqlite:///{(tmp_path / 'isolated-restore.db').as_posix()}")
+    database.create_schema()
+    try:
+        restored = WorldRepository(database)
+        with backups.validate_archive(archive) as checked:
+            WorldBackupImporter(restored).import_verified_backup(scope, checked)
+        for branch, digest in live.items():
+            assert restored.replay(scope, world_id, branch, from_genesis=True).state_hash == digest
+    finally:
+        database.dispose()
+
+
+def test_milestone_reducer_enforces_conditions_and_immutable_event_scope():
+    observer = uuid4()
+    definition = {
+        "title": "Distant stellar pulse", "visibility": "public",
+        "fallback": {"key": "pulse", "effect": "occurred", "summary": "The pulse reached the outer station."},
+        "variants": [{"outcome": {"key": "sheltered", "effect": "mitigated", "summary": "A shelter stayed powered."},
+                      "when": [{"kind": "capability", "actor_id": str(observer), "capability": "station.power"},
+                               {"kind": "skill", "actor_id": str(observer), "skill": "engineering", "minimum": 10}]}],
+    }
+    node = StoryNode.model_validate(definition)
+    with pytest.raises(ValueError, match="immutable"):
+        StoryNode.model_validate(definition | {"variants": [{
+            **definition["variants"][0], "outcome": {"key": "blocked", "effect": "prevented", "summary": "It stopped."},
+        }]})
+    schedule = ScheduledEventRecord(id=uuid4(), due_tick=60, phase="observation", handler_id=STORY_NODE_HANDLER,
+                                    handler_version=STORY_NODE_VERSION, payload=node.model_dump(mode="json"))
+    resident = WorldEntity(id=observer, kind="character", components={"skills": {"skills": {"engineering": {"level": "20"}}}})
+    state = WorldState(player_id=observer, entities={observer: resident}, scheduled_events=[schedule])
+    with pytest.raises(InvalidEvent, match="cannot skip"):
+        apply_event(state, TimeAdvancedEvent(to_tick=61))
+    state = apply_event(state, TimeAdvancedEvent(to_tick=60))
+    with pytest.raises(InvalidEvent, match="typed"):
+        apply_event(state, ScheduledEventCompletedEvent(scheduled_event_id=schedule.id, expected_revision=schedule.revision))
+    correct = settle_story_milestone(state, schedule)
+    assert correct.outcome == "pulse"
+    forged = StoryMilestoneResolvedEvent(milestone=correct.model_copy(update={"outcome": "sheltered"}))
+    with pytest.raises(InvalidEvent, match="conditions"):
+        apply_event(state, forged)
+    assert apply_event(state, StoryMilestoneResolvedEvent(milestone=correct)).story_milestones == [correct]
+
+    specialist = resident.model_copy(update={"components": resident.components | {
+        "capabilities": {"grants": ["station.power"], "restrictions": []},
+    }})
+    qualified = WorldState(current_tick=60, player_id=observer, entities={observer: specialist}, scheduled_events=[schedule])
+    mitigated = settle_story_milestone(qualified, schedule)
+    assert mitigated.outcome == "sheltered"
+    assert apply_event(qualified, StoryMilestoneResolvedEvent(milestone=mitigated)).story_milestones == [mitigated]
+
+    emergency_outcome = StoryNode.model_validate(definition | {"prevention_possible": True, "variants": [{
+        **definition["variants"][0], "outcome": {"key": "blocked", "effect": "prevented", "summary": "A local outage was avoided."},
+    }]})
+    local_schedule = schedule.model_copy(update={"payload": emergency_outcome.model_dump(mode="json")})
+    local_state = WorldState(current_tick=60, player_id=observer, entities={observer: specialist}, scheduled_events=[local_schedule])
+    assert settle_story_milestone(local_state, local_schedule).outcome == "blocked"

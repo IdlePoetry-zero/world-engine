@@ -19,6 +19,7 @@ from world_engine.domain.components import (
 from world_engine.domain.errors import InvalidEvent
 from world_engine.domain.leadership_ballots import vacant_leadership_office_holder
 from world_engine.domain.models import CalendarConfig, WorldState
+from world_engine.domain.story_nodes import STORY_NODE_HANDLER
 from world_engine.domain.family_kinship import inspect_kinship
 from world_engine.domain.promise_trust import PROMISE_TRUST_POLICY_ID
 from world_engine.domain.promise_trust_state import PromiseTrustProjection
@@ -449,6 +450,21 @@ def project_player_state(state: dict[str, Any], actor_id: str) -> dict[str, Any]
             "pack_id", "public_title", "public_description"
         ) if key in state.get("metadata", {})},
     }
+    if state.get("story_milestones"):
+        public_nodes = {item["id"]: item["payload"] for item in state.get("scheduled_events", [])
+                        if item["handler_id"] == STORY_NODE_HANDLER and item["payload"].get("visibility") == "public"}
+        chronicle = []
+        for record in state["story_milestones"]:
+            node = public_nodes.get(record["schedule_id"])
+            if node is None:
+                continue
+            outcomes = [node["fallback"], *(variant["outcome"] for variant in node.get("variants", ()))]
+            outcome = next((row for row in outcomes if row["key"] == record["outcome"]), None)
+            if outcome is not None:
+                chronicle.append({"record_id": record["schedule_id"], "title": node["title"],
+                                  "summary": outcome["summary"], "resolved_tick": record["resolved_tick"]})
+        if chronicle:
+            result["story_milestones"] = chronicle[-24:]
     if state.get("kinship_links"):
         inspection = inspect_kinship(state["kinship_links"], UUID(actor_id), at_tick=tick)
         if inspection.parents or inspection.children or inspection.siblings:

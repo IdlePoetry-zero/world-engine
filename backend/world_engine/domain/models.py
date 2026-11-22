@@ -103,6 +103,7 @@ from .travel_journeys import (
 )
 from .travel_journey_events import TravelJourneyChangedEvent
 from .world_books import WorldBookEntry, WorldBookImportedEvent
+from .story_nodes import StoryMilestone, StoryMilestoneResolvedEvent, validate_story_state
 from .waypoint_opportunity_events import WaypointOpportunityDecision, WaypointOpportunityDecisionRecordedEvent
 
 ResourceId = Annotated[str, Field(min_length=1, max_length=160, pattern=r"^[a-zA-Z][a-zA-Z0-9_.-]*$")]
@@ -260,6 +261,7 @@ class WorldState(ContractModel):
     knowledge: list[KnowledgeRecord] = Field(default_factory=list)
     goals: list[GoalRecord] = Field(default_factory=list)
     scheduled_events: list[ScheduledEventRecord] = Field(default_factory=list)
+    story_milestones: list[StoryMilestone] = Field(default_factory=list, exclude_if=lambda records: not records)
     investigation_cases: list[InvestigationCaseFile] = Field(default_factory=list)
     public_accusation_corrections: list[PublicAccusationCorrection] = Field(
         default_factory=list,
@@ -583,6 +585,7 @@ class WorldState(ContractModel):
             missing_dependencies = set(event.dependencies) - scheduled_id_set
             if missing_dependencies:
                 raise ValueError(f"scheduled event {event.id} references missing dependencies")
+        validate_story_state(self)
         validate_shipment_state(self)
         validate_promise_state(self)
         if self.relationship_invitations:
@@ -1085,6 +1088,7 @@ type DomainEvent = Annotated[
     | ProductionQuotaRenewedEvent
     | RenewableResourceHarvestedEvent
     | ScheduledEventCompletedEvent
+    | StoryMilestoneResolvedEvent
     | ResourceAccountOpenedEvent
     | EnvironmentalSourceAccountOpenedEvent
     | NpcPlanCreatedEvent

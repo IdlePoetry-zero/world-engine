@@ -434,6 +434,8 @@ class WorldRepository:
     def validate_initial_world_state(state: WorldState) -> WorldState:
         """Revalidate genesis state before using it as the root branch checkpoint."""
         state = WorldState.model_validate(state_json(state))
+        if state.story_milestones:
+            raise InvalidEvent("A new world cannot seed story outcomes without committed milestone events.")
         if state.npc_plans:
             raise InvalidEvent("A new world cannot seed NPC plans without the registered simulation execution path.")
         if state.promise_trust is not None:

@@ -16,6 +16,7 @@ from world_engine.domain.components import (
 from world_engine.domain.gameplay_events import BackgroundNeedsAdvancedEvent, ComponentReplacedEvent
 from world_engine.domain.events import parse_event
 from world_engine.domain.market_pricing import PRICE_REVIEW_HANDLER_ID, PRICE_REVIEW_HANDLER_VERSION
+from world_engine.domain.story_nodes import STORY_NODE_HANDLER, STORY_NODE_VERSION
 from world_engine.domain.institutional_credit_state import CREDIT_MATURITY_HANDLER, CREDIT_MATURITY_HANDLER_VERSION
 from world_engine.domain.models import TimeAdvancedEvent
 from world_engine.domain.needs import PASSIVE_NEED_RATES_PER_DAY, next_need_threshold_tick
@@ -2934,6 +2935,7 @@ class SimulationEngine:
             or (scheduled.handler_id == "shipment.spoilage" and scheduled.handler_version == "1.0.0")
             or (scheduled.handler_id == PRICE_REVIEW_HANDLER_ID and scheduled.handler_version == PRICE_REVIEW_HANDLER_VERSION)
             or (scheduled.handler_id == CREDIT_MATURITY_HANDLER and scheduled.handler_version == CREDIT_MATURITY_HANDLER_VERSION)
+            or (scheduled.handler_id == STORY_NODE_HANDLER and scheduled.handler_version == STORY_NODE_VERSION)
         )
 
     @staticmethod

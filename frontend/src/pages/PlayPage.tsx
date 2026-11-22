@@ -393,6 +393,12 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
             <button type="button" className="icon-button quiet-button" aria-label="复制对话" title="复制对话" onClick={() => { void navigator.clipboard?.writeText(messages.map((message) => message.role + ': ' + message.content).join('\n\n')); onNotice({ kind: 'info', text: '已复制当前对话。' }) }} disabled={!messages.length}><Icon name="copy" size={16} /></button>
           </div>
         </div>
+        {Boolean(state?.story_milestones?.length) && <details className="scene-story-chronicle">
+          <summary>已发生的剧情</summary>
+          <ul>{state?.story_milestones?.map((milestone) => <li key={milestone.record_id}>
+            <strong>{milestone.title}</strong><p>{milestone.summary}</p>
+          </li>)}</ul>
+        </details>}
         {playerDead && continuationState && (continuationState.status === 'ready' || continuationState.status === 'error') && (
           <div className="scene-continuation">
             <PlayerContinuationPanel

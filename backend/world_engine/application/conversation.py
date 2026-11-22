@@ -793,6 +793,7 @@ class ConversationApplication:
                 "to_place": destination.name if destination else None,
             })
         known_ids.update(row["event_id"] for row in direct_moves)
+        known_ids.update(row["record_id"] for row in state.get("story_milestones", ()))
         context = {
             "current_tick": view.branch.current_tick,
             "state": state,
