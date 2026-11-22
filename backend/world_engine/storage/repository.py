@@ -41,6 +41,7 @@ from world_engine.domain.occupation_legacy_vacancies import (
 from world_engine.domain.npc_attendance_events import NPC_ATTENDANCE_EVENTS, NpcAttendanceStartedEvent
 from world_engine.domain.npc_plan_review_events import NpcPlanReviewScheduledEvent, validate_authored_npc_review_scope
 from world_engine.domain.story_nodes import StoryMilestoneResolvedEvent, ready_story_reaction, settle_story_reaction
+from world_engine.domain.challenges import CHALLENGE_COMMAND, ChallengeResolvedEvent
 from world_engine.domain.relationship_invitation_events import RelationInvitationChangedEvent
 from world_engine.domain.private_gifts import PrivateGiftChangedEvent
 from world_engine.domain.private_gift_validation import NPC_GIFT_REPLY_COMMAND, validate_private_gift_batch
@@ -437,6 +438,8 @@ class WorldRepository:
         state = WorldState.model_validate(state_json(state))
         if state.story_milestones:
             raise InvalidEvent("A new world cannot seed story outcomes without committed milestone events.")
+        if state.challenge_attempts:
+            raise InvalidEvent("A new world cannot seed challenge receipts without committed attempts.")
         if state.npc_plans:
             raise InvalidEvent("A new world cannot seed NPC plans without the registered simulation execution path.")
         if state.promise_trust is not None:
@@ -2036,6 +2039,13 @@ class WorldRepository:
         if len(events) > MAX_EVENTS_PER_COMMAND:
             raise InvalidEvent(f"A command may contain no more than {MAX_EVENTS_PER_COMMAND} events.")
         typed_events = tuple(parse_event(event) for event in events)
+        if command.command_type == CHALLENGE_COMMAND or any(isinstance(item, ChallengeResolvedEvent) for item in typed_events):
+            if (command.command_type != CHALLENGE_COMMAND or lease is not None or len(typed_events) != 1
+                    or not isinstance(typed_events[0], ChallengeResolvedEvent)):
+                raise InvalidEvent("Challenge settlement requires one player challenge command.")
+            attempt = typed_events[0].attempt
+            if attempt.actor_id != command.actor_id or command.payload != {"challenge_id": str(attempt.challenge_id)}:
+                raise InvalidEvent("Challenge settlement must match the authenticated actor and registered option.")
         credit_maturity = any(isinstance(event, InstitutionalCreditChangedEvent) and event.operation == "overdue"
                               for event in typed_events)
         if credit_maturity and lease is None:

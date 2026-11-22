@@ -10,13 +10,15 @@ from typing import Any, Literal, Protocol
 from uuid import UUID, uuid5
 
 from world_engine.domain.components import PlaceComponent
-from world_engine.domain.errors import AccessDenied, Conflict, NotFound, StaleVersion
+from world_engine.domain.errors import AccessDenied, Conflict, InvalidEvent, NotFound, StaleVersion
+from world_engine.domain.challenges import CHALLENGE_COMMAND, CHALLENGE_RESOLVED, open_challenges, settle_challenge
 from world_engine.domain.leadership_ballots import leadership_ballot_is_invalidated
 from world_engine.domain.models import (
     AccessScope, BranchRecord, CommandEnvelope, MembershipRole, NewWorld, WorldEntity, WorldRecord, WorldState,
     WorldView,
 )
 from world_engine.domain.relationship_partnerships import eligible_partnership_proposal_ids
+from world_engine.domain.story_nodes import STORY_OPENING_METADATA
 from world_engine.rules.engine import route_accessible
 
 from .errors import ApplicationFailure
@@ -237,6 +239,10 @@ class WorldApplication:
     ) -> dict[str, Any]:
         state = view.state.model_dump(mode="json")
         projected = project_player_state(state, str(actor_id))
+        if view.state.challenges:
+            choices = open_challenges(view.state, actor_id)
+            if choices:
+                projected["local_challenges"] = choices
         credit = institutional_credit_context(
             view.state, actor_id, visible_organization_ids=set(map(UUID, projected["entities"])),
         )
@@ -430,7 +436,7 @@ class WorldApplication:
         command_id = uuid5(world_id, f"player-continuation:{scope.user_id}:{branch_id}:{key}")
         result = self.repository.read_command_receipt(scope, world_id, branch_id, command_id, previous_player_id, key)
         if result is not None:
-            event, = result.events
+            event, = (item for item in result.events if item.type == "core.player_character_continued.v1")
             if (event.type != "core.player_character_continued.v1"
                 or event.payload["new_player_id"] != str(new_player_id)
                 or result.state_version != expected_state_version + 1):
@@ -455,6 +461,36 @@ class WorldApplication:
         return {"branch_id": branch_id, "player_id": new_player_id, "state_version": str(result.state_version),
                 "command_id": str(result.command_id)}
 
+    def perform_challenge(
+        self, scope: AccessScope, world_id: UUID, branch_id: UUID, actor_id: UUID, challenge_id: UUID,
+        expected_state_version: int, idempotency_key: str,
+    ) -> dict[str, Any]:
+        key = "challenge:" + hashlib.sha256(idempotency_key.encode()).hexdigest()
+        command_id = uuid5(world_id, f"{scope.user_id}:{branch_id}:{key}")
+        result = self.repository.read_command_receipt(scope, world_id, branch_id, command_id, actor_id, key)
+        if result is None:
+            view = self.repository.read_world(scope, world_id, branch_id)
+            if self.resolve_player(scope, view) != actor_id:
+                raise AccessDenied("This challenge requires the current player character.")
+            if view.branch.state_version != expected_state_version:
+                result = self.repository.read_command_receipt(scope, world_id, branch_id, command_id, actor_id, key)
+                if result is None:
+                    raise StaleVersion(expected_state_version, view.branch.state_version)
+        if result is None:
+            try:
+                event = settle_challenge(view.state, challenge_id, actor_id, uuid5(command_id, "challenge.result"))
+            except InvalidEvent as error:
+                raise ApplicationFailure("CHALLENGE_UNAVAILABLE", str(error), status_code=409) from error
+            command = CommandEnvelope(command_id=command_id, actor_id=actor_id, idempotency_key=key,
+                expected_state_version=expected_state_version, command_type=CHALLENGE_COMMAND,
+                payload={"challenge_id": str(challenge_id)})
+            result = self.repository.commit_command(scope, world_id, branch_id, command, [event])
+        receipt, = (item for item in result.events if item.type == CHALLENGE_RESOLVED)
+        attempt = receipt.payload["attempt"]
+        if attempt["challenge_id"] != str(challenge_id) or result.state_version != expected_state_version + 1:
+            raise Conflict("This challenge key was already used for a different action.")
+        return {"challenge_id": challenge_id, "passed": attempt["passed"], "state_version": str(result.state_version)}
+
     def list_branches(self, scope: AccessScope, world_id: UUID) -> dict[str, Any]:
         return {"items": [self._branch_header(b) for b in self.repository.list_branches(scope, world_id)]}
 
@@ -469,11 +505,14 @@ class WorldApplication:
 
     @staticmethod
     def _world_header(view: WorldView) -> dict[str, Any]:
-        return WorldApplication._world_header_values(
+        header = WorldApplication._world_header_values(
             view.world,
             current_tick=view.branch.current_tick,
             state_version=view.branch.state_version,
         )
+        if STORY_OPENING_METADATA in view.state.metadata:
+            header["world_mode"] = "story"
+        return header
 
     @staticmethod
     def _world_header_values(world: Any, *, current_tick: int, state_version: int) -> dict[str, Any]:

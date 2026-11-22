@@ -3,6 +3,7 @@ import type { KeyboardEvent, RefObject } from 'react'
 import { api, ApiError, type Branch, type CharacterEntity, type Conversation, type ConversationItem, type GameMessage, type MarketOfferQuote, type MessageRequest, type NarrativeRewrites, type NarrativeRewriteStyle, type OwnLeadershipBallot, type OwnMembership, type OwnPromise, type OwnSafeConductTreaty, type OwnShipment, type PlayerContinuationOption, type PlayerContinuationOptions, type SafeConductProposalOption, type Settings, type World, type WorldView } from '../api/client'
 import { InlineState, PageEmpty } from '../components/States'
 import { Icon } from '../components/Icon'
+import { ChallengesPanel } from '../components/ChallengesPanel'
 import { InvestigationJournal } from '../components/InvestigationJournal'
 import { InstitutionalCreditPanel } from '../components/InstitutionalCreditPanel'
 import { LeadershipBallotsPanel } from '../components/LeadershipBallotsPanel'
@@ -380,6 +381,7 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
       <span className="statusbar-dot" /><span>本地世界</span><span className="status-divider" />
       <span>{branchId ? '分支 ' + branchId.slice(0, 8) : '分支待创建'}</span>
       <span className="status-divider" /><span>{view?.branch.current_tick ?? world.current_tick} tick</span>
+      {view?.world.world_mode === 'story' && <span className="status-version">有主线世界</span>}
       <span className="statusbar-spacer" /><span className="status-version">版本 {view?.world.state_version ?? world.state_version}</span>
     </div>
     <div className="scene-play-grid">
@@ -399,6 +401,9 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
             <strong>{milestone.title}</strong><p>{milestone.summary}</p>
           </li>)}</ul>
         </details>}
+        {worldId && branchId && playerId && view && Boolean(state?.local_challenges?.length) &&
+          <ChallengesPanel key={`${branchId}:${playerId}`} worldId={worldId} branchId={branchId} actorId={playerId}
+            version={view.world.state_version} options={state?.local_challenges ?? []} onRefresh={onRefresh} />}
         {playerDead && continuationState && (continuationState.status === 'ready' || continuationState.status === 'error') && (
           <div className="scene-continuation">
             <PlayerContinuationPanel

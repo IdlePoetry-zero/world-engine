@@ -153,6 +153,7 @@ function WorldPackReview({ preview }: { preview: WorldPackPreview }) {
     </div>
     <dl className="character-preview-fields">
       <div className="character-preview-field"><dt>世界包标识</dt><dd>{manifest.pack_id}</dd></div>
+      {Boolean(preview.story_openings?.length) && <div className="character-preview-field"><dt>世界类型</dt><dd>有主线世界</dd></div>}
       <div className="character-preview-field"><dt>版本</dt><dd>{manifest.version}</dd></div>
       <div className="character-preview-field"><dt>许可</dt><dd>{manifest.license}</dd></div>
       <div className="character-preview-field"><dt>引擎版本要求</dt><dd>{manifest.engine_range}</dd></div>

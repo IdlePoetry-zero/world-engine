@@ -29,7 +29,7 @@ export class ApiError extends Error {
 }
 
 export type Session = { principal: { id: string; display_name: string }; permissions: string[] }
-export type World = { world_id: string; title: string; active_branch_id: string | null; current_tick: string; state_version: string; status: string; ruleset_version?: string; pack_version?: string }
+export type World = { world_id: string; title: string; active_branch_id: string | null; current_tick: string; state_version: string; status: string; ruleset_version?: string; pack_version?: string; world_mode?: 'story' }
 export type Pack = { pack_id: string; title: string; version: string; available_versions?: string[]; sustained_available_versions?: string[]; description: string }
 export type WorldPackPreview = {
   manifest: { pack_id: string; version: string; title: string; license: string; engine_range: string }
@@ -45,6 +45,15 @@ export type WorldPackPreview = {
   story_openings?: { opening_id: string; title: string; position: string; known_history: string[] }[]
 }
 export type WorldPackImportResult = World & { duplicate: boolean }
+export type ChallengeOption = {
+  challenge_id: string
+  title: string
+  description: string
+  skill_label: string
+  pass_level: string
+  fee: { resource_id: string; quantity: string; label: string } | null
+  passed: boolean | null
+}
 export type TemplateUpdateChange = {
   entity_id: string
   entity_name: string
@@ -541,6 +550,7 @@ export type WorldState = {
   calendar?: { name?: string; calendar_id?: string; day_seconds?: number; year_days?: number; [key: string]: unknown }
   world_book_entries?: WorldBookEntry[] | null
   story_milestones?: { record_id: string; title: string; summary: string; resolved_tick: string }[]
+  local_challenges?: ChallengeOption[]
   metadata?: Record<string, unknown>
   resources: Record<string, ResourceAccount>
   own_shipments?: OwnShipment[]
@@ -1086,6 +1096,11 @@ export const api = {
   ),
   createBranch: (worldId: string, body: { branch_id: string; sequence: string; label: string }, idempotencyKey: string) => post<Branch>(`/worlds/${encodeURIComponent(worldId)}/branches`, body, idempotencyKey),
   sendMessage: (worldId: string, body: MessageRequest) => post<MessageResponse>(`/worlds/${encodeURIComponent(worldId)}/messages`, body, body.request_id),
+  performChallenge: (worldId: string, challengeId: string, body: {
+    branch_id: string; actor_id: string; expected_state_version: string
+  }, key: string) => post<{ passed: boolean; state_version: string }>(
+    `/worlds/${encodeURIComponent(worldId)}/challenges/${encodeURIComponent(challengeId)}/attempt`, body, key,
+  ),
   command: (commandId: string) => get<CommandStatus>(`/commands/${encodeURIComponent(commandId)}`),
   listProviders: () => get<{ items: Provider[] }>('/providers'),
   createProvider: (body: ProviderDraft) => post<Provider>('/providers', body, crypto.randomUUID()),

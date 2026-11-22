@@ -4,13 +4,14 @@ from decimal import Decimal
 from uuid import UUID, uuid5
 
 from world_engine.application.world_packs import WorldPackManifest, write_world_pack
+from world_engine.domain.challenges import ChallengeDefinition
 from world_engine.domain.components import PlaceComponent, PlaceRoute, ScheduledEventRecord
 from world_engine.domain.models import ResourceAccount, WorldEntity, WorldState
-from world_engine.domain.story_nodes import STORY_NODE_HANDLER, STORY_NODE_VERSION, StoryNode, StoryReaction
+from world_engine.domain.story_nodes import STORY_NODE_HANDLER, STORY_NODE_VERSION, StoryFollowup, StoryNode, StoryReaction
 
 
 PACK_ID = "author.distant-station"
-PACK_VERSION = "1.0.0"
+PACK_VERSION = "1.1.0"
 PACK_TITLE = "远岬站·脉冲将至"
 _NAMESPACE = UUID("58995de2-b5a0-45cd-ab6e-b4e52aa46922")
 _RESOURCE = "station.power_cells"
@@ -44,12 +45,16 @@ def _opening(*, tick: int, at_shelter: bool) -> WorldState:
                                   components={"public_role": "避护区值守员"}),
             player: WorldEntity(id=player, name="外勤员", kind="character", location_id=shelter if at_shelter else landing,
                                  components={"known_places": [str(landing), str(shelter)],
-                                             "capabilities": {"grants": ["world.travel", "station.reserve.accept"]}}),
+                                             "capabilities": {"grants": ["world.travel", "station.reserve.accept"]},
+                                             "skills": {"skills": {"station.instrumentation": {"level": "18"}}}}),
         },
         resources={
             stock: ResourceAccount(owner_id=landing, resource_id=_RESOURCE, balance=Decimal("3")),
             reserve: ResourceAccount(owner_id=shelter, resource_id=_RESOURCE, balance=Decimal("0")),
         },
+        challenges=[ChallengeDefinition(challenge_id=_id("challenge:instrument-readout"), venue_id=shelter, title="仪表读数校核",
+            description="现场复核电表读数并登记资格。", skill_id="station.instrumentation", skill_label="仪器操作",
+            pass_level="16", required_capability="station.reserve.accept")],
         story_reactions=[StoryReaction.model_validate({
             "reaction_id": supply_reaction,
             "when": [{"kind": "world_condition", "owner_id": player,
@@ -67,6 +72,13 @@ def _opening(*, tick: int, at_shelter: bool) -> WorldState:
             "when": [supply_confirmed, power_received],
             "node": {"title": "避护准备报告", "visibility": "public", "participant_ids": [operator],
                      "fallback": {"key": "ready", "effect": "occurred", "summary": "值守员确认应急电源已入账。"}},
+        })],
+        story_followups=[StoryFollowup.model_validate({
+            "followup_id": _id("check-reserve"), "after_id": report_reaction, "after_outcome": "ready", "delay_ticks": 30,
+            "node": {"title": "应急电路复查", "visibility": "public", "participant_ids": [operator],
+                     "variants": [{"when": [power_received], "outcome": {
+                         "key": "reserve-tested", "effect": "mitigated", "summary": "验收三十秒后的检查确认电池仍在避护区。",
+                     }}], "fallback": {"key": "reserve-missing", "effect": "inapplicable", "summary": "复查时未找到足够的电池。"}},
         })],
         scheduled_events=[ScheduledEventRecord(
             id=pulse, due_tick=180, phase="observation", handler_id=STORY_NODE_HANDLER,

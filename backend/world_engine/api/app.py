@@ -59,7 +59,7 @@ from world_engine.domain.travel_itinerary_progress import itinerary_requires_rep
 from world_engine.rules.engine import route_access_reason
 
 from .contracts import (
-    BranchRequest, ContinueAfterDeathRequest, CreateWorldRequest, JobControlRequest, JobDecisionRequest,
+    BranchRequest, ChallengeRequest, ContinueAfterDeathRequest, CreateWorldRequest, JobControlRequest, JobDecisionRequest,
     LongActionRequest, MediaJobRequest, RoutineWorkScheduleRequest, WorldAdvanceRequest,
 )
 from world_engine.application.simulation_jobs import SimulationJobs
@@ -286,6 +286,14 @@ def create_app(
             scope(request), world_id, body.branch_id, body.previous_player_id, body.new_player_id,
             int(body.expected_state_version), idempotency_key,
         ))
+
+    @app.post("/api/v1/worlds/{world_id}/challenges/{challenge_id}/attempt")
+    def perform_challenge(
+        request: Request, world_id: UUID, challenge_id: UUID, body: ChallengeRequest,
+        idempotency_key: Annotated[str, Header(min_length=1, max_length=200)],
+    ):
+        return wire(worlds.perform_challenge(scope(request), world_id, body.branch_id, body.actor_id, challenge_id,
+                                             int(body.expected_state_version), idempotency_key))
 
     @app.post("/api/v1/worlds/{world_id}/branches", status_code=201)
     def fork_branch(

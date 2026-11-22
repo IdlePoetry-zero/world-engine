@@ -8,6 +8,7 @@ from world_engine.application.simulation_jobs import SimulationJobs
 from world_engine.content.distant_station_story import build_archive as build_station_archive
 from world_engine.content.gensokyo_reference import build_archive
 from world_engine.domain.components import ScheduledEventRecord
+from world_engine.domain.challenges import ChallengeDefinition, settle_challenge
 from world_engine.domain.errors import InvalidEvent
 from world_engine.domain.gameplay_events import ScheduledEventCompletedEvent
 from world_engine.domain.models import JobStatus, TimeAdvancedEvent, WorldEntity, WorldState
@@ -16,6 +17,8 @@ from world_engine.domain.story_nodes import (
     STORY_NODE_HANDLER, STORY_NODE_VERSION, StoryNode, StoryMilestoneResolvedEvent, settle_story_milestone,
 )
 from world_engine.runtime import build_application, local_identity
+from world_engine.rules import RuleContext, RuleEngine
+from world_engine.rules.versions import LEGACY_RULESET_VERSION
 from world_engine.storage.backup_import import WorldBackupImporter
 from world_engine.storage.database import Database
 from world_engine.storage.repository import WorldRepository
@@ -67,12 +70,38 @@ def test_gensokyo_milestones_follow_committed_player_travel_across_forks_and_res
             _run_http_job(client, repository, jobs, scope, world_id, branch, endpoint, duration, **params)
 
         assert "story_milestones" not in state(main)
+        assert "local_challenges" not in state(main)
         route, = state(other)["travel_options"]
         perform(other, "long-actions", 60, activity="travel", route_id=route["route_id"])
+        local = state(other)
+        exercises = {row["title"]: row for row in local["local_challenges"]}
+        assert "符卡登记演练" not in exercises
+        assert exercises["灯符术法演练"]["fee"]["label"] == "试灯砂"
+
+        def attempt(option, title):
+            view = repository.read_world(scope, world_id, other)
+            body = {"branch_id": str(other), "actor_id": str(view.state.player_id),
+                    "expected_state_version": str(view.branch.state_version)}
+            url = f"{path}/challenges/{option['challenge_id']}/attempt"
+            headers = {"Idempotency-Key": title}
+            result = client.post(url, json=body, headers=headers).raise_for_status().json()
+            assert client.post(url, json=body, headers=headers).raise_for_status().json() == result
+            return result["passed"]
+
+        assert attempt(exercises["灯符术法演练"], "arcana")
+        assert attempt(exercises["妖力辨识"], "aura")
+        assert not attempt(exercises["外界仪具辨用"], "tools")
+        unlocked = next(row for row in state(other)["local_challenges"] if row["title"] == "符卡登记演练")
+        assert attempt(unlocked, "declare")
+        after_practice = repository.read_world(scope, world_id, other)
+        assert after_practice.state.current_tick == 60
+        assert len(after_practice.state.challenge_attempts) == 4
+        assert [row.balance for row in after_practice.state.resources.values() if row.owner_id == after_practice.state.player_id] == [0]
+        assert any(row["title"] == "符卡演练登记" for row in state(other)["story_milestones"])
         perform(other, "long-actions", 120, activity="wait")
         perform(main, "world-advance", 180)
         main_records = state(main)["story_milestones"]
-        other_records = state(other)["story_milestones"]
+        other_records = state(other)["story_milestones"][-2:]
         assert [row["resolved_tick"] for row in other_records] == ["120", "180"]
         assert "独立留下一份" in main_records[0]["summary"]
         assert "两名" in other_records[0]["summary"]
@@ -120,6 +149,9 @@ def test_station_arrival_cascades_at_the_action_tick_and_moves_real_stock(tmp_pa
             return client.get(f"{path}/view", params={"branch_id": str(branch)}).raise_for_status().json()["state"]
 
         original = repository.read_world(scope, world_id, main)
+        delayed = UUID(client.post(f"{path}/branches", headers={"Idempotency-Key": "delayed"}, json={
+            "branch_id": str(main), "sequence": "0", "label": "Arrive after waiting",
+        }).raise_for_status().json()["branch_id"])
         assert "story_milestones" not in state(main) and "story_reactions" not in state(main)
         route, = state(main)["travel_options"]
         assert repository.read_world(scope, world_id, main).state_hash == original.state_hash
@@ -138,13 +170,30 @@ def test_station_arrival_cascades_at_the_action_tick_and_moves_real_stock(tmp_pa
         typed = StoryMilestoneResolvedEvent.model_validate(supplied.payload | {"event_id": supplied.event_id})
         assert [posting.delta for posting in ledger_postings(typed)] == [-3, 3]
         assert "transfer" not in str(state(main))
+        check, = state(main)["local_challenges"]
+        assessed = client.post(f"{path}/challenges/{check['challenge_id']}/attempt",
+            headers={"Idempotency-Key": "instrument-readout"}, json={
+                "branch_id": str(main), "actor_id": str(arrived.state.player_id),
+                "expected_state_version": str(arrived.branch.state_version),
+            }).raise_for_status().json()
+        assert assessed["passed"] is True
+        pending_audit, = [row for row in arrived.state.scheduled_events if row.due_tick == 90]
+        assert pending_audit.status == "queued"
+        assert "应急电路复查" not in str(state(main))
 
         _run_http_job(client, repository, jobs, scope, world_id, main, "world-advance", 120)
         _run_http_job(client, repository, jobs, scope, world_id, other, "world-advance", 180)
+        _run_http_job(client, repository, jobs, scope, world_id, delayed, "world-advance", 30)
+        _run_http_job(client, repository, jobs, scope, world_id, delayed, "long-actions", 60,
+                      activity="travel", route_id=route["route_id"])
+        _run_http_job(client, repository, jobs, scope, world_id, delayed, "world-advance", 90)
         settled = repository.read_world(scope, world_id, main)
         unprepared = repository.read_world(scope, world_id, other)
+        delayed_state = repository.read_world(scope, world_id, delayed)
         assert [(row.outcome, row.resolved_tick) for row in settled.state.story_milestones][-1] == ("sheltered", 180)
         assert [(row.outcome, row.resolved_tick) for row in unprepared.state.story_milestones] == [("pulse", 180)]
+        assert [(row.outcome, row.resolved_tick) for row in settled.state.story_milestones][-2] == ("reserve-tested", 90)
+        assert [(row.outcome, row.resolved_tick) for row in delayed_state.state.story_milestones][-2] == ("reserve-tested", 120)
         assert repository.replay(scope, world_id, main, from_genesis=True).state_hash == settled.state_hash
         backups = BackupApplication(repository)
         with backups.validate_archive(backups.export_world(scope, world_id, format_version="2.0")) as backup:
@@ -154,6 +203,7 @@ def test_station_arrival_cascades_at_the_action_tick_and_moves_real_stock(tmp_pa
                 restored = WorldRepository(db)
                 WorldBackupImporter(restored).import_verified_backup(scope, backup)
                 assert restored.replay(scope, world_id, main, from_genesis=True).state_hash == settled.state_hash
+                assert restored.replay(scope, world_id, delayed, from_genesis=True).state_hash == delayed_state.state_hash
             finally:
                 db.dispose()
 
@@ -203,3 +253,29 @@ def test_milestone_reducer_enforces_conditions_and_immutable_event_scope():
     local_schedule = schedule.model_copy(update={"payload": emergency_outcome.model_dump(mode="json")})
     local_state = WorldState(current_tick=60, player_id=observer, entities={observer: specialist}, scheduled_events=[local_schedule])
     assert settle_story_milestone(local_state, local_schedule, uuid4()).milestone.outcome == "blocked"
+
+
+@pytest.mark.parametrize("discipline", ["cultivation", "physical", "examination", "technology", "battle_qi", "soul", "economics"])
+def test_each_discipline_uses_the_same_growth_and_challenge_contract(discipline):
+    actor, place, challenge = uuid4(), uuid4(), uuid4()
+    skill_id = f"test.{discipline}"
+    state = WorldState(player_id=actor, entities={
+        place: WorldEntity(id=place, kind="place", name="Exam hall"),
+        actor: WorldEntity(id=actor, kind="character", location_id=place, components={
+            "skills": {"skills": {skill_id: {"level": "9.99"}}},
+        }),
+    }, challenges=[ChallengeDefinition(challenge_id=challenge, venue_id=place, title=discipline,
+        description="Use the same authored checkpoint with a different competency.", skill_id=skill_id, pass_level="10")])
+    initial_failure = settle_challenge(state, challenge, actor, uuid4())
+    assert not initial_failure.attempt.passed
+    failed_state = apply_event(state, initial_failure)
+    with pytest.raises(InvalidEvent, match="已结算"):
+        settle_challenge(failed_state, challenge, actor, uuid4())
+    context = RuleContext(world_id=uuid4(), branch_id=uuid4(), command_id=uuid4(), actor_id=actor,
+                          ruleset_version=LEGACY_RULESET_VERSION)
+    training = RuleEngine().evaluate(state, {"kind": "train", "skill_id": skill_id, "duration_ticks": 60}, context)
+    assert training.outcome.status == "succeeded"
+    for event in training.events:
+        state = apply_event(state, event)
+    qualified = settle_challenge(state, challenge, actor, uuid4())
+    assert qualified.attempt.completed_tick == 60 and qualified.attempt.passed

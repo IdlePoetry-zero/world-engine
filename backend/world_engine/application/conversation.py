@@ -47,6 +47,7 @@ from .itinerary_chat import itinerary_message_key, itinerary_queue_reply
 from .long_action_readback import own_long_action_readbacks
 from .waypoint_chat import explicit_waypoint_choice
 from .world_book_import import matching_world_book_entries
+from world_engine.domain.challenges import open_challenges
 from .work_chat import work_message_key, work_queue_reply
 from .travel_chat import (
     recent_resolved_travel, recent_unstarted_travel, travel_job_readback, travel_message_key, travel_queue_reply,
@@ -659,6 +660,10 @@ class ConversationApplication:
             ) | {"references": [], "context_tick": str(view.branch.current_tick)}
         raw_state = view.state.model_dump(mode="json")
         state = project_player_state(raw_state, str(request.actor_id))
+        if view.state.challenges:
+            choices = open_challenges(view.state, request.actor_id)
+            if choices:
+                state["local_challenges"] = choices[:12]
         for invitation in state["own_relationship_invitations"]:
             meeting = invitation.get("meeting")
             if meeting is not None:

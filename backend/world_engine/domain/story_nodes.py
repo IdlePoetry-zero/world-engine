@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 STORY_NODE_HANDLER = "story.milestone"
 STORY_NODE_VERSION = "1.0.0"
 STORY_NODE_RESOLVED = "core.story_milestone_resolved.v1"
+STORY_OPENING_METADATA = "world_pack_story_opening_id"
 
 _Key = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_.-]{0,79}$")]
 _Summary = Annotated[str, StringConstraints(min_length=1, max_length=600)]
@@ -69,8 +70,15 @@ class StoryEnvironmentGate(_StoryModel):
     equals: StrictStr | StrictInt | StrictBool
 
 
+class StoryChallengeGate(_StoryModel):
+    kind: Literal["challenge_passed"]
+    actor_id: UUID
+    challenge_id: UUID
+
+
 StoryGate = Annotated[
-    StoryGoalGate | StoryCapabilityGate | StorySkillGate | StoryKnowledgeGate | StoryPriorOutcomeGate | StoryEnvironmentGate,
+    StoryGoalGate | StoryCapabilityGate | StorySkillGate | StoryKnowledgeGate | StoryPriorOutcomeGate
+    | StoryEnvironmentGate | StoryChallengeGate,
     Field(discriminator="kind"),
 ]
 
@@ -130,6 +138,25 @@ class StoryReaction(_StoryModel):
     node: StoryNode
 
 
+class StoryFollowup(_StoryModel):
+    followup_id: UUID
+    after_id: UUID
+    after_outcome: _Key | None = None
+    delay_ticks: Annotated[int, Field(strict=True, gt=0, le=2**63 - 1)]
+    priority: Annotated[int, Field(strict=True, ge=-100, le=100)] = 0
+    node: StoryNode
+
+    def schedule_after(self, parent: StoryMilestone | None) -> ScheduledEventRecord | None:
+        if parent is None or (self.after_outcome is not None and parent.outcome != self.after_outcome):
+            return None
+        due_tick = parent.resolved_tick + self.delay_ticks
+        if due_tick > 2**63 - 1:
+            return None  # This clock cannot represent an appointment beyond its final tick.
+        return ScheduledEventRecord(id=self.followup_id, due_tick=due_tick, phase="observation", priority=self.priority,
+                                    handler_id=STORY_NODE_HANDLER, handler_version=STORY_NODE_VERSION,
+                                    payload=self.node.model_dump(mode="json"))
+
+
 class StoryMilestone(_StoryModel):
     schedule_id: UUID
     resolved_tick: Tick
@@ -166,6 +193,9 @@ def _gate_passes(state: WorldState, gate: StoryGate) -> bool:
     actor = state.entities.get(gate.actor_id)
     if actor is None or actor.kind not in {"character", "person"} or actor.status != "active":
         return False
+    if isinstance(gate, StoryChallengeGate):
+        return any(attempt.actor_id == gate.actor_id and attempt.challenge_id == gate.challenge_id and attempt.passed
+                   for attempt in state.challenge_attempts)
     if isinstance(gate, StoryCapabilityGate):
         capabilities = actor.components.get("capabilities", {})
         return gate.capability in capabilities.get("grants", []) and gate.capability not in capabilities.get("restrictions", [])
@@ -183,7 +213,7 @@ def _transfer_accounts_match(state: WorldState, transfer: StoryTransfer) -> bool
                and account.resource_id == transfer.resource_id for ident in (transfer.from_account_id, transfer.to_account_id))
 
 
-def _transfer_is_affordable(state: WorldState, transfer: StoryTransfer | None) -> bool:
+def transfer_is_affordable(state: WorldState, transfer: StoryTransfer | None) -> bool:
     if transfer is None:
         return True
     if not _transfer_accounts_match(state, transfer):
@@ -197,7 +227,7 @@ def _transfer_is_affordable(state: WorldState, transfer: StoryTransfer | None) -
 def story_outcome(state: WorldState, node: StoryNode) -> StoryOutcome:
     return next((variant.outcome for variant in node.variants
                  if all(_gate_passes(state, gate) for gate in variant.when)
-                 and _transfer_is_affordable(state, variant.outcome.transfer)), node.fallback)
+                 and transfer_is_affordable(state, variant.outcome.transfer)), node.fallback)
 
 
 def _resolved_story_event(state: WorldState, ident: UUID, node: StoryNode, event_id: UUID) -> StoryMilestoneResolvedEvent:
@@ -228,15 +258,23 @@ def settle_story_reaction(state: WorldState, reaction: StoryReaction, event_id: 
     return _resolved_story_event(state, reaction.reaction_id, reaction.node, event_id)
 
 
+def story_followup_schedules(state: WorldState, milestone: StoryMilestone) -> list[ScheduledEventRecord]:
+    return [schedule for item in state.story_followups if item.after_id == milestone.schedule_id
+            if (schedule := item.schedule_after(milestone)) is not None]
+
+
 def validate_story_state(state: WorldState) -> None:
     schedules = {schedule.id: schedule for schedule in state.scheduled_events if schedule.handler_id == STORY_NODE_HANDLER}
-    if not schedules and not state.story_milestones and not state.story_reactions:
+    if not schedules and not state.story_milestones and not state.story_reactions and not state.story_followups:
         return
-    nodes = {schedule_id: read_story_node(schedule) for schedule_id, schedule in schedules.items()}
     reactions = {reaction.reaction_id: reaction for reaction in state.story_reactions}
-    if len(reactions) != len(state.story_reactions) or set(nodes).intersection(reactions):
-        raise ValueError("Story schedules and reactions must have distinct identifiers.")
+    followups = {followup.followup_id: followup for followup in state.story_followups}
+    if (len(reactions) != len(state.story_reactions) or len(followups) != len(state.story_followups)
+            or set(schedules).intersection(reactions) or set(followups).intersection(reactions)):
+        raise ValueError("Story nodes must have distinct identifiers.")
+    nodes = {schedule_id: read_story_node(schedule) for schedule_id, schedule in schedules.items()}
     nodes.update({key: reaction.node for key, reaction in reactions.items()})
+    nodes.update({key: followup.node for key, followup in followups.items()})
     allowed_outcomes = {key: {node.fallback.key, *(variant.outcome.key for variant in node.variants)}
                         for key, node in nodes.items()}
     records = {record.schedule_id: record for record in state.story_milestones}
@@ -251,6 +289,20 @@ def validate_story_state(state: WorldState) -> None:
                 or record.outcome not in allowed_outcomes[key]):
             raise ValueError("A story milestone receipt conflicts with its schedule.")
     dependencies = TopologicalSorter()
+    challenge_ids = {challenge.challenge_id for challenge in state.challenges}
+    all_schedules = {schedule.id: schedule for schedule in state.scheduled_events}
+    for key, followup in followups.items():
+        if followup.after_id not in nodes or (
+            followup.after_outcome is not None and followup.after_outcome not in allowed_outcomes[followup.after_id]
+        ):
+            raise ValueError("A story follow-up must reference an existing milestone or outcome.")
+        dependencies.add(key, followup.after_id)
+        scheduled = all_schedules.get(key)
+        expected = followup.schedule_after(records.get(followup.after_id))
+        if scheduled is not None and scheduled.status == "completed":
+            scheduled = scheduled.model_copy(update={"status": "queued", "completed_runs": 0, "revision": scheduled.revision - 1})
+        if expected != scheduled:
+            raise ValueError("A story follow-up schedule must match the committed parent milestone and delay.")
     for key, node in nodes.items():
         if len(set(node.participant_ids)) != len(node.participant_ids) or any(
             entity not in state.entities for entity in node.participant_ids
@@ -260,11 +312,14 @@ def validate_story_state(state: WorldState) -> None:
         if key in reactions:
             gates.extend(reactions[key].when)
         for gate in gates:
+            if isinstance(gate, StoryChallengeGate) and gate.challenge_id not in challenge_ids:
+                raise ValueError("Story gates may only reference a registered challenge.")
             if not isinstance(gate, StoryPriorOutcomeGate):
                 continue
             prior = gate.schedule_id
             if gate.outcome not in allowed_outcomes.get(prior, set()) or (
-                prior in schedules and key in schedules and schedules[prior].due_tick >= schedules[key].due_tick
+                prior in schedules and key in schedules and prior not in followups and key not in followups
+                and schedules[prior].due_tick >= schedules[key].due_tick
             ):
                 raise ValueError("Story prerequisites must reference an earlier valid outcome.")
             dependencies.add(key, prior)

@@ -103,7 +103,8 @@ from .travel_journeys import (
 )
 from .travel_journey_events import TravelJourneyChangedEvent
 from .world_books import WorldBookEntry, WorldBookImportedEvent
-from .story_nodes import StoryMilestone, StoryMilestoneResolvedEvent, StoryReaction, validate_story_state
+from .story_nodes import StoryFollowup, StoryMilestone, StoryMilestoneResolvedEvent, StoryReaction, validate_story_state
+from .challenges import ChallengeAttempt, ChallengeDefinition, ChallengeResolvedEvent, validate_challenge_state
 from .waypoint_opportunity_events import WaypointOpportunityDecision, WaypointOpportunityDecisionRecordedEvent
 
 ResourceId = Annotated[str, Field(min_length=1, max_length=160, pattern=r"^[a-zA-Z][a-zA-Z0-9_.-]*$")]
@@ -262,7 +263,10 @@ class WorldState(ContractModel):
     goals: list[GoalRecord] = Field(default_factory=list)
     scheduled_events: list[ScheduledEventRecord] = Field(default_factory=list)
     story_reactions: list[StoryReaction] = Field(default_factory=list, max_length=128, exclude_if=lambda records: not records)
+    story_followups: list[StoryFollowup] = Field(default_factory=list, max_length=128, exclude_if=lambda records: not records)
     story_milestones: list[StoryMilestone] = Field(default_factory=list, exclude_if=lambda records: not records)
+    challenges: list[ChallengeDefinition] = Field(default_factory=list, max_length=256, exclude_if=lambda records: not records)
+    challenge_attempts: list[ChallengeAttempt] = Field(default_factory=list, exclude_if=lambda records: not records)
     investigation_cases: list[InvestigationCaseFile] = Field(default_factory=list)
     public_accusation_corrections: list[PublicAccusationCorrection] = Field(
         default_factory=list,
@@ -346,6 +350,9 @@ class WorldState(ContractModel):
                 (InstitutionalCreditContract, self.institutional_credit_contracts),
                 (WorldBookEntry, self.world_book_entries),
                 (StoryReaction, self.story_reactions),
+                (StoryFollowup, self.story_followups),
+                (ChallengeDefinition, self.challenges),
+                (ChallengeAttempt, self.challenge_attempts),
             ):
                 for value in records:
                     raw = value.model_dump(mode="json") if isinstance(value, BaseModel) else value
@@ -588,6 +595,7 @@ class WorldState(ContractModel):
             if missing_dependencies:
                 raise ValueError(f"scheduled event {event.id} references missing dependencies")
         validate_story_state(self)
+        validate_challenge_state(self)
         validate_shipment_state(self)
         validate_promise_state(self)
         if self.relationship_invitations:
@@ -1091,6 +1099,7 @@ type DomainEvent = Annotated[
     | RenewableResourceHarvestedEvent
     | ScheduledEventCompletedEvent
     | StoryMilestoneResolvedEvent
+    | ChallengeResolvedEvent
     | ResourceAccountOpenedEvent
     | EnvironmentalSourceAccountOpenedEvent
     | NpcPlanCreatedEvent

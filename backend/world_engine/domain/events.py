@@ -127,12 +127,14 @@ from .models import (
 )
 from .world_books import WorldBookImportedEvent
 from .story_nodes import STORY_NODE_RESOLVED, StoryMilestoneResolvedEvent
+from .challenges import CHALLENGE_RESOLVED, ChallengeResolvedEvent
 from .evidence_destruction import validate_destroyable_historical_item
 
 EVENT_TYPES: dict[str, type] = {
     "core.entity_created.v1": EntityCreatedEvent,
     "core.world_book_imported.v1": WorldBookImportedEvent,
     STORY_NODE_RESOLVED: StoryMilestoneResolvedEvent,
+    CHALLENGE_RESOLVED: ChallengeResolvedEvent,
     "core.entity_field_changed.v1": EntityFieldChangedEvent,
     "core.resource_transferred.v1": ResourceTransferredEvent,
     "core.time_advanced.v1": TimeAdvancedEvent,

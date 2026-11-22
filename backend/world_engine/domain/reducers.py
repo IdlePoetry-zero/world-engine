@@ -14,9 +14,10 @@ from pydantic import TypeAdapter
 from pydantic_core import to_jsonable_python
 
 from .errors import InsufficientResources, InvalidEvent
+from .challenges import ChallengeResolvedEvent, settle_challenge
 from .story_nodes import (
     STORY_NODE_HANDLER, StoryMilestone, StoryMilestoneResolvedEvent, ready_story_reaction,
-    settle_story_milestone, settle_story_reaction,
+    settle_story_milestone, settle_story_reaction, story_followup_schedules,
 )
 from .npc_plan_events import NpcPlanCreatedEvent, NpcPlanRevisedEvent
 from .npc_plans import apply_npc_plan_created, apply_npc_plan_revised, occupied_npc_ids
@@ -1354,6 +1355,14 @@ def apply_event(state: WorldState, raw_event: DomainEvent | dict[str, object]) -
     if isinstance(event, ScheduledEventCompletedEvent):
         return _apply_scheduled_event_completion(state, event)
 
+    if isinstance(event, ChallengeResolvedEvent):
+        attempt = event.attempt
+        if event != settle_challenge(state, attempt.challenge_id, attempt.actor_id, event.event_id):
+            raise InvalidEvent("The challenge attempt does not match its registered terms.")
+        if event.fee is not None:
+            state = apply_event(state, ResourceTransferredEvent(event_id=event.event_id, **event.fee.model_dump()))
+        return _validated_state(state, {"challenge_attempts": [*state.challenge_attempts, attempt]})
+
     if isinstance(event, StoryMilestoneResolvedEvent):
         ident = event.milestone.schedule_id
         schedule = next((item for item in state.scheduled_events if item.id == ident), None)
@@ -1368,7 +1377,10 @@ def apply_event(state: WorldState, raw_event: DomainEvent | dict[str, object]) -
         if event.transfer is not None:
             state = apply_event(state, ResourceTransferredEvent(event_id=event.event_id, **event.transfer.model_dump()))
         if schedule is None:
-            return _validated_state(state, {"story_milestones": [*state.story_milestones, event.milestone]})
+            return _validated_state(state, {
+                "story_milestones": [*state.story_milestones, event.milestone],
+                "scheduled_events": [*state.scheduled_events, *story_followup_schedules(state, event.milestone)],
+            })
         completion = ScheduledEventCompletedEvent(
             event_id=event.event_id, scheduled_event_id=schedule.id, expected_revision=schedule.revision,
         )
@@ -3206,7 +3218,7 @@ def _apply_scheduled_event_completion(
 
     scheduled_events[index] = replacement
     if story_milestone is not None:
-        return _validated_state(state, {"scheduled_events": scheduled_events,
+        return _validated_state(state, {"scheduled_events": [*scheduled_events, *story_followup_schedules(state, story_milestone)],
                                         "story_milestones": [*state.story_milestones, story_milestone]})
     return _validated_state(state, {"scheduled_events": scheduled_events})
 
@@ -3252,6 +3264,12 @@ def ledger_postings(event: DomainEvent) -> tuple[LedgerPosting, ...]:
         postings = (
             LedgerPosting(transfer.from_account_id, transfer.resource_id, transfer.quantity.copy_negate()),
             LedgerPosting(transfer.to_account_id, transfer.resource_id, transfer.quantity),
+        )
+    elif isinstance(event, ChallengeResolvedEvent) and event.fee is not None:
+        fee = event.fee
+        postings = (
+            LedgerPosting(fee.from_account_id, fee.resource_id, fee.quantity.copy_negate()),
+            LedgerPosting(fee.to_account_id, fee.resource_id, fee.quantity),
         )
     elif isinstance(event, ShipmentReliefDistributedEvent):
         plan = event.plan

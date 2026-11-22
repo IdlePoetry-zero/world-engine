@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from world_engine import __version__
 from world_engine.domain.errors import Conflict, InvalidEvent, NotFound
 from world_engine.domain.models import AccessScope, NewWorld, WorldState
+from world_engine.domain.story_nodes import STORY_OPENING_METADATA
 from world_engine.rules.versions import LEGACY_RULESET_VERSION, SUPPORTED_RULESET_VERSIONS
 
 from .author_rule_checks import AuthorFieldError, author_component_rule_errors
@@ -21,7 +22,6 @@ from .worlds import WorldApplication
 
 
 _IMPORT_NAMESPACE = UUID("388591b1-a102-472c-b181-e31ba09cb888")
-_OPENING_KEY = "world_pack_story_opening_id"
 
 
 @dataclass(frozen=True)
@@ -158,7 +158,7 @@ class WorldPackApplication:
                 return PreparedWorldPack(package, None, (f"介入点 {key} 缺少可操控的玩家角色。",))
             summaries.append({field: item[field] for field in ("opening_id", "title", "position", "known_history")})
             if key == opening_id:
-                metadata = initial.metadata | {_OPENING_KEY: key}
+                metadata = initial.metadata | {STORY_OPENING_METADATA: key}
                 selected = initial.model_copy(update={"metadata": metadata})
         if opening_id is not None and selected is None:
             return PreparedWorldPack(package, None, ("该介入点不在世界包中，请重新选择。",), openings=tuple(summaries))
@@ -184,7 +184,7 @@ class WorldPackApplication:
             original = repository.read_world_pack_archive(scope, world_id)
             if original is None or hashlib.sha256(original).hexdigest() != digest:
                 raise Conflict("This idempotency key already identifies another world pack import.")
-            if view.state.metadata.get(_OPENING_KEY) != opening_id:
+            if view.state.metadata.get(STORY_OPENING_METADATA) != opening_id:
                 raise Conflict("This idempotency key already identifies another story opening.")
             return self.worlds._world_header(view) | {"duplicate": duplicate}
 
@@ -201,7 +201,7 @@ class WorldPackApplication:
         metadata = dict(draft.state.metadata)
         metadata.pop("creation_payload_hash", None)
         if opening_id is None:
-            metadata.pop(_OPENING_KEY, None)
+            metadata.pop(STORY_OPENING_METADATA, None)
         metadata["world_pack_archive_sha256"] = digest
         state = draft.state.model_copy(update={"metadata": metadata})
         world = draft.model_copy(update={

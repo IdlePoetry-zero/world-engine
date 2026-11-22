@@ -3,9 +3,10 @@
 from uuid import UUID, uuid5
 
 from world_engine.application.world_packs import WorldPackManifest, write_world_pack
+from world_engine.domain.challenges import ChallengeDefinition
 from world_engine.domain.components import PlaceComponent, PlaceRoute, ScheduledEventRecord
-from world_engine.domain.models import WorldEntity, WorldState
-from world_engine.domain.story_nodes import STORY_NODE_HANDLER, STORY_NODE_VERSION, StoryNode
+from world_engine.domain.models import ResourceAccount, WorldEntity, WorldState
+from world_engine.domain.story_nodes import STORY_NODE_HANDLER, STORY_NODE_VERSION, StoryNode, StoryReaction
 from world_engine.domain.world_books import WorldBookCitation, WorldBookEntry, WorldBookProvenance
 
 from .gensokyo_original_profiles import GEOGRAPHY, PROFILES, source_id, source_register
@@ -13,7 +14,7 @@ from .gensokyo_original_profiles import GEOGRAPHY, PROFILES, source_id, source_r
 
 PACK_ID = "author.gensokyo-reference"
 PACK_TITLE = "幻想乡原作资料与异变年代"
-PACK_VERSION = "0.3.0"
+PACK_VERSION = "0.4.0"
 _NAMESPACE = UUID("0d0063f6-45d8-4aaa-9873-135f3d9b5a5f")
 
 _WORKS = {
@@ -213,8 +214,18 @@ def _scenario(*, incident: str, description: str, known_incidents: frozenset[str
         }})
     player = _id("actor:resident")
     assistant = _id("actor:records-keeper")
+    materials = "practice.lamp_powder"
+    learner_stock, station_stock = _id("account:practice-resident"), _id("account:practice-station")
+    spell_challenge = _id("challenge:spell-declaration")
+    practices = (
+        ("arcana", "灯符术法演练", "术法", "practice.arcana", "12", "11", None),
+        ("aura", "妖力辨识", "妖力辨识", "practice.aura", "11", "10", None),
+        ("tools", "外界仪具辨用", "器具学", "practice.tools", "10", "12", None),
+        ("spell-declaration", "符卡登记演练", "仪式规则", "practice.declaration", "12", "10", _id("challenge:arcana")),
+    )
     places[player] = WorldEntity(id=player, name="乡里的观测员", kind="character", location_id=village, components={
-        "capabilities": {"grants": ["world.travel"]}, "known_places": [str(station)],
+        "capabilities": {"grants": ["world.travel", "practice.clearance"]}, "known_places": [str(station)],
+        "skills": {"skills": {skill_id: {"level": initial_level} for _, _, _, skill_id, initial_level, _, _ in practices}},
     })
     places[assistant] = WorldEntity(id=assistant, name="守簿人笠秋", kind="character", location_id=station,
                                     components={"public_role": "观测棚值事"})
@@ -241,12 +252,28 @@ def _scenario(*, incident: str, description: str, known_incidents: frozenset[str
     ]
     return WorldState(
         player_id=player, entities=places, world_book_entries=entries,
+        resources={learner_stock: ResourceAccount(resource_id=materials, owner_id=player, balance=4),
+                   station_stock: ResourceAccount(resource_id=materials, owner_id=station, balance=0)},
+        challenges=[ChallengeDefinition.model_validate({
+            "challenge_id": _id(f"challenge:{key}"), "venue_id": station, "title": title,
+            "description": "观测棚的原创演练。门槛与材料是本包的游玩配置。", "skill_id": skill_id,
+            "skill_label": skill_label, "pass_level": pass_level, "required_capability": "practice.clearance",
+            "prerequisite_id": prerequisite,
+            "fee": {"receiving_account_id": station_stock, "resource_id": materials, "quantity": "1"},
+        }) for key, title, skill_label, skill_id, _, pass_level, prerequisite in practices],
+        story_reactions=[StoryReaction.model_validate({
+            "reaction_id": _id(f"{incident}:spell-registration"),
+            "when": [{"kind": "challenge_passed", "actor_id": player, "challenge_id": spell_challenge}],
+            "node": {"title": "符卡演练登记", "visibility": "public", "participant_ids": [player, assistant],
+                     "fallback": {"key": "registered", "effect": "occurred", "summary": "值事登记了这次命名演练的通过记录。"}},
+        })],
         scheduled_events=[ScheduledEventRecord(
             id=schedule_id, due_tick=tick, phase="observation", handler_id=STORY_NODE_HANDLER,
             handler_version=STORY_NODE_VERSION, payload=node.model_dump(mode="json"),
         ) for schedule_id, tick, node in node_definitions],
         metadata={"pack_id": PACK_ID, "pack_version": PACK_VERSION, "public_title": PACK_TITLE,
                   "public_description": description + " 可在观测棚合簿前去找守簿人笠秋。观测棚和合簿是本包原创玩法。",
+                  "resource_catalog": {materials: "试灯砂"},
                   "reference_incident": incident},
     ).model_dump(mode="json")
 

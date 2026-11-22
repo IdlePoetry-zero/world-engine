@@ -76,6 +76,12 @@ class ContinueAfterDeathRequest(RequestModel):
     expected_state_version: Version
 
 
+class ChallengeRequest(RequestModel):
+    branch_id: UUID
+    actor_id: UUID
+    expected_state_version: Version
+
+
 class JobControlRequest(RequestModel):
     action: Literal["pause", "resume", "cancel"]
 
