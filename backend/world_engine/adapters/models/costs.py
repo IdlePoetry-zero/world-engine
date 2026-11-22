@@ -31,6 +31,9 @@ def estimate_cost(usage: ProviderUsage, price: PriceVersion | None) -> CostRecor
         if usage.input_tokens < cached:
             return CostRecord()
         non_cached = usage.input_tokens - cached
+    elif cached + non_cached != usage.input_tokens:
+        # Inconsistent counters cannot establish the applicable split.
+        return CostRecord()
 
     if cached and price.cached_input_per_million is None:
         return CostRecord()

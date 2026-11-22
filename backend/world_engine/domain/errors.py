@@ -5,6 +5,14 @@ class DomainError(Exception):
     """Base class for expected, user-visible domain failures."""
 
 
+class InsufficientStorage(DomainError):
+    """A storage transaction could not commit because capacity was exhausted."""
+
+
+class StorageBusy(DomainError):
+    """Database contention interrupted a storage transaction."""
+
+
 class NotFound(DomainError):
     """The scoped resource does not exist or is not visible."""
 

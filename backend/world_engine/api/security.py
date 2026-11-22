@@ -10,6 +10,7 @@ from __future__ import annotations
 import secrets
 from dataclasses import dataclass, field
 from hmac import compare_digest
+from typing import Protocol
 from urllib.parse import urlsplit
 
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -30,10 +31,23 @@ class LocalSession:
         return frozenset(urlsplit(origin).netloc.lower() for origin in self.allowed_origins)
 
 
+class IdentityProvider(Protocol):
+    """Resolve a session using server-controlled authentication context."""
+
+    async def authenticate(self, request: Request) -> AuthenticatedIdentity | None: ...
+
+
+@dataclass(frozen=True)
+class AuthenticatedIdentity:
+    principal_id: str
+    tenant_id: str
+
+
 class LocalSessionMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, *, session: LocalSession):
+    def __init__(self, app, *, session: LocalSession, identity_provider: IdentityProvider | None = None):
         super().__init__(app)
         self.session = session
+        self.identity_provider = identity_provider
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         session = self.session
@@ -51,16 +65,20 @@ class LocalSessionMiddleware(BaseHTTPMiddleware):
         bootstrap = request.url.path == "/api/v1/session" and request.method == "GET"
         provided = request.cookies.get(session.cookie_name, "")
         authenticated = compare_digest(provided.encode(), session.token.encode())
-        if is_api and not bootstrap and not authenticated:
+        if self.identity_provider is None:
+            identity = AuthenticatedIdentity(session.principal_id, session.tenant_id) if authenticated or bootstrap else None
+        else:
+            identity = await self.identity_provider.authenticate(request) if is_api else None
+        if is_api and identity is None:
             return self._error("AUTH_REQUIRED", "请重新连接本地会话。", 401)
 
         # Only the local session identity is authoritative. Client-supplied user
         # and tenant fields must never replace these values in the application.
-        if authenticated or bootstrap:
-            request.state.principal_id = session.principal_id
-            request.state.tenant_id = session.tenant_id
+        if identity is not None:
+            request.state.principal_id = identity.principal_id
+            request.state.tenant_id = identity.tenant_id
         response = await call_next(request)
-        if bootstrap and response.status_code < 400:
+        if self.identity_provider is None and bootstrap and response.status_code < 400:
             response.set_cookie(
                 session.cookie_name,
                 session.token,

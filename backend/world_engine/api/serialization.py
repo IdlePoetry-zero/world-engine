@@ -9,10 +9,18 @@ from fastapi.encoders import jsonable_encoder
 
 _EXACT_INTEGERS = frozenset(
     {
-        "tick", "current_tick", "to_tick", "from_tick", "due_tick", "birth_tick",
+        "tick", "current_tick", "to_tick", "from_tick", "due_tick", "birth_tick", "started_tick", "target_tick",
+        "created_tick", "ended_tick", "effective_tick", "proposed_tick", "updated_tick", "starts_at_tick", "ends_at_tick", "expires_at_tick",
+        "counter_expires_at_tick", "start_tick", "end_tick", "attended_tick", "recorded_tick",
+        "departed_tick", "arrival_tick", "resolved_tick",
+        "opens_tick", "closes_tick", "minimum_itinerary_elapsed_ticks",
+        "snapshot_tick", "accepted_through_tick", "maturity_tick", "accepted_tick", "overdue_at_tick",
+        "previous_maturity_tick", "new_maturity_tick", "accept_through_tick", "previous_overdue_tick",
         "committed_tick", "committed_through_tick", "received_tick", "valid_from",
         "valid_to", "state_version", "state_version_after", "expected_state_version",
         "sequence", "last_seq", "head_seq", "first_seq", "fork_seq", "next_cursor",
+        "headcount", "unmodeled_headcount", "carrying_capacity",
+        "promotion_serial", "last_advanced_year",
     }
 )
 

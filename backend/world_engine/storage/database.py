@@ -6,6 +6,7 @@ from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
 from .models import Base
+from .compact_ledger import enable_compact_ledger
 
 
 def create_engine_for_url(database_url: str, *, echo: bool = False) -> Engine:
@@ -53,3 +54,16 @@ class Database:
 
     def dispose(self) -> None:
         self.engine.dispose()
+
+    def enable_compact_ledger(self) -> bool:
+        """Select the compact SQLite layout for a new initialized database."""
+        with self.engine.connect() as connection:
+            return enable_compact_ledger(connection)
+
+    def uses_compact_ledger(self) -> bool:
+        if self.engine.dialect.name != "sqlite":
+            return False
+        with self.engine.connect() as connection:
+            return connection.exec_driver_sql(
+                "SELECT type FROM sqlite_schema WHERE name = 'ledger_postings'"
+            ).scalar() == "view"

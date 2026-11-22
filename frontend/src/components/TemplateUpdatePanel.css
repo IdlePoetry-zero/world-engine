@@ -1,0 +1,53 @@
+.template-update-panel {
+  margin-bottom: 12px;
+  color: #a8b9ad;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.template-update-panel summary {
+  color: #d3e0d6;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.template-update-panel :is(.author-simple-field, .author-simple-field small,
+  .character-preview-field dt, .character-preview-field dd, .author-revision-inline-warning,
+  .character-create-error) {
+  font-size: 12px;
+}
+
+.template-update-panel .author-simple-field input {
+  width: 100%;
+  max-width: 28rem;
+}
+
+.template-update-panel .character-preview-fields {
+  margin-top: 8px;
+}
+
+.template-update-status:empty {
+  margin: 0;
+}
+
+.template-update-changes {
+  padding-inline-start: 18px;
+}
+
+.template-update-changes li + li {
+  margin-top: 6px;
+}
+
+.template-update-changes strong {
+  color: #c2d6c5;
+}
+
+.template-update-changes :is([data-status='conflict'], [data-status='unsupported']) strong {
+  color: #e2c794;
+}
+
+.template-update-changes p {
+  margin: 0;
+}

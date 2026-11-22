@@ -43,6 +43,10 @@ The adapters never accept an API key directly in configuration. `EnvironmentSecr
 
 The application owns the environment/OS reference allowlist before accepting a provider record from a client. Never allow a client to enumerate arbitrary environment variables or to submit raw key material as `secret_ref`.
 
+Once a provider has a saved credential reference, a configuration edit can change its display name, default model or path on the same origin. Changing the protocol, URL scheme, host or effective port requires a separate provider or explicit removal of its Windows credential. Configuration updates preserve the existing reference. The separate credential endpoints own Windows credential creation, replacement and deletion.
+
+An Ollama provider may set `ollama_context_tokens` to a positive integer. The native chat adapter sends it as `options.num_ctx` for both streamed and nonstreamed generation. An absent value uses the Ollama service default. The role's output limit is independent and continues to use `options.num_predict`. A larger context can consume more memory. [Ollama chat options](https://docs.ollama.com/api/chat) · [Ollama context length](https://docs.ollama.com/context-length)
+
 ## Discovery and capabilities
 
 Discovery reads model catalogs and preserves capability evidence (`state`, source, probe result and time). Capabilities use supported / unsupported / unknown states. Unknown is not treated as support.
@@ -84,3 +88,7 @@ The adapter request fields and capability evidence are based on these primary re
 ## Test scope and verification boundary
 
 `tests/providers/test_model_gateway.py` uses `httpx.MockTransport` responses to exercise request paths, native payloads, discovery, SSE/NDJSON normalization, usage, schema validation, bounded retry, timeouts, cancellation traces, secret redaction and local-only routing. These are unit/contract tests with mock transports only. No real API credentials were supplied, no paid API call was made, and no Ollama process was started. Real endpoint behavior, provider quality, throughput, cancellation billing and model-specific context limits remain unverified.
+
+## Action proposal schema size
+
+The saved work routine probe reported 21,641 input tokens for its action proposal. The intercepted application request contained 42,281 UTF-8 bytes of schema, 18,885 bytes of instructions and a 15,897-byte scene. A local comparison removed 224 repeated generated field titles, reducing the schema by 4,628 bytes. Preserve explicit titles and all field names, types, constraints and descriptions when generating the action proposal schema. Read provider usage on matched requests before attributing token or latency savings. [JSON Schema annotation semantics](https://json-schema.org/understanding-json-schema/reference/annotations) [DeepSeek JSON mode](https://api-docs.deepseek.com/guides/json_mode/)

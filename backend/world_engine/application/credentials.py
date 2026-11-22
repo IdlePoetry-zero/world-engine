@@ -3,6 +3,7 @@
 from typing import Protocol
 
 from world_engine.adapters.models.errors import ProviderError, ProviderErrorCode
+from world_engine.adapters.credentials import CredentialStoreError
 from world_engine.domain.errors import Conflict
 from world_engine.domain.models import AccessScope
 from .operations import OperationsStore
@@ -32,7 +33,7 @@ class CredentialService:
         provider = self.operations.provider(scope, provider_id)
         if not self.credentials.available:
             raise Conflict("OS credential storage is unavailable")
-        if not secret or len(secret.encode("utf-8")) > 2560 or "\x00" in secret:
+        if not secret or len(secret.encode("utf-8")) > 2560 or any(char.isspace() or ord(char) < 32 for char in secret):
             raise Conflict("Credential length or format is invalid")
         target = self.operations.credential_target(scope, provider_id)
         self.credentials.set(target, secret)
@@ -64,7 +65,10 @@ class AccountCredentialResolver:
             if secret_ref == f"os:{target}" and provider.get("secret_ref") == secret_ref:
                 if not self.service.credentials.available:
                     break
-                secret = self.service.credentials.get(target)
+                try:
+                    secret = self.service.credentials.get(target)
+                except CredentialStoreError as error:
+                    raise ProviderError(ProviderErrorCode.SECRET, "OS credential storage could not be read") from error
                 if secret:
                     return secret
                 break

@@ -10,6 +10,16 @@ def test_http_cannot_override_session_identity():
         CreateWorldRequest(pack_id="test", title="world", player_name="p", tenant_id="forged")
 
 
+def test_create_world_npc_autonomy_mode_is_opt_in_and_versioned():
+    legacy = CreateWorldRequest(pack_id="test", title="world", player_name="p")
+    assert legacy.npc_autonomy_mode == "off"
+    assert CreateWorldRequest(
+        pack_id="test", title="world", player_name="p", npc_autonomy_mode="limited_v1",
+    ).npc_autonomy_mode == "limited_v1"
+    with pytest.raises(ValidationError):
+        CreateWorldRequest(pack_id="test", title="world", player_name="p", npc_autonomy_mode="full")
+
+
 def test_large_world_time_is_encoded_as_decimal_string():
     value = 2**63 - 1
     assert wire({"current_tick": value, "nested": {"state_version": value}, "health": 80, "enabled": True}) == {

@@ -94,6 +94,8 @@ async def test_deepseek_chat_completions_generation_normalizes_usage_and_redacts
     assert result.provider_usage.output_tokens == 4
     assert result.provider_usage.source.value == "reported"
     assert result.cost.state is CostState.UNKNOWN
+    assert result.call_trace.max_output_tokens == 64
+    assert result.call_trace.to_public_dict()["max_output_tokens"] == 64
     serialized = json.dumps(result.call_trace.to_public_dict())
     assert supplied_secret not in serialized
     assert supplied_secret not in repr(result.call_trace)
@@ -204,13 +206,15 @@ async def test_ollama_native_chat_and_discovery_do_not_assume_model_specific_too
         body = json.loads(request.content)
         assert body["model"] == "tiny:latest"
         assert body["stream"] is False
+        assert body["options"]["num_ctx"] == 16384
+        assert body["options"]["num_predict"] == 2048
         return httpx.Response(200, json={
             "model": "tiny:latest", "message": {"role": "assistant", "content": "Local response."},
             "done": True, "done_reason": "stop", "prompt_eval_count": 6, "eval_count": 3,
             "total_duration": 1000, "eval_duration": 800,
         })
 
-    config = ProviderConfig("ollama", ProviderKind.OLLAMA, "http://127.0.0.1:11434", default_model="tiny:latest", max_retries=0)
+    config = ProviderConfig("ollama", ProviderKind.OLLAMA, "http://127.0.0.1:11434", default_model="tiny:latest", max_retries=0, ollama_context_tokens=16384)
     gateway = ModelGateway(transports={ProviderKind.OLLAMA: httpx.MockTransport(handler)})
     discovered = await gateway.discover(config)
     assert discovered[0].capabilities.state(Capability.IMAGE_INPUT) is CapabilityState.SUPPORTED
@@ -254,6 +258,7 @@ async def test_deepseek_stream_normalizes_deltas_usage_and_only_completes_after_
     assert events[-1].result.normalized_output == "Hello"
     assert events[-1].provisional is False
     assert events[-1].result.call_trace.attempts[0].usage.output_tokens == 1
+    assert events[-1].result.call_trace.max_output_tokens == 2048
 
 
 @pytest.mark.asyncio
@@ -277,6 +282,7 @@ async def test_partial_stream_failure_has_trace_and_never_emits_completed_event(
     assert error.value.code is ProviderErrorCode.TRUNCATED
     assert error.value.call_trace.attempts[0].attempt_number == 1
     assert len(error.value.call_trace.attempts) == 1
+    assert error.value.call_trace.max_output_tokens == 2048
 
 
 @pytest.mark.asyncio
@@ -397,6 +403,11 @@ def test_usage_and_cost_keep_unknown_separate_from_estimated():
     incomplete = estimate_cost(ProviderUsage(source=UsageSource.REPORTED, input_tokens=100, output_tokens=25), price)
     assert incomplete.state is CostState.UNKNOWN
     assert incomplete.amount is None
+    inconsistent = estimate_cost(ProviderUsage(
+        source=UsageSource.REPORTED, input_tokens=100, cached_input_tokens=20,
+        non_cached_input_tokens=90, output_tokens=25,
+    ), price)
+    assert inconsistent.amount is None
 
 
 def test_routing_and_profiles_keep_locality_and_speed_depth_independent():
@@ -450,15 +461,101 @@ async def test_ollama_stream_normalizes_ndjson_deltas_and_reports_final_usage():
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/chat"
-        assert json.loads(request.content)["stream"] is True
+        body = json.loads(request.content)
+        assert body["stream"] is True
+        assert body["options"]["num_ctx"] == 16384
+        assert body["options"]["num_predict"] == 2048
         return httpx.Response(200, text=stream_body, headers={"content-type": "application/x-ndjson"})
 
-    config = ProviderConfig("ollama", ProviderKind.OLLAMA, "http://127.0.0.1:11434", default_model="tiny:latest", max_retries=0)
+    config = ProviderConfig("ollama", ProviderKind.OLLAMA, "http://127.0.0.1:11434", default_model="tiny:latest", max_retries=0, ollama_context_tokens=16384)
     gateway = ModelGateway(transports={ProviderKind.OLLAMA: httpx.MockTransport(handler)})
     events = [event async for event in gateway.stream(config, _text_request(data_policy=DataPolicy.LOCAL_ONLY))]
     assert [event.kind for event in events] == [StreamEventKind.STARTED, StreamEventKind.TEXT_DELTA, StreamEventKind.TEXT_DELTA, StreamEventKind.USAGE, StreamEventKind.COMPLETED]
     assert events[-1].result.normalized_output == "Local stream."
     assert events[-1].usage.total_tokens == 7
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_ollama_context_overflow_is_safe_and_non_retryable(streaming):
+    upstream_message = "request (9787 tokens) exceeds the available context size (8192 tokens), try increasing it"
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(400, json={"error": upstream_message})
+
+    config = ProviderConfig(
+        "ollama", ProviderKind.OLLAMA, "http://127.0.0.1:11434",
+        default_model="tiny:latest", max_retries=2,
+    )
+    gateway = ModelGateway(transports={ProviderKind.OLLAMA: httpx.MockTransport(handler)})
+    with pytest.raises(ProviderError) as caught:
+        if streaming:
+            _ = [event async for event in gateway.stream(config, _text_request(data_policy=DataPolicy.LOCAL_ONLY))]
+        else:
+            await gateway.generate(config, _text_request(data_policy=DataPolicy.LOCAL_ONLY))
+
+    error = caught.value
+    assert calls == 1
+    assert error.code is ProviderErrorCode.CONTEXT_LIMIT
+    assert error.retryable is False
+    assert error.status_code == 400
+    assert error.safe_message == "Ollama context capacity was exceeded"
+    assert error.call_trace.error_code == ProviderErrorCode.CONTEXT_LIMIT.value
+    assert error.call_trace.attempts[0].error_code == ProviderErrorCode.CONTEXT_LIMIT.value
+    assert upstream_message not in error.safe_message
+    assert upstream_message not in error.call_trace.error_message
+    assert upstream_message not in json.dumps(error.call_trace.to_public_dict(), ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_ollama_other_or_unbounded_context_errors_remain_client_errors(streaming):
+    overflow = "request (9787 tokens) exceeds the available context size (8192 tokens), try increasing it"
+    # JSON accepts trailing whitespace. Exercise a truly streamed response so
+    # we can verify the diagnostic reader stops before consuming every chunk.
+    chunks = [json.dumps({"error": overflow}).encode(), b" " * 4096, b" " * 4096, b" " * 4096]
+    stream_state = {"yielded": 0}
+
+    class ChunkedErrorBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for chunk in chunks:
+                stream_state["yielded"] += 1
+                yield chunk
+
+        async def aclose(self):
+            return None
+
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if streaming:
+            return httpx.Response(400, stream=ChunkedErrorBody(), headers={"content-type": "application/json"})
+        return httpx.Response(400, content=json.dumps({
+            "error": "request (5 tokens) exceeds the available context size (8192 tokens), try increasing it",
+        }))
+
+    config = ProviderConfig(
+        "ollama", ProviderKind.OLLAMA, "http://127.0.0.1:11434",
+        default_model="tiny:latest", max_retries=2,
+    )
+    gateway = ModelGateway(transports={ProviderKind.OLLAMA: httpx.MockTransport(handler)})
+    with pytest.raises(ProviderError) as caught:
+        if streaming:
+            _ = [event async for event in gateway.stream(config, _text_request(data_policy=DataPolicy.LOCAL_ONLY))]
+        else:
+            await gateway.generate(config, _text_request(data_policy=DataPolicy.LOCAL_ONLY))
+
+    assert calls == 1
+    assert caught.value.code is ProviderErrorCode.CLIENT
+    assert caught.value.retryable is False
+    if streaming:
+        assert stream_state["yielded"] == 3
+        assert stream_state["yielded"] < len(chunks)
 
 
 @pytest.mark.asyncio
@@ -511,6 +608,7 @@ async def test_timeout_exhaustion_has_attempt_trace_unknown_usage_and_no_zero_co
     assert trace.attempts[0].possibly_billed is True
     assert trace.usage.source is UsageSource.UNKNOWN
     assert trace.usage.input_tokens is None and trace.usage.output_tokens is None
+    assert trace.max_output_tokens == 2048
 
 
 @pytest.mark.asyncio

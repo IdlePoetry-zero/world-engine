@@ -86,10 +86,15 @@ def test_entity_location_must_resolve_and_dead_entities_are_terminal() -> None:
 
 def test_resource_transfer_updates_balances_and_emits_balanced_ledger() -> None:
     source_id, destination_id = uuid4(), uuid4()
+    source_owner, destination_owner = uuid4(), uuid4()
     state = WorldState(
+        entities={
+            source_owner: WorldEntity(id=source_owner, kind="character"),
+            destination_owner: WorldEntity(id=destination_owner, kind="character"),
+        },
         resources={
-            source_id: ResourceAccount(resource_id="core.silver", balance="5.25"),
-            destination_id: ResourceAccount(resource_id="core.silver", balance="1"),
+            source_id: ResourceAccount(resource_id="core.silver", balance="5.25", owner_id=source_owner),
+            destination_id: ResourceAccount(resource_id="core.silver", balance="1", owner_id=destination_owner),
         }
     )
     event = ResourceTransferredEvent(
@@ -110,10 +115,15 @@ def test_resource_transfer_updates_balances_and_emits_balanced_ledger() -> None:
 
 def test_resource_transfer_rejects_overdraft_and_float_amounts() -> None:
     source_id, destination_id = uuid4(), uuid4()
+    source_owner, destination_owner = uuid4(), uuid4()
     state = WorldState(
+        entities={
+            source_owner: WorldEntity(id=source_owner, kind="character"),
+            destination_owner: WorldEntity(id=destination_owner, kind="character"),
+        },
         resources={
-            source_id: ResourceAccount(resource_id="core.silver", balance="1"),
-            destination_id: ResourceAccount(resource_id="core.silver", balance="0"),
+            source_id: ResourceAccount(resource_id="core.silver", balance="1", owner_id=source_owner),
+            destination_id: ResourceAccount(resource_id="core.silver", balance="0", owner_id=destination_owner),
         }
     )
     event = ResourceTransferredEvent(
@@ -136,13 +146,19 @@ def test_resource_transfer_rejects_overdraft_and_float_amounts() -> None:
 
 def test_decimal_bounds_preserve_small_transfers_without_context_rounding() -> None:
     source_id, destination_id = uuid4(), uuid4()
+    source_owner, destination_owner = uuid4(), uuid4()
     state = WorldState(
+        entities={
+            source_owner: WorldEntity(id=source_owner, kind="character"),
+            destination_owner: WorldEntity(id=destination_owner, kind="character"),
+        },
         resources={
             source_id: ResourceAccount(
                 resource_id="core.silver",
                 balance="999999999999999999999999999999.999999",
+                owner_id=source_owner,
             ),
-            destination_id: ResourceAccount(resource_id="core.silver", balance="0"),
+            destination_id: ResourceAccount(resource_id="core.silver", balance="0", owner_id=destination_owner),
         }
     )
     event = ResourceTransferredEvent(
@@ -195,6 +211,21 @@ def test_world_state_rejects_player_owner_and_location_containment_cycles() -> N
     with pytest.raises(ValueError, match="finite number"):
         WorldEntity(id=uuid4(), kind="character", components={"score": float("nan")})
 
+    copied_bad_component = WorldEntity(id=uuid4(), kind="character").model_copy(
+        update={"components": {"personality": {"openness": "2"}}}
+    )
+    with pytest.raises(ValueError, match="less than or equal to"):
+        WorldState(entities={copied_bad_component.id: copied_bad_component})
+
+    copied_bad_account = ResourceAccount(
+        resource_id="core.silver", balance="1", owner_id=player_id
+    ).model_copy(update={"balance": Decimal("-1")})
+    with pytest.raises(ValueError, match="holder account balance cannot be negative"):
+        WorldState(
+            entities={player_id: WorldEntity(id=player_id, kind="character")},
+            resources={account_id: copied_bad_account},
+        )
+
 
 def test_time_cannot_move_backwards() -> None:
     state = WorldState(current_tick=42)
@@ -203,3 +234,6 @@ def test_time_cannot_move_backwards() -> None:
 
     with pytest.raises(InvalidEvent, match="monotonically"):
         apply_event(advanced, TimeAdvancedEvent(to_tick=43))
+    overflow = TimeAdvancedEvent(to_tick=44).model_copy(update={"to_tick": 2**63})
+    with pytest.raises(InvalidEvent, match="failed schema validation"):
+        apply_event(advanced, overflow)

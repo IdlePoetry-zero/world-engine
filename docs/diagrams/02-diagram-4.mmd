@@ -1,8 +1,15 @@
 flowchart LR
-    Browser[浏览器] --> Loopback[Loopback API 与静态网页]
-    Loopback --> Queue[(本地数据库与作业)]
-    Worker[后台模拟进程] --> Queue
+    Browser[浏览器] --> Loopback
+    subgraph Local[本地服务进程]
+        Loopback[Loopback API 与静态网页]
+        Worker[模拟工作器]
+        Media[可选媒体工作器]
+    end
+    Loopback --> Queue[(SQLite 世界状态与持久作业)]
+    Worker --> Queue
+    Media --> Queue
     Worker --> Providers[云端或本地模型服务]
+    Loopback --> Providers
     Loopback --> Vault[操作系统凭据库]
-    Worker --> Files[独立世界数据目录]
+    Media --> Files[独立数据目录中的媒体资产]
     Future[未来登录与多人网关] -. 身份和房间协议 .-> Loopback

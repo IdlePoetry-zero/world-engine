@@ -41,7 +41,7 @@ from .contracts import (
     utc_now,
 )
 from .costs import estimate_cost
-from .errors import ProviderError, ProviderErrorCode
+from .errors import ProviderError, ProviderErrorCode, TransportFailureKind
 from .ollama import OllamaAdapter
 from .secrets import SecretResolver
 
@@ -61,6 +61,7 @@ class ModelGateway:
         secret_resolver: SecretResolver | None = None,
         transports: Mapping[ProviderKind, httpx.AsyncBaseTransport] | None = None,
         price_versions: Mapping[tuple[str, str], PriceVersion] | None = None,
+        price_resolver: Callable[[ProviderConfig, str, datetime], PriceVersion | None] | None = None,
         schema_resolver: Callable[[str], Mapping[str, Any] | None] | None = None,
         sleeper: Callable[[float], Any] = asyncio.sleep,
         jitter: Callable[[float, float], float] = random.uniform,
@@ -75,6 +76,7 @@ class ModelGateway:
             }
         self._adapters = dict(adapters)
         self._prices = dict(price_versions or {})
+        self._price_resolver = price_resolver
         self._schema_resolver = schema_resolver
         self._sleep = sleeper
         self._jitter = jitter
@@ -164,6 +166,7 @@ class ModelGateway:
                     possibly_billed=error.possibly_billed,
                     usage=ProviderUsage(),
                     error_code=error.code.value,
+                    transport_failure_kind=error.transport_failure_kind,
                 ))
                 final_error = error
                 if not error.retryable or attempt_number > config.max_retries:
@@ -189,11 +192,11 @@ class ModelGateway:
             normalized, validation = self._validate_output(raw, request)
         except ProviderError as exc:
             validation_seconds = max(0.0, time.perf_counter() - validation_started)
-            trace = self._trace(config, request, model=model, started_at=started_at, attempts=attempts, usage=raw.usage, error=exc, cost=self._cost(config, model, raw.reported_model, raw.usage), end_reason="output_rejected", validation_seconds=validation_seconds, raw=raw)
+            trace = self._trace(config, request, model=model, started_at=started_at, attempts=attempts, usage=raw.usage, error=exc, cost=self._cost(config, model, raw.reported_model, raw.usage, attempt_started_at), end_reason="output_rejected", validation_seconds=validation_seconds, raw=raw)
             exc.call_trace = trace
             raise
         validation_seconds = max(0.0, time.perf_counter() - validation_started)
-        cost = self._cost(config, model, raw.reported_model, raw.usage)
+        cost = self._cost(config, model, raw.reported_model, raw.usage, attempt_started_at)
         ended_at = utc_now()
         trace = self._trace(config, request, model=model, started_at=started_at, attempts=attempts, usage=raw.usage, raw=raw, validation_seconds=validation_seconds, cost=cost, ended_at=ended_at, end_reason="completed")
         return ModelResult(
@@ -330,6 +333,7 @@ class ModelGateway:
                     possibly_billed=error.possibly_billed,
                     usage=usage,
                     error_code=error.code.value,
+                    transport_failure_kind=error.transport_failure_kind,
                 ))
                 final_error = error
                 if saw_event or not error.retryable or attempt_number > config.max_retries:
@@ -381,13 +385,13 @@ class ModelGateway:
         except ProviderError as exc:
             exc.call_trace = self._trace(
                 config, request, model=model, started_at=started_at, attempts=attempts,
-                usage=usage, raw=raw, error=exc, cost=self._cost(config, model, reported_model, usage), end_reason="output_rejected",
+                usage=usage, raw=raw, error=exc, cost=self._cost(config, model, reported_model, usage, attempt_started_at), end_reason="output_rejected",
                 first_token_seconds=first_token_seconds,
                 validation_seconds=max(0.0, time.perf_counter() - validation_started),
             )
             raise
         validation_seconds = max(0.0, time.perf_counter() - validation_started)
-        cost = self._cost(config, model, reported_model, usage)
+        cost = self._cost(config, model, reported_model, usage, attempt_started_at)
         trace = self._trace(
             config, request, model=model, started_at=started_at, attempts=attempts,
             usage=usage, raw=raw, cost=cost, end_reason="completed",
@@ -486,12 +490,15 @@ class ModelGateway:
             raise ProviderError(ProviderErrorCode.INVALID_OUTPUT, "Provider JSON did not match the configured schema", possibly_billed=True, provider_request_id=raw.provider_request_id) from None
         return parsed, {"requested": True, "valid": True, "schema_ref": request.schema_ref, "validator": "jsonschema"}
 
-    def _cost(self, config: ProviderConfig, requested_model: str, reported_model: str | None, usage: ProviderUsage) -> CostRecord:
+    def _cost(self, config: ProviderConfig, requested_model: str, reported_model: str | None,
+              usage: ProviderUsage, attempt_started_at) -> CostRecord:
         model_for_price = reported_model or requested_model
         # If a provider changed the model behind an alias, do not apply a stale
         # requested-model price card to the unknown actual model.
         price = self._prices.get((config.provider_id, model_for_price))
-        if reported_model is not None and reported_model != requested_model and price is None:
+        if price is None and self._price_resolver is not None:
+            price = self._price_resolver(config, model_for_price, attempt_started_at)
+        if price is None or price.effective_from.tzinfo is None or price.effective_from > attempt_started_at:
             return CostRecord()
         return estimate_cost(usage, price)
 
@@ -539,6 +546,8 @@ class ModelGateway:
             error_code=error.code.value if error else None,
             error_message=error.safe_message if error else None,
             end_reason=end_reason,
+            max_output_tokens=request.profile.max_output_tokens,
+            transport_failure_kind=error.transport_failure_kind if error else None,
         )
 
     def _retry_delay(self, error: ProviderError, attempt_number: int) -> float:
@@ -551,14 +560,88 @@ class ModelGateway:
 def _normalize_exception(exc: BaseException) -> ProviderError:
     if isinstance(exc, ProviderError):
         return exc
-    if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
-        return ProviderError(ProviderErrorCode.TIMEOUT, "Provider request timed out", retryable=True, possibly_billed=True)
-    if isinstance(exc, httpx.ConnectError) or isinstance(exc, httpx.ConnectTimeout):
-        return ProviderError(ProviderErrorCode.NETWORK, "Could not connect to provider", retryable=True, possibly_billed=False)
+    # Connect timeouts are a NetworkError as well as a TimeoutException.
+    # Handle this concrete pre-send case first so it remains unbilled.
+    if isinstance(exc, httpx.ConnectTimeout):
+        return ProviderError(
+            ProviderErrorCode.NETWORK,
+            "Could not connect to provider",
+            retryable=True,
+            possibly_billed=False,
+            transport_failure_kind=TransportFailureKind.CONNECT_TIMEOUT,
+        )
+    if isinstance(exc, httpx.ConnectError):
+        return ProviderError(
+            ProviderErrorCode.NETWORK,
+            "Could not connect to provider",
+            retryable=True,
+            possibly_billed=False,
+            transport_failure_kind=TransportFailureKind.CONNECT,
+        )
+    if isinstance(exc, httpx.ReadTimeout):
+        return ProviderError(
+            ProviderErrorCode.TIMEOUT,
+            "Provider request timed out",
+            retryable=True,
+            possibly_billed=True,
+            transport_failure_kind=TransportFailureKind.READ_TIMEOUT,
+        )
+    if isinstance(exc, httpx.WriteTimeout):
+        return ProviderError(
+            ProviderErrorCode.TIMEOUT,
+            "Provider request timed out",
+            retryable=True,
+            possibly_billed=True,
+            transport_failure_kind=TransportFailureKind.WRITE_TIMEOUT,
+        )
+    if isinstance(exc, httpx.PoolTimeout):
+        return ProviderError(
+            ProviderErrorCode.TIMEOUT,
+            "Provider request timed out",
+            retryable=True,
+            possibly_billed=True,
+            transport_failure_kind=TransportFailureKind.POOL_TIMEOUT,
+        )
+    if isinstance(exc, httpx.TimeoutException):
+        return ProviderError(
+            ProviderErrorCode.TIMEOUT,
+            "Provider request timed out",
+            retryable=True,
+            possibly_billed=True,
+            transport_failure_kind=TransportFailureKind.TIMEOUT,
+        )
+    if isinstance(exc, TimeoutError):
+        return ProviderError(
+            ProviderErrorCode.TIMEOUT,
+            "Provider request timed out",
+            retryable=True,
+            possibly_billed=True,
+            transport_failure_kind=TransportFailureKind.TIMEOUT,
+        )
+    if isinstance(exc, httpx.RemoteProtocolError):
+        return ProviderError(
+            ProviderErrorCode.NETWORK,
+            "Provider request failed",
+            retryable=False,
+            possibly_billed=None,
+            transport_failure_kind=TransportFailureKind.REMOTE_PROTOCOL,
+        )
     if isinstance(exc, httpx.NetworkError):
-        return ProviderError(ProviderErrorCode.NETWORK, "Provider network request failed", retryable=True, possibly_billed=None)
+        return ProviderError(
+            ProviderErrorCode.NETWORK,
+            "Provider network request failed",
+            retryable=True,
+            possibly_billed=None,
+            transport_failure_kind=TransportFailureKind.NETWORK,
+        )
     if isinstance(exc, httpx.RequestError):
-        return ProviderError(ProviderErrorCode.NETWORK, "Provider request failed", retryable=False, possibly_billed=None)
+        return ProviderError(
+            ProviderErrorCode.NETWORK,
+            "Provider request failed",
+            retryable=False,
+            possibly_billed=None,
+            transport_failure_kind=TransportFailureKind.REQUEST,
+        )
     return ProviderError(ProviderErrorCode.PROTOCOL, "Provider response could not be processed", retryable=False, possibly_billed=None)
 
 

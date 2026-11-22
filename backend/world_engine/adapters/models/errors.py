@@ -17,6 +17,7 @@ class ProviderErrorCode(str, Enum):
     NETWORK = "network"
     SERVER = "server"
     CLIENT = "client"
+    CONTEXT_LIMIT = "context_limit"
     UNAVAILABLE = "unavailable"
     UNSUPPORTED_CAPABILITY = "unsupported_capability"
     INVALID_OUTPUT = "invalid_output"
@@ -24,6 +25,20 @@ class ProviderErrorCode(str, Enum):
     PROTOCOL = "protocol"
     CANCELLED = "cancelled"
     SECRET = "secret_resolution"
+
+
+class TransportFailureKind(str, Enum):
+    """A fixed, provider-neutral classification for transport failures."""
+
+    CONNECT_TIMEOUT = "connect_timeout"
+    CONNECT = "connect"
+    READ_TIMEOUT = "read_timeout"
+    WRITE_TIMEOUT = "write_timeout"
+    POOL_TIMEOUT = "pool_timeout"
+    TIMEOUT = "timeout"
+    REMOTE_PROTOCOL = "remote_protocol"
+    NETWORK = "network"
+    REQUEST = "request"
 
 
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
@@ -50,6 +65,7 @@ class ProviderError(RuntimeError):
         retry_after_seconds: float | None = None,
         provider_request_id: str | None = None,
         possibly_billed: bool | None = None,
+        transport_failure_kind: TransportFailureKind | str | None = None,
         call_trace: "CallTrace | None" = None,
     ) -> None:
         self.code = code
@@ -59,6 +75,14 @@ class ProviderError(RuntimeError):
         self.retry_after_seconds = retry_after_seconds
         self.provider_request_id = provider_request_id
         self.possibly_billed = possibly_billed
+        try:
+            self.transport_failure_kind = (
+                TransportFailureKind(transport_failure_kind)
+                if transport_failure_kind is not None else None
+            )
+        except (TypeError, ValueError):
+            # Never persist caller-controlled text as a diagnostic category.
+            self.transport_failure_kind = None
         self.call_trace = call_trace
         super().__init__(self.safe_message)
 

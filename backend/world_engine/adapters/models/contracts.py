@@ -17,6 +17,8 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from .errors import TransportFailureKind
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -32,6 +34,7 @@ class RoleTask(str, Enum):
     INTENT = "intent"
     GM_ANSWER = "gm_answer"
     NPC_DECISION = "npc_decision"
+    NPC_PLAN_REVIEW = "npc_plan_review"
     SOCIAL_ADJUDICATION = "social_adjudication"
     NARRATION = "narration"
     MEMORY_SUMMARY = "memory_summary"
@@ -191,6 +194,7 @@ class ProviderConfig:
     max_retries: int = 2
     capability_overrides: Mapping[str, bool | None] = field(default_factory=dict)
     allow_insecure_http: bool = False
+    ollama_context_tokens: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, ProviderKind):
@@ -223,6 +227,11 @@ class ProviderConfig:
             raise ValueError("non-loopback providers require HTTPS unless explicitly allowed")
         if not 0 <= self.max_retries <= 2:
             raise ValueError("max_retries must be between 0 and 2")
+        if self.ollama_context_tokens is not None:
+            if type(self.ollama_context_tokens) is not int or not 1 <= self.ollama_context_tokens <= 2_147_483_647:
+                raise ValueError("ollama_context_tokens must be a positive signed 32-bit integer")
+            if self.kind is not ProviderKind.OLLAMA:
+                raise ValueError("ollama_context_tokens is only valid for Ollama providers")
         for key, value in self.capability_overrides.items():
             try:
                 Capability(key)
@@ -235,7 +244,7 @@ class ProviderConfig:
 
     def public_dict(self) -> dict[str, Any]:
         """Return safe REST/config output; no resolved credential is stored here."""
-        return {
+        result = {
             "provider_id": self.provider_id,
             "kind": self.kind.value,
             "base_url": self.base_url,
@@ -245,6 +254,9 @@ class ProviderConfig:
             "capability_overrides": dict(self.capability_overrides),
             "allow_insecure_http": self.allow_insecure_http,
         }
+        if self.ollama_context_tokens is not None:
+            result["ollama_context_tokens"] = self.ollama_context_tokens
+        return result
 
     @property
     def is_local_endpoint(self) -> bool:
@@ -375,6 +387,7 @@ class AttemptRecord:
     possibly_billed: bool | None = None
     usage: ProviderUsage = field(default_factory=ProviderUsage)
     error_code: str | None = None
+    transport_failure_kind: TransportFailureKind | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -405,6 +418,8 @@ class CallTrace:
     error_code: str | None = None
     error_message: str | None = None
     end_reason: str | None = None
+    max_output_tokens: int | None = None
+    transport_failure_kind: TransportFailureKind | None = None
 
     def to_public_dict(self) -> dict[str, Any]:
         return to_jsonable(self)

@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from 'react'
-import { api, type Branch, type Pack, type Session, type World, type WorldView } from './api/client'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { api, ApiError, type Branch, type Pack, type Session, type World, type WorldView } from './api/client'
 import { Icon, type IconName } from './components/Icon'
-import { CreateWorldDialog } from './components/CreateWorldDialog'
+import { CreateWorldDialog, type CreateWorldDraft } from './components/CreateWorldDialog'
 import { EditorPage } from './pages/EditorPage'
 import { HistoryPage } from './pages/HistoryPage'
 import { LibraryPage } from './pages/LibraryPage'
@@ -30,13 +30,21 @@ export default function App() {
   const [branchId, setBranchId] = useState<string | null>(null)
   const [branches, setBranches] = useState<Branch[]>([])
   const [view, setView] = useState<WorldView | null>(null)
+  const [viewFailure, setViewFailure] = useState<{ key: string; error: Error } | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<Error | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
+  const activeSelection = useRef<{ worldId: string | null; branchId: string | null }>({ worldId: selectedWorldId, branchId })
+
+  useEffect(() => { activeSelection.current = { worldId: selectedWorldId, branchId } }, [selectedWorldId, branchId])
 
   const selectedWorld = worlds.find((world) => world.world_id === selectedWorldId) ?? null
-  const connected = session !== null && error === null
+  const expectedBranchId = branchId ?? selectedWorld?.active_branch_id ?? null
+  const viewMatchesSelection = Boolean(view && view.world.world_id === selectedWorldId && (!expectedBranchId || view.branch.branch_id === expectedBranchId))
+  const viewKey = `${selectedWorldId ?? ''}:${expectedBranchId ?? ''}`
+  const selectedViewError = viewFailure?.key === viewKey ? viewFailure.error : null
+  const connected = session !== null && !(error && !(error instanceof ApiError))
 
   const flash = useCallback((next: Notice) => {
     setNotice(next)
@@ -66,25 +74,29 @@ export default function App() {
 
   const refreshWorkspace = useCallback(() => { setLoading(true); void loadWorkspace() }, [loadWorkspace])
 
-  useEffect(() => { void loadWorkspace() }, [loadWorkspace])
+  useEffect(() => { const timer = window.setTimeout(() => void loadWorkspace(), 0); return () => window.clearTimeout(timer) }, [loadWorkspace])
 
   useEffect(() => {
     if (!selectedWorldId) return
     let active = true
     const selected = worlds.find((world) => world.world_id === selectedWorldId)
+    const requestedBranchId = branchId ?? selected?.active_branch_id ?? undefined
+    const requestedKey = `${selectedWorldId}:${requestedBranchId ?? ''}`
     Promise.allSettled([
       api.listBranches(selectedWorldId),
-      api.worldView(selectedWorldId, branchId ?? selected?.active_branch_id ?? undefined),
+      api.worldView(selectedWorldId, requestedBranchId),
     ]).then(([branchResult, viewResult]) => {
       if (!active) return
       if (branchResult.status === 'fulfilled') {
         setBranches(branchResult.value.items)
         const current = branchResult.value.items.find((branch) => branch.branch_id === (branchId ?? selected?.active_branch_id)) ?? branchResult.value.items[0]
-        if (current && current.branch_id !== branchId) setBranchId(current.branch_id)
+        if (current && current.branch_id !== branchId) {
+          activeSelection.current = { worldId: selectedWorldId, branchId: current.branch_id }
+          setBranchId(current.branch_id)
+        }
       }
-      if (viewResult.status === 'fulfilled') setView(viewResult.value)
-      const failure = [branchResult, viewResult].find((result) => result.status === 'rejected')
-      if (failure?.status === 'rejected') setError(toError(failure.reason))
+      if (viewResult.status === 'fulfilled') { setView(viewResult.value); setViewFailure(null) }
+      else setViewFailure({ key: requestedKey, error: toError(viewResult.reason) })
     })
     return () => { active = false }
   }, [selectedWorldId, branchId, worlds])
@@ -100,25 +112,44 @@ export default function App() {
 
   const openWorld = (id: string) => {
     const world = worlds.find((item) => item.world_id === id)
+    activeSelection.current = { worldId: id, branchId: world?.active_branch_id ?? null }
     setSelectedWorldId(id)
     setBranchId(world?.active_branch_id ?? null)
     setPage('play')
     setDrawerOpen(false)
   }
 
-  const createWorld = async (draft: { pack_id: string; title: string; player_name: string }, idempotencyKey: string) => {
+  const createWorld = async (draft: CreateWorldDraft, idempotencyKey: string) => {
     const result = await api.createWorld(draft, idempotencyKey)
     setCreateOpen(false)
     flash({ kind: 'success', text: `世界「${result.title}」已创建。` })
     await loadWorkspace()
     if (result.world_id) {
+      activeSelection.current = { worldId: result.world_id, branchId: result.active_branch_id }
       setSelectedWorldId(result.world_id)
       setBranchId(result.active_branch_id)
       setPage('play')
     }
   }
 
-  const setBranch = (id: string) => setBranchId(id || null)
+  const setBranch = (id: string) => {
+    const selectedId = id || null
+    activeSelection.current = { ...activeSelection.current, branchId: selectedId }
+    setBranchId(selectedId)
+  }
+  const refreshBranchesAndSelect = useCallback(async (worldId: string, createdBranchId: string, label: string, sourceBranchId: string) => {
+    if (activeSelection.current.worldId !== worldId || activeSelection.current.branchId !== sourceBranchId) return
+    const result = await api.listBranches(worldId)
+    if (activeSelection.current.worldId !== worldId || activeSelection.current.branchId !== sourceBranchId) return
+    setBranches(result.items)
+    if (!result.items.some((branch) => branch.branch_id === createdBranchId)) {
+      throw new Error('分支已提交，但刷新结果中尚未出现新分支。')
+    }
+    if (activeSelection.current.worldId !== worldId || activeSelection.current.branchId !== sourceBranchId) return
+    activeSelection.current = { worldId, branchId: createdBranchId }
+    setBranchId(createdBranchId)
+    flash({ kind: 'success', text: `分支「${label}」已创建并打开。` })
+  }, [flash])
   const selectedPage = navigation.find((item) => item.page === page)?.label ?? '模型与运行'
 
   return (
@@ -137,9 +168,9 @@ export default function App() {
         <header className="topbar"><div className="topbar-leading"><button className="icon-button mobile-menu" aria-label="打开导航" onClick={() => setDrawerOpen(true)}><Icon name="menu" /></button><div className="breadcrumb"><span>世界引擎</span><Icon name="chevron" size={13} /><strong>{selectedPage}</strong></div></div><div className="topbar-actions">{selectedWorld && <button className="context-pill" onClick={() => setPage('play')}><span className="context-led" />{selectedWorld.title}<Icon name="chevron" size={13} /></button>}<span className={`api-status ${connected ? 'online' : 'offline'}`}><i />{connected ? '本地 API 正常' : 'API 离线'}</span><button className="avatar-button" title={session?.principal.display_name ?? '本地身份'}>{initials(session?.principal.display_name ?? 'W E')}</button></div></header>
         <div className="page-frame">
           {page === 'library' && <LibraryPage worlds={worlds} packs={packs} loading={loading} error={error} onSelect={openWorld} onCreate={() => setCreateOpen(true)} onRetry={refreshWorkspace} />}
-          {page === 'play' && <PlayPage key={`${selectedWorldId ?? 'none'}:${branchId ?? 'none'}`} world={selectedWorld} view={view} branches={branches} branchId={branchId} loading={Boolean(selectedWorldId && (!view || view.world.world_id !== selectedWorldId || (branchId && view.branch.branch_id !== branchId)))} onSelectWorld={() => setPage('library')} onOpenHistory={() => setPage('history')} onBranchChange={setBranch} onNotice={flash} onRefresh={refreshWorkspace} />}
-          {page === 'world' && <EditorPage key={`${selectedWorldId ?? 'none'}:${branchId ?? 'none'}`} world={selectedWorld} branchId={branchId} onSelectWorld={() => setPage('library')} />}
-          {page === 'history' && <HistoryPage key={`${selectedWorldId ?? 'none'}:${branchId ?? 'none'}`} world={selectedWorld} branches={branches} branchId={branchId} onBranchChange={setBranch} onRefresh={async () => { if (selectedWorldId) { const result = await api.listBranches(selectedWorldId); setBranches(result.items) } }} onNotice={flash} />}
+          {page === 'play' && <PlayPage key={`${selectedWorldId ?? 'none'}:${branchId ?? 'none'}`} world={selectedWorld} view={viewMatchesSelection ? view : null} viewError={selectedViewError?.message ?? null} branches={branches} branchId={branchId} loading={Boolean(selectedWorldId && !viewMatchesSelection && !selectedViewError)} onSelectWorld={() => setPage('library')} onOpenHistory={() => setPage('history')} onBranchChange={setBranch} onNotice={flash} onRefresh={refreshWorkspace} />}
+          {page === 'world' && <EditorPage key={`${selectedWorldId ?? 'none'}:${branchId ?? 'none'}`} world={selectedWorld} branchId={branchId} onSelectWorld={() => setPage('library')} onNotice={flash} />}
+          {page === 'history' && <HistoryPage key={`${selectedWorldId ?? 'none'}:${branchId ?? 'none'}`} world={selectedWorld} branches={branches} branchId={branchId} onBranchChange={setBranch} onBranchCreated={refreshBranchesAndSelect} />}
           {page === 'operations' && <OperationsPage onNotice={flash} />}
         </div>
       </main>

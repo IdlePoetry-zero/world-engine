@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
+import json
+import re
 from typing import Any
 
 import httpx
@@ -31,6 +33,41 @@ from .contracts import (
 )
 from .errors import ProviderError, ProviderErrorCode
 from .secrets import SecretResolver
+
+
+# Keep the recognized native Ollama diagnostic narrow. The bounded digit
+# lengths also prevent oversized numeric fields from being interpreted as a
+# context-capacity signal.
+_OLLAMA_CONTEXT_OVERFLOW = re.compile(
+    r"request \(([1-9][0-9]{0,6}) tokens\) exceeds the available context size "
+    r"\(([1-9][0-9]{0,6}) tokens\), try increasing it"
+)
+_OLLAMA_ERROR_BODY_LIMIT = 8192
+
+
+def _is_ollama_context_overflow(body: bytes | None) -> bool:
+    if body is None or len(body) > _OLLAMA_ERROR_BODY_LIMIT:
+        return False
+    try:
+        data = json.loads(body)
+    except (UnicodeDecodeError, ValueError, TypeError):
+        return False
+    if not isinstance(data, Mapping) or not isinstance(data.get("error"), str):
+        return False
+    match = _OLLAMA_CONTEXT_OVERFLOW.fullmatch(data["error"])
+    if match is None:
+        return False
+    requested, available = (int(value) for value in match.groups())
+    return requested > available
+
+
+def _context_limit_error() -> ProviderError:
+    return ProviderError(
+        ProviderErrorCode.CONTEXT_LIMIT,
+        "Ollama context capacity was exceeded",
+        retryable=False,
+        status_code=400,
+    )
 
 
 class OllamaAdapter(ProviderAdapter):
@@ -131,6 +168,8 @@ class OllamaAdapter(ProviderAdapter):
                 json=self._payload(config, request, model, stream=False),
             )
         if not response.is_success:
+            if response.status_code == 400 and _is_ollama_context_overflow(response.content):
+                raise _context_limit_error()
             raise self.http_error(response)
         data = await decode_json_response(response)
         if isinstance(data.get("error"), str):
@@ -162,6 +201,10 @@ class OllamaAdapter(ProviderAdapter):
         async with self.new_client(config, request.timeout_policy, headers=headers) as client:
             async with client.stream("POST", self.endpoint(config, "api/chat"), json=self._payload(config, request, model, stream=True)) as response:
                 if not response.is_success:
+                    if response.status_code == 400:
+                        body = await self._read_limited_error_body(response)
+                        if _is_ollama_context_overflow(body):
+                            raise _context_limit_error()
                     raise self.http_error(response)
                 async for line in response.aiter_lines():
                     if not line.strip():
@@ -191,6 +234,31 @@ class OllamaAdapter(ProviderAdapter):
             raise ProviderError(ProviderErrorCode.TRUNCATED, "Ollama stream ended before done=true", retryable=False, possibly_billed=True, provider_request_id=request_id)
         yield RawStreamEvent("done", finish_reason=final_reason or FinishReason.OTHER, provider_request_id=request_id, reported_model=reported_model)
 
+    @staticmethod
+    async def _read_limited_error_body(response: httpx.Response) -> bytes | None:
+        """Read at most the small diagnostic envelope needed for classification."""
+        if response.headers.get("content-encoding", "identity").strip().lower() not in {"", "identity"}:
+            return None
+        if response.is_stream_consumed:
+            # Mock transports and callers may provide an already-buffered
+            # response. Read only the cached bytes and apply the same cap.
+            try:
+                cached_body = response.content
+            except httpx.ResponseNotRead:
+                return None
+            return cached_body if len(cached_body) <= _OLLAMA_ERROR_BODY_LIMIT else None
+        body = bytearray()
+        try:
+            async for chunk in response.aiter_raw():
+                if len(body) + len(chunk) > _OLLAMA_ERROR_BODY_LIMIT:
+                    return None
+                body.extend(chunk)
+        except httpx.HTTPError:
+            # Preserve the original HTTP status classification if its body
+            # cannot be read; diagnostic parsing must not change retry policy.
+            return None
+        return bytes(body)
+
     def _payload(self, config: ProviderConfig, request: ModelRequest, model: str, *, stream: bool) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": model,
@@ -200,6 +268,8 @@ class OllamaAdapter(ProviderAdapter):
         if request.output_schema is not None and self.capabilities_for(config, model).state(Capability.JSON_SCHEMA) is CapabilityState.SUPPORTED:
             payload["format"] = dict(request.output_schema)
         options: dict[str, Any] = {}
+        if config.ollama_context_tokens is not None:
+            options["num_ctx"] = config.ollama_context_tokens
         if request.profile.max_output_tokens is not None:
             options["num_predict"] = request.profile.max_output_tokens
         if request.temperature is not None:

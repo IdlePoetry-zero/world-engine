@@ -14,6 +14,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     MetaData,
     String,
     UniqueConstraint,
@@ -29,6 +30,8 @@ NAMING_CONVENTION = {
     "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
     "pk": "pk_%(table_name)s",
 }
+
+MAX_WORLD_PACK_ARCHIVE_BYTES = 16 * 1024 * 1024
 
 
 class Base(DeclarativeBase):
@@ -47,6 +50,21 @@ class WorldRow(Base):
     ruleset_version: Mapped[str] = mapped_column(String(100), nullable=False)
     pack_version: Mapped[str] = mapped_column(String(100), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class WorldPackArchiveRow(Base):
+    __tablename__ = "world_pack_archives"
+    __table_args__ = (
+        CheckConstraint(
+            f"length(archive_bytes) BETWEEN 1 AND {MAX_WORLD_PACK_ARCHIVE_BYTES}",
+            name="archive_size_bounded",
+        ),
+    )
+
+    world_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("worlds.world_id", ondelete="CASCADE"), primary_key=True
+    )
+    archive_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
 
 
 class MembershipRow(Base):
@@ -163,6 +181,31 @@ class EventRow(Base):
     state_version_after: Mapped[int] = mapped_column(Integer, nullable=False)
     commit_boundary: Mapped[bool] = mapped_column(Boolean, nullable=False)
     committed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class EventPayloadRow(Base):
+    """Lossless compressed bytes for one event; event JSON stays in the log row when inline."""
+
+    __tablename__ = "world_event_payloads"
+    __table_args__ = (
+        CheckConstraint("codec_version >= 1", name="codec_version_positive"),
+        CheckConstraint(
+            "raw_byte_count > 0 AND raw_byte_count <= 67108864",
+            name="raw_byte_count_bounded_positive",
+        ),
+        CheckConstraint("length(sha256) = 64", name="sha256_length"),
+        CheckConstraint("length(compressed_bytes) > 0", name="compressed_payload_nonempty"),
+    )
+
+    event_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("world_events.event_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    compressed_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    raw_byte_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    codec_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
 
 
 class LedgerPostingRow(Base):
