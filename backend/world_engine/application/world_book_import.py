@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from world_engine.domain.errors import InvalidEvent
+from world_engine.domain.world_books import WorldBookEntry
 
 
 MAX_WORLD_BOOK_JSON_BYTES = 256 * 1024
@@ -113,7 +114,17 @@ def matching_world_book_entries(entries: Any, query: str) -> list[dict]:
                 continue
         if len(content) + content_characters > MAX_MATCHED_WORLD_BOOK_CONTENT_CHARS:
             continue
-        result.append({"entry_id": str(entry_id), "title": title, "content": content})
+        projected = {"entry_id": str(entry_id), "title": title, "content": content}
+        if isinstance(entry, WorldBookEntry) and entry.provenance is not None:
+            provenance = entry.provenance.model_dump(mode="json", exclude_none=True)
+            reference_characters = sum(
+                len(value) for citation in provenance["citations"] for value in citation.values()
+            )
+            if len(content) + reference_characters + content_characters > MAX_MATCHED_WORLD_BOOK_CONTENT_CHARS:
+                continue
+            projected["provenance"] = provenance
+            content_characters += reference_characters
+        result.append(projected)
         content_characters += len(content)
         if len(result) >= MAX_MATCHED_WORLD_BOOK_ENTRIES:
             break

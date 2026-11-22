@@ -9,6 +9,7 @@ from world_engine.domain.errors import InvalidEvent
 from world_engine.domain.events import EVENT_TYPES, event_payload, parse_event
 from world_engine.domain.models import WorldState
 from world_engine.domain.reducers import apply_event, state_hash, state_json
+from world_engine.application.world_book_import import matching_world_book_entries
 from world_engine.domain.world_books import WorldBookEntry, WorldBookImportedEvent
 
 
@@ -57,6 +58,30 @@ def test_world_book_event_is_registered_private_and_replays_to_verified_state_ha
     assert state_json(stored)["world_book_entries"] == [entry.model_dump(mode="json") for entry in event.entries]
     assert "world_book_entries" not in state_json(empty)
     assert state_hash(empty) == state_hash(WorldState.model_validate(empty.model_dump(mode="json")))
+
+
+def test_cited_entries_retain_provenance_on_replay_and_only_public_citations_reach_gm():
+    old_entry = _entry()
+    assert "provenance" not in old_entry.model_dump(mode="json")
+    citation = {"source_id": "reference.01", "work": "Historical record", "locator": "Chapter 2"}
+    data = old_entry.model_dump() | {
+        "provenance": {"category": "historical_event", "status": "documented", "citations": [citation]},
+    }
+    public = WorldBookEntry.model_validate(data)
+    private = WorldBookEntry.model_validate(data | {"entry_id": uuid4(), "visibility": "author_only"})
+    event = _event(entries=(private, public))
+    stored = apply_event(WorldState(), event.model_dump(mode="json"))
+    restored = WorldState.model_validate_json(stored.model_dump_json())
+    assert state_hash(restored) == state_hash(stored)
+    references = matching_world_book_entries(restored.world_book_entries, "moon")
+    assert [reference["entry_id"] for reference in references] == [str(public.entry_id)]
+    assert references[0]["provenance"]["citations"] == [citation]
+
+    for status, citations in (("documented", ()), ("conflicting", (citation, citation))):
+        with pytest.raises(ValidationError):
+            WorldBookEntry.model_validate(data | {
+                "provenance": {"category": "historical_event", "status": status, "citations": citations},
+            })
 
 
 def test_world_book_event_rejects_bad_source_visibility_and_duplicate_ids():

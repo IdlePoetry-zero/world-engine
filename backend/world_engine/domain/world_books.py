@@ -20,6 +20,36 @@ _SourceKey = Annotated[str, StringConstraints(strip_whitespace=True, min_length=
 _EntryTitle = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
 _EntryContent = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
 _Keyword = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
+_SourceField = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=160)]
+
+
+class WorldBookCitation(BaseModel):
+    """A locator in a source register, without a remotely loaded asset."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, revalidate_instances="always")
+    source_id: Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_.-]{0,79}$")]
+    work: _SourceField
+    locator: _SourceField
+    viewpoint: _SourceField | None = None
+
+
+class WorldBookProvenance(BaseModel):
+    """Editorial status is independent of an entry's visibility or authority."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, revalidate_instances="always")
+    category: Literal["person", "place", "organization", "historical_event", "rule", "other"]
+    status: Literal["documented", "inferred", "conflicting", "unknown", "game_configuration"]
+    citations: tuple[WorldBookCitation, ...] = Field(default=(), max_length=4)
+
+    @model_validator(mode="after")
+    def check_citations(self) -> WorldBookProvenance:
+        locations = {(item.source_id, item.locator) for item in self.citations}
+        if len(locations) != len(self.citations):
+            raise ValueError("source locations must be unique")
+        minimum = {"documented": 1, "inferred": 1, "conflicting": 2}.get(self.status, 0)
+        if len(locations) < minimum:
+            raise ValueError(f"{self.status} entries require at least {minimum} source locations")
+        return self
 
 
 class WorldBookEntry(BaseModel):
@@ -34,6 +64,7 @@ class WorldBookEntry(BaseModel):
     keywords: tuple[_Keyword, ...] = Field(max_length=32)
     always_on: StrictBool
     visibility: Literal["public", "author_only"]
+    provenance: WorldBookProvenance | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class WorldBookImportedEvent(BaseModel):

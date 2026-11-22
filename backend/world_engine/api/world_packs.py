@@ -11,7 +11,7 @@ from starlette.concurrency import run_in_threadpool
 from world_engine.application.errors import ApplicationFailure
 from world_engine.application.template_migration import TemplateMigrationApplication
 from world_engine.application.world_pack_import import WorldPackApplication
-from world_engine.application.world_packs import MAX_WORLD_PACK_BYTES
+from world_engine.application.world_packs import MAX_WORLD_PACK_BYTES, STORY_OPENING_ID_PATTERN
 from world_engine.domain.models import MembershipRole
 
 from .contracts import RequestModel
@@ -47,10 +47,12 @@ def world_pack_router(service: WorldPackApplication, scope, authoring=None):
         request: Request,
         idempotency_key: Annotated[str, Header(min_length=1, max_length=200)],
         x_world_pack_sha256: Annotated[str, Header(pattern=r"^[a-f0-9]{64}$")],
+        x_story_opening: Annotated[str | None, Header(pattern=STORY_OPENING_ID_PATTERN)] = None,
     ):
         identity = scope(request)
         data = await _archive_body(request)
-        return wire(await run_in_threadpool(service.import_world, identity, data, x_world_pack_sha256, idempotency_key))
+        return wire(await run_in_threadpool(service.import_world, identity, data, x_world_pack_sha256, idempotency_key,
+                                            x_story_opening))
 
     @router.get("/worlds/{world_id}/source-world-pack")
     def download_author_source_package(request: Request, world_id: UUID):

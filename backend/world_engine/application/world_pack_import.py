@@ -21,6 +21,7 @@ from .worlds import WorldApplication
 
 
 _IMPORT_NAMESPACE = UUID("388591b1-a102-472c-b181-e31ba09cb888")
+_OPENING_KEY = "world_pack_story_opening_id"
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class PreparedWorldPack:
     draft: NewWorld | None
     blockers: tuple[str, ...]
     field_errors: tuple[AuthorFieldError, ...] = ()
+    openings: tuple[dict, ...] = ()
 
     def report(self) -> dict:
         return {
@@ -38,7 +40,7 @@ class PreparedWorldPack:
             "blockers": list(self.blockers),
             "contains_author_material": True,
             "field_errors": list(self.field_errors),
-        }
+        } | ({"story_openings": list(self.openings)} if self.openings else {})
 
 
 def _scenario_rule_errors(scenario: dict) -> tuple[AuthorFieldError, ...]:
@@ -76,7 +78,7 @@ class WorldPackApplication:
     def __init__(self, worlds: WorldApplication):
         self.worlds = worlds
 
-    def prepare(self, data: bytes) -> PreparedWorldPack:
+    def prepare(self, data: bytes, *, opening_id: str | None = None) -> PreparedWorldPack:
         try:
             package = load_world_pack(data, engine_version=None)
         except WorldPackArchiveError as error:
@@ -99,6 +101,11 @@ class WorldPackApplication:
         if blockers:
             return PreparedWorldPack(package, None, tuple(blockers))
 
+        openings = template.get("story_openings", ())
+        if openings:
+            return self._prepare_story_openings(package, ruleset, openings, opening_id)
+        if opening_id is not None:
+            return PreparedWorldPack(package, None, ("该世界包没有可选介入点。",))
         if template.get("scenario") is not None:
             issues = _scenario_rule_errors(template["scenario"])
             if issues:
@@ -132,10 +139,40 @@ class WorldPackApplication:
         draft = NewWorld(title=manifest.title, state=opening, pack_version=manifest.version, ruleset_version=ruleset)
         return PreparedWorldPack(package, draft, ())
 
+    def _prepare_story_openings(self, package, ruleset, openings, opening_id) -> PreparedWorldPack:
+        summaries = []
+        selected = None
+        validate_initial = self.worlds.repository.validate_initial_world_state
+        for item in openings:
+            key = item["opening_id"]
+            scenario = item["scenario"]
+            issues = _scenario_rule_errors(scenario)
+            if issues:
+                blockers = tuple(f"{key} · {issue['path']} · {issue['message']}" for issue in issues)
+                return PreparedWorldPack(package, None, blockers, issues)
+            try:
+                initial = validate_initial(WorldState.model_validate_json(json.dumps(scenario, ensure_ascii=True)))
+            except (InvalidEvent, ValidationError, ValueError, RecursionError):
+                return PreparedWorldPack(package, None, (f"介入点 {key} 的开局未通过世界规则校验。",))
+            if initial.player_id is None:
+                return PreparedWorldPack(package, None, (f"介入点 {key} 缺少可操控的玩家角色。",))
+            summaries.append({field: item[field] for field in ("opening_id", "title", "position", "known_history")})
+            if key == opening_id:
+                metadata = initial.metadata | {_OPENING_KEY: key}
+                selected = initial.model_copy(update={"metadata": metadata})
+        if opening_id is not None and selected is None:
+            return PreparedWorldPack(package, None, ("该介入点不在世界包中，请重新选择。",), openings=tuple(summaries))
+        draft = None if selected is None else NewWorld(
+            title=package.manifest.title, state=selected, pack_version=package.manifest.version, ruleset_version=ruleset,
+        )
+        return PreparedWorldPack(package, draft, (), openings=tuple(summaries))
+
     def preview(self, data: bytes) -> dict:
         return self.prepare(data).report() | {"archive_sha256": hashlib.sha256(data).hexdigest()}
 
-    def import_world(self, scope: AccessScope, data: bytes, archive_hash: str, idempotency_key: str) -> dict:
+    def import_world(
+        self, scope: AccessScope, data: bytes, archive_hash: str, idempotency_key: str, opening_id: str | None = None,
+    ) -> dict:
         digest = hashlib.sha256(data).hexdigest()
         if digest != archive_hash:
             raise ApplicationFailure("WORLD_PACK_PREVIEW_MISMATCH", "文件与预览版本不一致，请重新预览。", status_code=409)
@@ -147,18 +184,24 @@ class WorldPackApplication:
             original = repository.read_world_pack_archive(scope, world_id)
             if original is None or hashlib.sha256(original).hexdigest() != digest:
                 raise Conflict("This idempotency key already identifies another world pack import.")
+            if view.state.metadata.get(_OPENING_KEY) != opening_id:
+                raise Conflict("This idempotency key already identifies another story opening.")
             return self.worlds._world_header(view) | {"duplicate": duplicate}
 
         try:
             return confirmation(True)
         except NotFound:
             pass
-        prepared = self.prepare(data)
+        prepared = self.prepare(data, opening_id=opening_id)
         if prepared.draft is None:
+            if prepared.openings and not prepared.blockers:
+                raise ApplicationFailure("STORY_OPENING_REQUIRED", "请先选择介入点。", status_code=422)
             raise ApplicationFailure("WORLD_PACK_INCOMPATIBLE", "; ".join(prepared.blockers), status_code=422)
         draft = prepared.draft
         metadata = dict(draft.state.metadata)
         metadata.pop("creation_payload_hash", None)
+        if opening_id is None:
+            metadata.pop(_OPENING_KEY, None)
         metadata["world_pack_archive_sha256"] = digest
         state = draft.state.model_copy(update={"metadata": metadata})
         world = draft.model_copy(update={

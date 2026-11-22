@@ -11,6 +11,9 @@ const pendingImportKeys = new Map<string, string>()
 export function WorldPackImport({ connecting, onImported }: { connecting: boolean; onImported: () => void }) {
   const [archive, setArchive] = useState<File | null>(null)
   const [preview, setPreview] = useState<WorldPackPreview | null>(null)
+  const [openingId, setOpeningId] = useState('')
+  const openings = preview?.story_openings ?? []
+  const selectedOpening = openings.find((opening) => opening.opening_id === openingId)
   const [result, setResult] = useState<WorldPackImportResult | null>(null)
   const [failure, setFailure] = useState('')
   const [previewing, setPreviewing] = useState(false)
@@ -27,6 +30,7 @@ export function WorldPackImport({ connecting, onImported }: { connecting: boolea
     previewRequest.current = null
     setPreviewing(false)
     setPreview(null)
+    setOpeningId('')
     setResult(null)
     const problem = file?.size === 0 ? '请选择非空的 ZIP 文件。'
       : file && file.size > MAX_WORLD_PACK_BYTES ? '世界包 ZIP 不能超过 16 MiB。'
@@ -58,18 +62,21 @@ export function WorldPackImport({ connecting, onImported }: { connecting: boolea
   }
 
   async function confirmImport() {
-    if (!archive || !preview?.can_import || previewRequest.current || importPending.current || connecting) return
+    if (!archive || !preview?.can_import || previewRequest.current || importPending.current || connecting
+      || (openings.length > 0 && !selectedOpening)) return
     const digest = preview.archive_sha256
+    const selectionKey = selectedOpening ? `${digest}/${selectedOpening.opening_id}` : digest
     importPending.current = true
     setImporting(true)
     setFailure('')
     try {
-      const key = pendingImportKeys.get(digest) ?? crypto.randomUUID()
-      pendingImportKeys.set(digest, key)
-      const imported = await api.importWorldPack(archive, digest, key)
-      if (pendingImportKeys.get(digest) === key) pendingImportKeys.delete(digest)
+      const key = pendingImportKeys.get(selectionKey) ?? crypto.randomUUID()
+      pendingImportKeys.set(selectionKey, key)
+      const imported = await api.importWorldPack(archive, digest, key, selectedOpening?.opening_id)
+      if (pendingImportKeys.get(selectionKey) === key) pendingImportKeys.delete(selectionKey)
       setResult(imported)
       setPreview(null)
+      setOpeningId('')
       setArchive(null)
       if (input.current) input.current.value = ''
     } catch (reason) {
@@ -107,9 +114,24 @@ export function WorldPackImport({ connecting, onImported }: { connecting: boolea
       {preview && (
         <div className="author-revision-preview">
           <WorldPackReview preview={preview} />
+          {openings.length > 0 && <>
+            <label className="author-simple-field">
+              <span>故事介入点</span>
+              <select disabled={importing} value={openingId} onChange={(event) => setOpeningId(event.currentTarget.value)}>
+                <option value="">选择介入点</option>
+                {openings.map((opening) => <option key={opening.opening_id} value={opening.opening_id}>{opening.title}</option>)}
+              </select>
+            </label>
+            {selectedOpening && <div className="author-revision-help">
+              <p>{selectedOpening.position}</p>
+              {selectedOpening.known_history.length > 0 && <><strong>开局已知历史</strong>
+                <ul>{selectedOpening.known_history.map((item, index) => <li key={index}>{item}</li>)}</ul>
+              </>}
+            </div>}
+          </>}
           {preview.can_import && (
             <div className="character-preview-actions">
-              <button className="button button-primary" type="button" disabled={importing || connecting} onClick={() => void confirmImport()}>
+              <button className="button button-primary" type="button" disabled={importing || connecting || (openings.length > 0 && !selectedOpening)} onClick={() => void confirmImport()}>
                 {importing ? '正在导入…' : '确认导入为新世界'}
               </button>
             </div>

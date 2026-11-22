@@ -51,6 +51,8 @@ _WINDOWS_DEVICE = re.compile(r"(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])
 _IDENTIFIER = Annotated[str, Field(min_length=1, max_length=160, pattern=r"^[a-zA-Z][a-zA-Z0-9_.-]*$")]
 _VERSION = Annotated[str, Field(pattern=rf"^{_VERSION_PATTERN}$")]
 _DIGEST = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
+STORY_OPENING_ID_PATTERN = r"^[a-zA-Z][a-zA-Z0-9_.-]{0,79}$"
+_STORY_OPENING_ID = Annotated[str, Field(pattern=STORY_OPENING_ID_PATTERN)]
 
 
 class WorldPackArchiveError(ValueError):
@@ -93,6 +95,14 @@ class WorldPackManifest(ContractModel):
         return _engine_compatible(self.engine_range, version)
 
 
+class _StoryOpening(ContractModel):
+    opening_id: _STORY_OPENING_ID
+    title: str = Field(min_length=1, max_length=120)
+    position: str = Field(min_length=1, max_length=160)
+    known_history: tuple[Annotated[str, Field(min_length=1, max_length=360)], ...] = Field(max_length=12)
+    scenario: JsonObject
+
+
 class _WorldPackTemplate(ContractModel):
     model_config = ConfigDict(str_strip_whitespace=False)
 
@@ -102,6 +112,7 @@ class _WorldPackTemplate(ContractModel):
     population_mode: Literal["natural", "sustained"] = "natural"
     ruleset_version: _VERSION | None = None
     scenario: JsonObject | None = None
+    story_openings: tuple[_StoryOpening, ...] = Field(default=(), max_length=12)
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,8 +157,13 @@ def load_world_pack(
         template = _WorldPackTemplate.model_validate(known_template)
     except ValidationError:
         raise WorldPackArchiveError("世界包模板的数据字段无效。") from None
-    if template.base_pack_id is None and template.scenario is None:
+    if template.base_pack_id is None and template.scenario is None and not template.story_openings:
         raise WorldPackArchiveError("世界包模板必须提供已有背景或初始场景。")
+    if template.story_openings:
+        if template.base_pack_id is not None or template.scenario is not None:
+            raise WorldPackArchiveError("可选介入点应分别提供开局场景。")
+        if len({item.opening_id for item in template.story_openings}) != len(template.story_openings):
+            raise WorldPackArchiveError("介入点标识必须唯一。")
     if template.base_pack_id is None and template.base_pack_version is not None:
         raise WorldPackArchiveError("世界包中的背景版本需要对应的背景标识。")
     for path, content in payload.items():

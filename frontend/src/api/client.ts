@@ -42,6 +42,7 @@ export type WorldPackPreview = {
   blockers: string[]
   contains_author_material: boolean
   archive_sha256: string
+  story_openings?: { opening_id: string; title: string; position: string; known_history: string[] }[]
 }
 export type WorldPackImportResult = World & { duplicate: boolean }
 export type TemplateUpdateChange = {
@@ -1030,12 +1031,13 @@ export const api = {
   previewWorldPack: (archive: File, signal: AbortSignal) => request<WorldPackPreview>('/packs/import/preview', {
     method: 'POST', body: archive, signal, headers: { 'Content-Type': 'application/zip' },
   }, false),
-  importWorldPack: (archive: File, previewDigest: string, idempotencyKey: string) => request<WorldPackImportResult>('/packs/import', {
+  importWorldPack: (archive: File, previewDigest: string, idempotencyKey: string, openingId?: string) => request<WorldPackImportResult>('/packs/import', {
     method: 'POST', body: archive,
     headers: {
       'Content-Type': 'application/zip',
       'X-World-Pack-Sha256': previewDigest,
       'Idempotency-Key': idempotencyKey,
+      ...(openingId ? { 'X-Story-Opening': openingId } : {}),
     },
   }, false),
   createWorld: (body: {

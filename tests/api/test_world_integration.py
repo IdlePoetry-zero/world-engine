@@ -105,6 +105,47 @@ def test_world_pack_preview_import_and_author_download(service):
     assert len(client.get("/api/v1/worlds").json()["items"]) == 1
 
 
+def test_story_world_pack_previews_history_and_starts_a_selected_genesis(service):
+    client, application, _, _ = service
+    baseline = application.catalog.build_world("fixture", "Story", "Traveler").state
+    opening = {
+        "opening_id": "before", "title": "Before the rain", "position": "Before the market opens",
+        "known_history": [], "scenario": baseline.model_dump(mode="json"),
+    }
+    later = opening | {
+        "opening_id": "after", "title": "After the rain", "position": "After the flood",
+        "known_history": ["The river rose."], "scenario": opening["scenario"] | {"current_tick": 500},
+    }
+    source = write_world_pack(manifest=WorldPackManifest(pack_id="portable-story", version="1.0.0", title="Story"),
+                              template={"story_openings": [opening, later]})
+    upload = {"Content-Type": "application/zip", "Origin": "http://testserver"}
+    response = client.post("/api/v1/packs/import/preview", headers=upload, content=source).raise_for_status()
+    report = response.json()
+    assert report["can_import"]
+    assert report["story_openings"] == [{key: value for key, value in item.items() if key != "scenario"}
+                                        for item in (opening, later)]
+    assert "future betrayal" not in response.text
+    headers = upload | {"X-World-Pack-Sha256": report["archive_sha256"], "Idempotency-Key": "story-1"}
+    no_selection = client.post("/api/v1/packs/import", headers=headers, content=source)
+    assert no_selection.json()["error"]["code"] == "STORY_OPENING_REQUIRED"
+    assert not client.get("/api/v1/worlds").json()["items"]
+
+    def confirm(key, opening_id):
+        return client.post("/api/v1/packs/import", content=source, headers=headers | {
+            "Idempotency-Key": key, "X-Story-Opening": opening_id,
+        })
+
+    assert confirm("story-1", "unknown").status_code == 422
+    first = confirm("story-1", "after").raise_for_status().json()
+    assert first["current_tick"] == "500"
+    assert confirm("story-1", "after").raise_for_status().json()["duplicate"]
+    assert confirm("story-1", "before").status_code == 409
+    second = confirm("story-2", "before").raise_for_status().json()
+    assert second["world_id"] != first["world_id"] and second["current_tick"] == "0"
+    author = client.get(f"/api/v1/worlds/{first['world_id']}/view", params={"mode": "author"}).raise_for_status().json()
+    assert author["state"]["metadata"]["world_pack_story_opening_id"] == "after"
+
+
 def test_world_creation_seed_is_optional_and_bound_to_the_request(service):
     client, _, _, _ = service
     body = {"pack_id": "fixture", "title": "Seeded", "player_name": "Traveler", "seed": -7}

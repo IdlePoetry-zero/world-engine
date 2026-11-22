@@ -65,7 +65,7 @@ class TemplateMigrationApplication:
         if source.manifest.pack_id != target.package.manifest.pack_id or _template_version(target_version) <= _template_version(source_version):
             unsupported("pack_version", "请选择同一世界包中版本号更高的模板。")
         if target.draft is None:
-            for blocker in target.blockers:
+            for blocker in target.blockers or ("有主线世界包需要选择开局并作为新世界导入。",):
                 unsupported("compatibility", blocker)
         elif target.draft.ruleset_version != view.world.ruleset_version:
             unsupported("ruleset_version", "规则版本不同，需要专门的存档迁移程序。")
