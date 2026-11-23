@@ -714,10 +714,12 @@ def test_promise_deadline_can_change_story_without_player_participation(tmp_path
         database.dispose()
 
 
-@pytest.mark.parametrize(("use_streaming_backup", "automatic", "defer_count"), [
-    (False, False, 0), (False, True, 0), (True, True, 2),
+@pytest.mark.parametrize(("use_streaming_backup", "automatic", "defer_count", "travel_first"), [
+    (False, False, 0, False), (False, True, 0, False), (True, True, 2, False), (True, True, 0, True),
 ])
-def test_npc_executes_its_own_return_plan_and_story_replays(tmp_path, use_streaming_backup, automatic, defer_count):
+def test_npc_executes_its_own_return_plan_and_story_replays(
+    tmp_path, use_streaming_backup, automatic, defer_count, travel_first,
+):
     state, promisor, promisee, source_account, recipient_account, *_ = _fixture_state()
     player, milestone_id = uuid4(), uuid4()
     goal = GoalRecord(id=uuid4(), owner_id=promisor, title="Return the borrowed herb", deadline=4)
@@ -734,6 +736,26 @@ def test_npc_executes_its_own_return_plan_and_story_replays(tmp_path, use_stream
                      "fallback": {"key": "trust-rose", "effect": "occurred", "summary": "The borrower returned the herb."}},
         })],
     })
+    steps = []
+    if travel_first:
+        workshop_id = state.entities[promisor].location_id
+        annex_id, route_id = uuid4(), uuid4()
+        entities = dict(state.entities)
+        for actor_id in (promisor, promisee):
+            actor = entities[actor_id]
+            entities[actor_id] = actor.model_copy(update={
+                "components": actor.components | {"capabilities": {"grants": ["world.travel"]}},
+            })
+        workshop = entities[workshop_id]
+        entities[workshop_id] = workshop.model_copy(update={"components": {
+            "place": {"place_type": "settlement", "routes": [{"route_id": str(route_id),
+                       "from_place_id": str(workshop_id), "to_place_id": str(annex_id), "travel_ticks": 1}]},
+        }})
+        entities[annex_id] = WorldEntity(id=annex_id, kind="place", name="Workshop annex",
+                                       components={"place": {"place_type": "site"}})
+        state = WorldState.model_validate(state.model_dump(mode="python") | {"entities": entities})
+        steps.append(NpcPlanStep(capability_id="world.action.move.v1",
+                                 arguments={"destination_id": str(annex_id), "route_id": str(route_id)}))
     draft = NewWorld(title="Autonomous workshop", state=state)
     if not automatic:
         schedule = build_npc_plan_review_schedule(state, draft.world_id, promisor, 4)
@@ -751,8 +773,14 @@ def test_npc_executes_its_own_return_plan_and_story_replays(tmp_path, use_stream
             "promisee_id": str(promisee), "resource_id": RESOURCE_ID, "quantity": "1",
             "deadline_tick": 4, "private_text": "I'll bring the herb back before closing.",
         }, key="create-active-npc-promise")
+        if travel_first:
+            _commit_action(repository, scope, world, branch, promisee, "move", {
+                "destination_id": str(annex_id), "route_id": str(route_id),
+            }, key="creditor-goes-to-annex")
         before = repository.read_world(scope, world, branch)
         promise, = before.state.relationship_promises
+        steps.append(NpcPlanStep(capability_id="world.action.fulfill_return_promise.v1",
+                                 arguments={"promise_id": str(promise.id)}))
         opening_review_tick = 2 if automatic else promise.deadline_tick
         goal, = before.state.goals
         if automatic:
@@ -762,7 +790,7 @@ def test_npc_executes_its_own_return_plan_and_story_replays(tmp_path, use_stream
             assert schedule.due_tick == opening_review_tick and schedule.max_runs == 3
         jobs = SimulationJobs(repository)
         job = jobs.enqueue_world_advance(
-            scope, world, branch, WorldAdvancePlan(started_tick=0, target_tick=6),
+            scope, world, branch, WorldAdvancePlan(started_tick=before.state.current_tick, target_tick=6),
             idempotency_key="npc-return-and-advance", speed="balanced", depth="deep",
             expected_state_version=before.branch.state_version,
         )
@@ -793,9 +821,8 @@ def test_npc_executes_its_own_return_plan_and_story_replays(tmp_path, use_stream
             plan_id=uuid5(request.request_id, f"npc.plan.v1:{promisor}:{request.state_version}"),
             actor_id=promisor, goal_ids=[goal.id], revision=1, status="ready",
             created_tick=review_tick, updated_tick=review_tick, next_review_tick=review_tick, current_step=0,
-            steps=[NpcPlanStep(capability_id="world.action.fulfill_return_promise.v1",
-                               arguments={"promise_id": str(promise.id)})],
-            reason="Return the herb while its recipient is here.",
+            steps=steps,
+            reason="Reach the recipient and return the herb before closing.",
         )
         jobs.advance(scope, lease, model_decision=DecisionResponse(
             request_id=request.request_id, state_version=request.state_version, at_tick=review_tick, source="policy",
@@ -809,7 +836,12 @@ def test_npc_executes_its_own_return_plan_and_story_replays(tmp_path, use_stream
         assert repository.read_job(scope, job.job_id).status == "succeeded"
         result = repository.read_world(scope, world, branch)
         returned, = result.state.relationship_promises
-        assert returned.status == "fulfilled" and returned.resolved_tick == review_tick
+        fulfillment_tick = review_tick + int(travel_first)
+        assert returned.status == "fulfilled" and returned.resolved_tick == fulfillment_tick
+        if travel_first:
+            trip = next(row for row in result.state.travel_journeys if row.actor_id == promisor)
+            assert trip.status == "arrived" and trip.resolved_tick == fulfillment_tick
+            assert result.state.entities[promisor].location_id == annex_id
         if automatic:
             completed_goal, = result.state.goals
             assert completed_goal.status == "succeeded" and completed_goal.evidence_refs == [returned.outcome_event_id]
@@ -817,7 +849,7 @@ def test_npc_executes_its_own_return_plan_and_story_replays(tmp_path, use_stream
         assert result.state.resources[recipient_account].balance == Decimal("1")
         assert result.state.npc_plans[0].status == "completed"
         milestone, = result.state.story_milestones
-        assert (milestone.schedule_id, milestone.resolved_tick) == (milestone_id, review_tick)
+        assert (milestone.schedule_id, milestone.resolved_tick) == (milestone_id, fulfillment_tick)
         assert repository.replay(scope, world, branch).state_hash == result.state_hash
 
         backup = BackupApplication(repository)
