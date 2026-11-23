@@ -7,8 +7,9 @@ from the committed command context and authoritative world state.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -103,6 +104,31 @@ def build_record_return_promise_event(
     except (ValidationError, ValueError) as exc:
         raise InvalidEvent("Return promise terms are invalid.") from exc
     return _validated_candidate(state, context, event)
+
+
+def assess_return_promise(
+    state: WorldState,
+    actor: WorldEntity,
+    promise: RelationshipPromise,
+    *,
+    visible_counterpart_ids: Collection[UUID],
+) -> tuple[Literal["recipient_available_here", "not_observed_here", "recipient_account_unavailable"], bool]:
+    """Return observable delivery feasibility and whether the actor has eligible stock.
+
+    The caller must already have an active promise issued by this actor.
+    No recipient whereabouts or status are inferred outside the actor's view.
+    """
+    has_stock = _first_stock_account(
+        state, actor, resource_id=promise.terms.resource_id, quantity=promise.terms.quantity,
+    ) is not None
+    recipient = state.entities.get(promise.promisee_id)
+    if (recipient is None or recipient.id not in visible_counterpart_ids or recipient.status != "active"
+            or actor.location_id is None or actor.location_id != recipient.location_id):
+        return "not_observed_here", has_stock
+    account = state.resources.get(promise.terms.promisee_account_id)
+    if not _is_holder_account(account, owner_id=promise.promisee_id, resource_id=promise.terms.resource_id):
+        return "recipient_account_unavailable", has_stock
+    return "recipient_available_here", has_stock
 
 
 def build_fulfill_return_promise_event(

@@ -65,6 +65,7 @@ from world_engine.rules.contracts import (
     RuleContext,
 )
 from world_engine.rules.engine import RuleEngine, route_access_reason
+from world_engine.rules.promise_actions import assess_return_promise
 from world_engine.simulation.npc_capabilities import (
     NpcCapability,
     NpcCapabilityPreflight,
@@ -549,6 +550,42 @@ def _goal_references_are_known(
     return True
 
 
+def _planning_promises(
+    state: WorldState,
+    actor: WorldEntity,
+    projection: dict[str, Any],
+    knowledge: AgentKnowledge,
+) -> list[dict[str, Any]]:
+    own_rows = projection.get("own_promises", [])
+    active = sorted(
+        (row for row in own_rows if row["role"] == "promisor" and row["status"] == "active"),
+        key=lambda row: (row["deadline_tick"], row["promise_id"]),
+    )
+    rows = active[:8]
+    if len(rows) < 8:
+        rows += [row for row in own_rows if row["role"] != "promisor" or row["status"] != "active"][:8 - len(rows)]
+    active_ids = {row["promise_id"] for row in rows if row["status"] == "active" and row["role"] == "promisor"}
+    if not active_ids:
+        return rows
+    visible_ids = {entity.id for entity in knowledge.visible_entities}
+    promises = {str(promise.id): promise for promise in state.relationship_promises if str(promise.id) in active_ids}
+    assessments = {}
+    for promise_id, promise in promises.items():
+        delivery, has_stock = assess_return_promise(
+            state, actor, promise, visible_counterpart_ids=visible_ids,
+        )
+        assessments[promise_id] = {
+            "delivery_at_current_place": delivery,
+            "has_deliverable_stock": has_stock,
+            "ticks_until_deadline": promise.deadline_tick - state.current_tick,
+        }
+    return [
+        row | {"fulfillment_preflight": assessments[row["promise_id"]]}
+        if row["promise_id"] in assessments else row
+        for row in rows
+    ]
+
+
 def _decision_context(
     state: WorldState,
     actor: WorldEntity,
@@ -606,7 +643,7 @@ def _decision_context(
         "market_offers": market_view,
         "available_production": _available_production(state, actor, knowledge),
         "own_shipments": projection.get("own_shipments", [])[:32],
-        "own_promises": projection.get("own_promises", [])[:8],
+        "own_promises": _planning_promises(state, actor, projection, knowledge),
         "own_relationship_invitations": projection.get("own_relationship_invitations", [])[:32],
         "own_relationship_partnerships": projection.get("own_relationship_partnerships", [])[:32],
         "own_active_travel": projection.get("own_active_travel"),

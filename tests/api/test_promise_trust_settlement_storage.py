@@ -7,7 +7,10 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import select
 
+from world_engine.agents.knowledge import build_agent_knowledge
 from world_engine.application.backups import BackupApplication
+from world_engine.application.npc_planning import _planning_promises
+from world_engine.application.visibility import project_player_state
 from world_engine.application.simulation_jobs import SimulationJobs
 from world_engine.domain.components import InventoryComponent, InventoryLot
 from world_engine.domain.errors import InvalidEvent
@@ -27,7 +30,7 @@ from world_engine.domain.promise_trust_events import (
 from world_engine.domain.promise_trust_state import PromiseTrustProjection
 from world_engine.domain.story_nodes import StoryReaction
 from world_engine.rules import RuleContext, RuleEngine
-from world_engine.rules.promise_actions import build_fulfill_return_promise_event
+from world_engine.rules.promise_actions import assess_return_promise, build_fulfill_return_promise_event
 from world_engine.simulation.contracts import WorldAdvancePlan
 from world_engine.simulation.engine import SimulationEngine, SimulationPolicy
 from world_engine.storage.database import Database
@@ -639,6 +642,33 @@ def test_npc_promise_deadline_can_change_story_without_player_participation(tmp_
         }, key="npc-promise")
         before = repo.read_world(scope, world, main)
         assert not before.state.story_milestones
+        actor = before.state.entities[promisor]
+        promise, = before.state.relationship_promises
+        assert assess_return_promise(before.state, actor, promise, visible_counterpart_ids={promisee}) == (
+            "recipient_available_here", True,
+        )
+        assert assess_return_promise(before.state, actor, promise, visible_counterpart_ids=set()) == (
+            "not_observed_here", True,
+        )
+        raw_state = before.state.model_dump(mode="json")
+        for actor_id in (promisor, promisee, player):
+            person = before.state.entities[actor_id]
+            knowledge = build_agent_knowledge(before.state, actor_id)
+            rows = _planning_promises(before.state, person, project_player_state(raw_state, str(actor_id)), knowledge)
+            if actor_id == promisor:
+                assert rows[0]["fulfillment_preflight"] == {
+                    "delivery_at_current_place": "recipient_available_here",
+                    "has_deliverable_stock": True,
+                    "ticks_until_deadline": 4,
+                }
+            elif actor_id == promisee:
+                assert rows[0]["role"] == "promisee" and "fulfillment_preflight" not in rows[0]
+            else:
+                assert not rows
+        empty_actor = actor.model_copy(update={"components": {"inventory": {"lots": []}}})
+        assert assess_return_promise(before.state, empty_actor, promise, visible_counterpart_ids={promisee}) == (
+            "recipient_available_here", False,
+        )
         child = repo.fork(scope, world, main, before.last_seq, "Wait past closing").branch_id
         _run_world_advance(repo, scope, world, child, key="npc-deadline", target_tick=5)
         after = repo.read_world(scope, world, child)
