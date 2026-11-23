@@ -40,7 +40,13 @@ npm --prefix frontend run build
 
 本地 Python 3.13.18 和 SQLite 3.53.1 上，快速检查通过 70 项，规则组通过 1263 项。动作 schema 压缩回归核对去除推断标题前后的结构和校验结果，现有输出从 47,801 字节降到 42,415 字节。工作流已通过 actionlint，本地前端 lint 和生产构建通过，GitHub 托管运行待发布后验证。
 
-真实模型验收使用本地已配置的模型连接，按照单独的探针和实玩记录复核。长程容量和性能使用下文的隔离存档审计。两者的结果需要独立记录。 [供应商接入与验证](providers.md) · [验收矩阵](acceptance-matrix.md)
+真实模型验收使用本地已配置的模型连接。以下命令会从现有 `.data` 只读加载账号和官方 DeepSeek 的凭据引用，在 `.runtime` 中启动全新的试局，并实际调用 DeepSeek Flash。可用 `--source-data` 指定保存模型连接的其他本地目录。报告只保存分类、出勤结果、用量和计费等验收数据。
+
+```powershell
+.\.runtime\venv313\Scripts\python.exe scripts/probe-real-work-month.py
+```
+
+长程容量和性能使用下文的隔离存档审计。 [供应商接入与验证](providers.md) · [验收矩阵](acceptance-matrix.md)
 
 ## 现有 Ollama 复用
 
