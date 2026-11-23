@@ -62,6 +62,7 @@ from world_engine.rules.contracts import (
     MoveIntent,
     ProduceIntent,
     ProposeRelationshipInvitationIntent,
+    RecordReturnPromiseIntent,
     ResolveRelationshipInvitationIntent,
     SpeakIntent,
     TradeIntent,
@@ -1242,6 +1243,10 @@ def _references_are_known(
         except (TypeError, ValueError):
             return "unknown", "unknown"
         return None if any(recipe.recipe_id == action.recipe_id for recipe in registered.recipes) else ("unknown", "unknown")
+    if isinstance(action, RecordReturnPromiseIntent):
+        owns_resource = any(isinstance(account, dict) and account.get("resource_id") == action.resource_id
+                            for account in projection.get("resources", {}).values())
+        return None if owns_resource and action.promisee_id in known_visible_entities else ("unknown", "unknown")
     if isinstance(action, FulfillReturnPromiseIntent):
         own_promises = projection.get("own_promises", [])
         return None if any(
@@ -1328,6 +1333,7 @@ def _model_request(
         "shared_production_available 为真时，可按 available_production 中的工坊、配方和技能要求安排生产。"
         "原料与产出归登记生产方，现场协助不等于取得个人库存。"
         "配方所列原料和产出只是用量和产品；flows_truncated 为真时仅列部分品类。实际原料与额度仍需规则核验。"
+        "只有人物明确决定自己作出归还承诺时才用 record_return_promise。使用本人账户已知资源、在场的人、准确数量和明确期限。"
         "归还时只从 own_promises 里选本人作为 promisor 的 active 记录，使用 fulfill_return_promise 和对应 promise_id。"
         "fulfillment_preflight 表示当前可观察的条件及期限。当场缺货或交付对象不在场时，先规划可验证的准备步骤，或暂缓。"
         "遇到本人最近的失败，结合现在的报价、地点和人物状态重新选方法。旧失败不能证明条件今天仍相同。"

@@ -27,7 +27,7 @@ from world_engine.domain.npc_plan_review import (
 )
 from world_engine.domain.npc_plan_review_events import NpcPlanReviewResolvedEvent
 from world_engine.domain.relationship_invitation_events import RelationInvitationChangedEvent
-from world_engine.domain.promise_events import PromiseItemReturnedEvent
+from world_engine.domain.promise_events import PromiseItemReturnedEvent, RelationshipPromiseRecordedEvent
 from world_engine.domain.promise_trust_events import PromiseItemReturnedWithTrustEvent
 from world_engine.domain.reducers import state_hash
 from world_engine.domain.travel_journey_events import TravelJourneyChangedEvent
@@ -382,6 +382,15 @@ def _action_command(
     events: tuple[DomainEvent, ...],
     actor_id: UUID,
 ) -> tuple[str | None, JsonObject | None]:
+    if len(events) == 1 and isinstance(events[0], RelationshipPromiseRecordedEvent):
+        pledge = events[0].promise
+        if pledge.promisor_id != actor_id:
+            raise InvalidEvent("An NPC may only issue its own promise.")
+        return "action.record_return_promise", {
+            "kind": "record_return_promise", "promisee_id": str(pledge.promisee_id),
+            "resource_id": pledge.terms.resource_id, "quantity": str(pledge.terms.quantity),
+            "deadline_tick": pledge.deadline_tick, "private_text": pledge.private_text,
+        }
     if len(events) == 1 and isinstance(events[0], (PromiseItemReturnedEvent, PromiseItemReturnedWithTrustEvent)):
         event = events[0]
         settlement = event.settlement if isinstance(event, PromiseItemReturnedWithTrustEvent) else event

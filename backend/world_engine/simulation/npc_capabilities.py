@@ -35,6 +35,7 @@ from world_engine.rules.contracts import (
     MoveIntent,
     ProduceIntent,
     ProposeRelationshipInvitationIntent,
+    RecordReturnPromiseIntent,
     ResolveRelationshipInvitationIntent,
     RuleContext,
     RuleOutcome,
@@ -168,6 +169,11 @@ def build_default_npc_capability_registry() -> NpcCapabilityRegistry:
     registry.register(capability_id_for_action("trade"), TradeIntent, reference_validator=_validate_trade_reference)
     registry.register(capability_id_for_action("produce"), ProduceIntent, reference_validator=_validate_produce_reference)
     registry.register(capability_id_for_action("speak"), SpeakIntent, reference_validator=_validate_speak_reference)
+    registry.register(
+        capability_id_for_action("record_return_promise"),
+        RecordReturnPromiseIntent,
+        reference_validator=_validate_return_promise_reference,
+    )
     registry.register(
         capability_id_for_action("fulfill_return_promise"),
         FulfillReturnPromiseIntent,
@@ -502,6 +508,13 @@ def _validate_produce_reference(
 def _validate_return_promise_reference(
     state: WorldState, actor: WorldEntity, action: IntentModel,
 ) -> tuple[str, str] | None:
+    if isinstance(action, RecordReturnPromiseIntent):
+        if action.promisee_id == actor.id or not entity_visible_to_actor(state, actor.id, action.promisee_id):
+            return "npc_reference_not_known", "A new promise must name a visible counterpart."
+        if not any(account.owner_id == actor.id and account.resource_id == action.resource_id
+                   for account in state.resources.values()):
+            return "npc_reference_not_known", "A new promise must name a resource known from the actor's accounts."
+        return None
     assert isinstance(action, FulfillReturnPromiseIntent)
     promise = next((item for item in state.relationship_promises if item.id == action.promise_id
                     and item.promisor_id == actor.id and item.status == "active"), None)

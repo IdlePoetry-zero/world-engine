@@ -107,6 +107,7 @@ def test_registry_has_explicit_v1_capabilities_and_rejects_duplicate_or_request_
             "trade",
             "produce",
             "speak",
+            "record_return_promise",
             "fulfill_return_promise",
             "propose_relationship_invitation",
             "resolve_relationship_invitation",

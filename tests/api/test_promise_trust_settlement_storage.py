@@ -980,3 +980,84 @@ def test_npc_breach_uses_only_an_evidence_bound_return_assessment(tmp_path, has_
     finally:
         restored_db.dispose()
         db.dispose()
+
+
+
+def test_npc_can_make_its_own_promise_and_the_new_commitment_schedules_fulfillment(tmp_path):
+    state, promisor, promisee, source_account, recipient_account, *_ = _fixture_state()
+    player = uuid4()
+    intention = GoalRecord(id=uuid4(), owner_id=promisor, title="Make a promise to repay the herb loan", deadline=1)
+    state = WorldState.model_validate(state.model_dump(mode="python") | {
+        "player_id": player,
+        "entities": state.entities | {player: WorldEntity(id=player, kind="character", name="Observer")},
+        "metadata": state.metadata | {"npc_return_commitment_reviews_v1": True},
+        "goals": [intention],
+    })
+    draft = NewWorld(title="NPC-originated commitment", state=state)
+    schedule = build_npc_plan_review_schedule(state, draft.world_id, promisor, 1)
+    state = WorldState.model_validate(state.model_dump(mode="python") | {"scheduled_events": [schedule]})
+    scope = AccessScope(tenant_id=uuid4(), user_id=uuid4())
+    db = Database(f"sqlite:///{(tmp_path / 'own-promise.db').as_posix()}")
+    db.create_schema()
+    copy_db = Database(f"sqlite:///{(tmp_path / 'own-promise-restored.db').as_posix()}")
+    copy_db.create_schema()
+    try:
+        repo = WorldRepository(db)
+        world, branch = draft.world_id, draft.branch_id
+        repo.create_world(scope, draft.model_copy(update={"state": state}))
+        jobs = SimulationJobs(repo)
+        job = jobs.enqueue_world_advance(
+            scope, world, branch, WorldAdvancePlan(started_tick=0, target_tick=9),
+            idempotency_key="own-promise", speed="balanced", depth="standard",
+        )
+        lease = repo.claim_job("promise-originator")
+        assert lease and lease.job_id == job.job_id
+        decided = []
+        for _ in range(25):
+            if repo.read_job(scope, job.job_id).status == "succeeded":
+                break
+            outcome = jobs.advance(scope, lease)
+            if not outcome.decision_requests:
+                continue
+            request, = outcome.decision_requests
+            current = repo.read_world(scope, world, branch)
+            assert request.actor_id == promisor and request.kind == "npc.plan_review"
+            decided.append(request.at_tick)
+            if not current.state.relationship_promises:
+                goal = intention.id
+                step = NpcPlanStep(capability_id="world.action.record_return_promise.v1", arguments={
+                    "promisee_id": str(promisee), "resource_id": RESOURCE_ID, "quantity": "1",
+                    "deadline_tick": 8, "private_text": "I will return one herb before closing.",
+                })
+            else:
+                promise, = current.state.relationship_promises
+                assert promise.status == "active"
+                goal = uuid5(promise.id, "npc.commitment:return")
+                step = NpcPlanStep(capability_id="world.action.fulfill_return_promise.v1",
+                                   arguments={"promise_id": str(promise.id)})
+            plan = NpcPlan(
+                plan_id=uuid5(request.request_id, f"npc.plan.v1:{promisor}:{request.state_version}"),
+                actor_id=promisor, goal_ids=[goal], revision=1, status="ready", current_step=0,
+                created_tick=request.at_tick, updated_tick=request.at_tick, next_review_tick=request.at_tick,
+                steps=[step], reason="Honor the voluntary return agreement.",
+            )
+            jobs.advance(scope, lease, model_decision=DecisionResponse(
+                request_id=request.request_id, state_version=request.state_version, at_tick=request.at_tick,
+                source="policy", option_id="plan", npc_planning_status="ready", npc_plan=plan, npc_plan_state_hash=current.state_hash,
+            ))
+        final = repo.read_world(scope, world, branch)
+        promise, = final.state.relationship_promises
+        assert decided == [1, 2]
+        assert (promise.promisor_id, promise.created_tick, promise.status, promise.resolved_tick) == (promisor, 1, "fulfilled", 2)
+        assert final.state.resources[source_account].balance == Decimal("4")
+        assert final.state.resources[recipient_account].balance == Decimal("1")
+        assert repo.read_job(scope, job.job_id).status == "succeeded"
+        assert repo.replay(scope, world, branch, from_genesis=True).state_hash == final.state_hash
+        backup = BackupApplication(repo)
+        restored = WorldRepository(copy_db)
+        with backup.validate_archive_file_streaming(io.BytesIO(backup.export_world(scope, world))) as verified:
+            WorldBackupImporter(restored).import_verified_backup(scope, verified)
+        assert restored.replay(scope, world, branch, from_genesis=True).state_hash == final.state_hash
+    finally:
+        copy_db.dispose()
+        db.dispose()
