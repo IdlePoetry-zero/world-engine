@@ -60,6 +60,17 @@ def promise_return_lot_id(event_id: UUID, source_lot_id: UUID) -> UUID:
     return uuid5(event_id, f"core.promise_item_returned.v1:lot:{source_lot_id}")
 
 
+class PromiseReviewChoice(PromiseModel):
+    promise_id: UUID
+    choice: Literal["blocked", "refuse"]
+
+
+class PromiseReviewReceipt(PromiseModel):
+    choice: Literal["blocked", "refuse"]
+    at_tick: Tick
+    event_id: UUID
+
+
 class RelationshipPromise(PromiseModel):
     """A participant-private pledge, separate from proof of its eventual outcome."""
 
@@ -75,6 +86,7 @@ class RelationshipPromise(PromiseModel):
     resolved_tick: Tick | None = None
     revision: StrictInt = Field(default=1, ge=1)
     outcome_event_id: UUID | None = None
+    review_receipt: PromiseReviewReceipt | None = Field(default=None, exclude_if=lambda receipt: receipt is None)
     trust_policy_id: Literal["core.promise_trust.v1"] | None = Field(
         default=None, exclude_if=lambda value: value is None,
     )
@@ -95,6 +107,11 @@ class RelationshipPromise(PromiseModel):
             raise ValueError("a promise deadline must leave room for its due tick")
         if self.deadline_schedule_id != promise_deadline_schedule_id(self.id):
             raise ValueError("promise deadline schedule ID must be derived from its stable promise ID")
+        if self.review_receipt is not None and (
+            self.review_receipt.at_tick < self.created_tick or self.review_receipt.at_tick > self.deadline_tick
+            or self.resolved_tick is not None and self.review_receipt.at_tick > self.resolved_tick
+        ):
+            raise ValueError("A promise review receipt must precede settlement and belong to its available window.")
         if self.status == "active":
             if self.resolved_tick is not None or self.outcome_event_id is not None:
                 raise ValueError("an active promise cannot contain outcome fields")

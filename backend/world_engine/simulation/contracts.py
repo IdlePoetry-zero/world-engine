@@ -13,6 +13,7 @@ from world_engine.rules.contracts import ConsumeIntent, RuleResolution
 from world_engine.domain.models import DomainEvent
 from world_engine.domain.npc_plan_review import NpcPlanningRejection
 from world_engine.domain.npc_plans import NpcPlan
+from world_engine.domain.relationship_promises import PromiseReviewChoice
 from world_engine.domain.travel_itinerary import TravelItinerary
 from world_engine.domain.travel_journey_events import TravelJourneyChangedEvent
 
@@ -207,11 +208,14 @@ class DecisionResponse(FrozenModel):
     npc_planning_rejection: NpcPlanningRejection | None = Field(default=None, exclude_if=lambda value: value is None)
     npc_plan: NpcPlan | None = Field(default=None, exclude_if=lambda value: value is None)
     npc_plan_state_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$", exclude_if=lambda value: value is None)
+    promise_choice: PromiseReviewChoice | None = Field(default=None, exclude_if=lambda value: value is None)
     npc_model_call_id: str | None = Field(default=None, min_length=1, max_length=128,
                                            pattern=r"^[a-zA-Z0-9_.:-]+$", exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def npc_planning_response_is_complete(self):
+        if self.promise_choice is not None and self.npc_planning_status != "defer":
+            raise ValueError("A promise choice requires a typed NPC deferral.")
         if self.npc_planning_rejection is not None and self.npc_planning_status != "invalid":
             raise ValueError("Only invalid NPC planning responses can contain a rejection code.")
         if self.npc_planning_status is None:

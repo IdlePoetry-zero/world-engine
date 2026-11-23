@@ -401,6 +401,7 @@ def _validate_late_receipt(
         or plan.receipt.outcome != "breached"
         or plan.receipt.outcome_event_id != prior_receipt.outcome_event_id
         or plan.receipt.applied_delta != prior_receipt.applied_delta
+        or plan.receipt.assessed_choice != prior_receipt.assessed_choice
         or plan.receipt.late_return_event_id != plan.outcome_event_id
         or plan.receipt.late_return_delta != plan.applied_delta
         or plan.applied_delta > prior_receipt.applied_delta.copy_abs()

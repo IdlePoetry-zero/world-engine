@@ -203,6 +203,7 @@ def _validate_review_batch(
                 npc_planning_status=review.outcome,
                 npc_planning_rejection=review.reason if review.reason in NPC_PLANNING_REJECTIONS else None,
                 npc_plan=proposed_plan,
+                promise_choice=review.promise_choice,
                 npc_plan_state_hash=state_hash(state),
                 npc_model_call_id=review.model_call_id,
             )
@@ -254,6 +255,7 @@ def _response_matches_review(supplied: DecisionResponse, rebuilt: DecisionRespon
             "option_id",
             "npc_planning_status",
             "npc_planning_rejection",
+            "promise_choice",
             "npc_plan",
             "npc_plan_state_hash",
             "npc_model_call_id",

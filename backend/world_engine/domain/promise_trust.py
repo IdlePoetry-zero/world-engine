@@ -21,7 +21,7 @@ from .relationship_promises import (
     PROMISE_DEADLINE_HANDLER_VERSION,
     PROMISE_TRUST_DEADLINE_HANDLER_VERSION,
     PROMISE_TRUST_POLICY_ID,
-    RelationshipPromise,
+    PromiseReviewReceipt, RelationshipPromise,
 )
 
 
@@ -117,6 +117,7 @@ class PromiseFulfillmentEvidence(PromiseTrustOutcomeBase):
 class PromiseBreachEvidence(PromiseTrustOutcomeBase):
     outcome: Literal["breached"]
     event_type: Literal[PROMISE_BREACHED_EVENT_V1, PROMISE_BREACHED_EVENT_V2]
+    review_receipt: PromiseReviewReceipt | None = None
 
 
 class PromiseLateReturnEvidence(PromiseTrustOutcomeBase):
@@ -185,11 +186,14 @@ class PromiseTrustReceipt(PromiseTrustModel):
     outcome_event_id: UUID
     outcome: Literal["on_time_fulfilled", "breached"]
     applied_delta: SignedRelationValue
+    assessed_choice: Literal["blocked", "refuse"] | None = Field(default=None, exclude_if=lambda value: value is None)
     late_return_event_id: UUID | None = None
     late_return_delta: SignedRelationValue | None = None
 
     @model_validator(mode="after")
     def receipt_has_one_late_repair(self) -> PromiseTrustReceipt:
+        if self.assessed_choice is not None and self.outcome != "breached":
+            raise ValueError("Only a breach may have a prior nonperformance assessment.")
         if self.outcome != "breached" and (self.late_return_event_id is not None or self.late_return_delta is not None):
             raise ValueError("only a breached promise can retain a late-return repair receipt")
         if (self.late_return_event_id is None) != (self.late_return_delta is None):
@@ -331,7 +335,9 @@ def plan_promise_trust_effect(
         if prior_receipt is not None:
             raise InvalidEvent("An active promise cannot already have a trust outcome receipt.")
         trust_before = snapshot.trust if snapshot.trust is not None else Decimal("0")
-        resulting_trust = _clamp_relation(trust_before + policy.breach_penalty)
+        choice = evidence.review_receipt.choice if evidence.review_receipt is not None else None
+        penalty = max(policy.breach_penalty, Decimal("-2")) if choice == "blocked" else policy.breach_penalty
+        resulting_trust = _clamp_relation(trust_before + penalty)
         applied_delta = resulting_trust - trust_before
         next_budget = snapshot.success_budget_spent
         receipt = PromiseTrustReceipt(
@@ -340,6 +346,7 @@ def plan_promise_trust_effect(
             outcome_event_id=evidence.event_id,
             outcome="breached",
             applied_delta=applied_delta,
+            assessed_choice=choice,
         )
         references = (evidence.event_id,)
     else:
@@ -462,6 +469,8 @@ def _validate_outcome_terms(promise: RelationshipPromise, evidence: PromiseTrust
         if not promise.created_tick <= evidence.effective_tick <= promise.deadline_tick:
             raise InvalidEvent("Promise release must occur on or before the inclusive deadline.")
     elif evidence.outcome == "breached":
+        if evidence.review_receipt is not None and evidence.review_receipt != promise.review_receipt:
+            raise InvalidEvent("A breach assessment must use the latest committed review on this promise.")
         if evidence.scheduled_event_id != promise.deadline_schedule_id or evidence.effective_tick != promise.deadline_tick + 1:
             raise InvalidEvent("Promise breach must reference the exact deadline schedule at deadline plus one tick.")
 

@@ -7,6 +7,9 @@ from uuid import UUID, uuid5
 
 from .components import GoalRecord, ScheduledEventRecord
 from .errors import InvalidEvent
+from .investigation import entity_visible_to_actor
+from .promise_availability import assess_return_promise
+from .relationship_promises import PromiseReviewChoice, PromiseReviewReceipt, RelationshipPromise
 from .npc_plan_review import schedule_npc_commitment_review
 from .promise_events import (
     PromiseDeadlineBreachedEvent, PromiseEvent, PromiseItemReturnedEvent, PromiseReleasedEvent,
@@ -55,6 +58,38 @@ def update_npc_return_commitment(state: WorldState, event: PromiseEvent) -> Worl
         **outcome, "updated_tick": state.current_tick, "evidence_refs": [event.event_id],
     })
     return _update(state, goals=[settled if row.id == goal_id else row for row in state.goals])
+
+
+def review_return_commitment(
+    state: WorldState, actor_id: UUID, decision: PromiseReviewChoice,
+) -> RelationshipPromise:
+    actor = state.entities.get(actor_id)
+    promise = next((item for item in state.relationship_promises if item.id == decision.promise_id
+                    and item.promisor_id == actor_id and item.status == "active"), None)
+    if (state.metadata.get("npc_return_commitment_reviews_v1") is not True or actor is None
+            or actor.status != "active" or actor_id == state.player_id or promise is None
+            or state.current_tick > promise.deadline_tick
+            or not any(goal.id == uuid5(promise.id, "npc.commitment:return")
+                       and goal.owner_id == actor_id and goal.status == "active" for goal in state.goals)):
+        raise InvalidEvent("A return assessment must refer to this NPC's own current commitment.")
+    visible = {promise.promisee_id} if entity_visible_to_actor(state, actor_id, promise.promisee_id) else set()
+    delivery, inventory_available = assess_return_promise(state, actor, promise, visible_counterpart_ids=visible)
+    ready = delivery == "recipient_available_here" and inventory_available
+    if (decision.choice == "refuse") != ready:
+        raise InvalidEvent("The recorded NPC choice does not match the observed fulfillment conditions.")
+    return promise
+
+
+def record_return_review(
+    state: WorldState, actor_id: UUID, decision: PromiseReviewChoice, event_id: UUID,
+) -> WorldState:
+    promise = review_return_commitment(state, actor_id, decision)
+    reviewed = promise.model_copy(update={"review_receipt": PromiseReviewReceipt(
+        choice=decision.choice, at_tick=state.current_tick, event_id=event_id,
+    )})
+    return _update(state, relationship_promises=[
+        reviewed if item.id == promise.id else item for item in state.relationship_promises
+    ])
 
 
 def _meeting_goal_id(invitation_id: UUID, actor_id: UUID) -> UUID:

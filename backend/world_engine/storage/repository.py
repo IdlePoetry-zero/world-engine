@@ -449,6 +449,8 @@ class WorldRepository:
             raise InvalidEvent("A new world cannot seed NPC plans without the registered simulation execution path.")
         if state.promise_trust is not None:
             raise InvalidEvent("A new world cannot seed promise trust receipts without settled events.")
+        if any(promise.review_receipt is not None for promise in state.relationship_promises):
+            raise InvalidEvent("A new world cannot seed promise reviews without committed events.")
         if state.relationship_invitations:
             raise InvalidEvent("A new world cannot seed relationship agreement without a committed proposal.")
         if state.institutional_credit_contracts:

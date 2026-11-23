@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, TypeAda
 
 from .components import ScheduledEventRecord
 from .errors import InvalidEvent
+from .relationship_promises import PromiseReviewChoice
 from .npc_plan_review import (
     NPC_PLAN_REVIEW_HANDLER_ID,
     NPC_PLAN_REVIEW_HANDLER_VERSION,
@@ -142,6 +143,7 @@ class NpcPlanReviewResolvedEvent(NpcPlanReviewEventModel):
     source: Literal["model", "policy"]
     outcome: Literal["ready", "defer", "invalid", "skipped"]
     plan_id: UUID | None = None
+    promise_choice: PromiseReviewChoice | None = Field(default=None, exclude_if=lambda value: value is None)
     model_call_id: Annotated[StrictStr, Field(min_length=1, max_length=128)] | None = None
     reason: Annotated[StrictStr, Field(min_length=1, max_length=80, pattern=_REASON_PATTERN)]
     visibility: dict[str, str] = Field(default_factory=lambda: dict(_AUTHOR_ONLY))
@@ -175,6 +177,8 @@ class NpcPlanReviewResolvedEvent(NpcPlanReviewEventModel):
             self.expected_schedule_revision,
         ):
             raise ValueError("NPC plan review request ID must bind command, ruleset, schedule, and revision")
+        if self.promise_choice is not None and self.outcome != "defer":
+            raise ValueError("A recorded promise choice requires a deferred plan review.")
         if (self.outcome == "ready") != (self.plan_id is not None):
             raise ValueError("Only a ready NPC plan review may reference a plan_id")
         if self.source == "model" and self.model_call_id is None:
@@ -307,7 +311,12 @@ def apply_npc_plan_review_resolved(
             expected_revision=parsed.expected_schedule_revision,
             visibility=dict(_AUTHOR_ONLY),
         )
-        return _apply_scheduled_event_completion(state, completion, npc_review_validated=True)
+        updated = _apply_scheduled_event_completion(state, completion, npc_review_validated=True)
+        if parsed.promise_choice is not None:
+            from .npc_commitments import record_return_review
+
+            updated = record_return_review(updated, parsed.actor_id, parsed.promise_choice, parsed.event_id)
+        return updated
     except InvalidEvent:
         raise
     except Exception as exc:

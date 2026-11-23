@@ -456,6 +456,8 @@ class WorldBackupImporter:
             if branch.parent_branch_id is None:
                 if branch.initial_state_version != 0:
                     raise BackupImportError("The genesis checkpoint must have version zero.")
+                if any(promise.review_receipt is not None for promise in initial_state.relationship_promises):
+                    raise BackupImportError("Promise review receipts need committed events after genesis.")
             else:
                 source_id, source_seq = _effective_point(by_id, branch.parent_branch_id, branch.fork_seq)
                 parent_point = point_hashes.get((source_id, source_seq))
@@ -1683,6 +1685,8 @@ def _preflight(
         if branch.parent_branch_id is None:
             if branch.initial_state_version != 0:
                 raise BackupImportError("The genesis checkpoint must have version zero.")
+            if any(promise.review_receipt is not None for promise in initial_state.relationship_promises):
+                raise BackupImportError("Promise review receipts need committed events after genesis.")
         else:
             source_id, source_seq = _effective_point(by_id, branch.parent_branch_id, branch.fork_seq)
             parent_point = hashes_at.get((source_id, source_seq))

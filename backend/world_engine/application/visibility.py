@@ -730,6 +730,8 @@ def _participant_promises(state: dict[str, Any], actor_id: str) -> list[dict[str
             ):
                 late_returned = receipt.late_return_event_id is not None
                 projected["late_returned"] = late_returned
+                if role == "promisor" and receipt.assessed_choice is not None:
+                    projected["breach_assessment"] = receipt.assessed_choice
                 projected["can_return_late"] = role == "promisor" and not late_returned
         promises.append(projected)
     return promises

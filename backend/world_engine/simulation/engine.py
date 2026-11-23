@@ -3416,6 +3416,7 @@ class SimulationEngine:
             at_tick=state.current_tick, decision_request_id=request.request_id,
             based_on_state_version=context.state_version, source=source, outcome=outcome,
             plan_id=proposed.plan_id if proposed is not None else None,
+            promise_choice=response.promise_choice if response is not None else None,
             model_call_id=str(call_id) if call_id is not None else None,
             reason=reason,
         ))

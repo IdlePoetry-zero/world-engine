@@ -7,20 +7,20 @@ from the committed command context and authoritative world state.
 
 from __future__ import annotations
 
-from collections.abc import Collection
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any
 from uuid import UUID
 
 from pydantic import ValidationError
 
 from world_engine.domain.components import (
-    InventoryComponent,
     ResourceName,
     ScheduledEventRecord,
 )
 from world_engine.domain.errors import InsufficientResources, InvalidEvent
-from world_engine.domain.inventory import FifoLotAllocation, allocate_fifo_lots
+from world_engine.domain.promise_availability import (
+    first_promise_stock_account, is_promise_holder_account, promise_inventory_or_none,
+)
 from world_engine.domain.models import WorldEntity, WorldState
 from world_engine.domain.promise_events import (
     PromiseDeadlineBreachedEvent,
@@ -106,31 +106,6 @@ def build_record_return_promise_event(
     return _validated_candidate(state, context, event)
 
 
-def assess_return_promise(
-    state: WorldState,
-    actor: WorldEntity,
-    promise: RelationshipPromise,
-    *,
-    visible_counterpart_ids: Collection[UUID],
-) -> tuple[Literal["recipient_available_here", "not_observed_here", "recipient_account_unavailable"], bool]:
-    """Return observable delivery feasibility and whether the actor has eligible stock.
-
-    The caller must already have an active promise issued by this actor.
-    No recipient whereabouts or status are inferred outside the actor's view.
-    """
-    has_stock = _first_stock_account(
-        state, actor, resource_id=promise.terms.resource_id, quantity=promise.terms.quantity,
-    ) is not None
-    recipient = state.entities.get(promise.promisee_id)
-    if (recipient is None or recipient.id not in visible_counterpart_ids or recipient.status != "active"
-            or actor.location_id is None or actor.location_id != recipient.location_id):
-        return "not_observed_here", has_stock
-    account = state.resources.get(promise.terms.promisee_account_id)
-    if not _is_holder_account(account, owner_id=promise.promisee_id, resource_id=promise.terms.resource_id):
-        return "recipient_account_unavailable", has_stock
-    return "recipient_available_here", has_stock
-
-
 def build_fulfill_return_promise_event(
     state: WorldState,
     context: RuleContext,
@@ -182,14 +157,14 @@ def _build_return_transfer(
     recipient: WorldEntity,
 ) -> PromiseItemReturnedEvent:
     recipient_account = state.resources.get(promise.terms.promisee_account_id)
-    if not _is_holder_account(
+    if not is_promise_holder_account(
         recipient_account,
         owner_id=promise.promisee_id,
         resource_id=promise.terms.resource_id,
     ):
         raise InvalidEvent("The promisee holder account stored in the pledge is no longer valid.")
 
-    source = _first_stock_account(
+    source = first_promise_stock_account(
         state,
         actor,
         resource_id=promise.terms.resource_id,
@@ -198,7 +173,7 @@ def _build_return_transfer(
     if source is None:
         raise InsufficientResources("The promisor has no eligible holder account with enough unexpired FIFO stock.")
     source_account_id, source_account, source_inventory, allocations = source
-    recipient_inventory = _inventory_or_none(recipient)
+    recipient_inventory = promise_inventory_or_none(recipient)
     command_id = context.command_id
     event_id = promise_event_id(command_id, context.ruleset_version, "item_returned")
     lots = tuple(
@@ -373,64 +348,11 @@ def _first_holder_account(
         (
             (account_id, account)
             for account_id, account in state.resources.items()
-            if _is_holder_account(account, owner_id=owner_id, resource_id=resource_id)
+            if is_promise_holder_account(account, owner_id=owner_id, resource_id=resource_id)
         ),
         key=lambda pair: str(pair[0]),
     )
     return matches[0][0] if matches else None
-
-
-def _first_stock_account(
-    state: WorldState,
-    actor: WorldEntity,
-    *,
-    resource_id: str,
-    quantity: Decimal,
-) -> tuple[UUID, Any, InventoryComponent, list[FifoLotAllocation]] | None:
-    inventory = _inventory_or_none(actor)
-    if inventory is None:
-        return None
-    candidates = sorted(
-        (
-            (account_id, account)
-            for account_id, account in state.resources.items()
-            if _is_holder_account(account, owner_id=actor.id, resource_id=resource_id)
-            and account.balance >= quantity
-        ),
-        key=lambda pair: str(pair[0]),
-    )
-    for account_id, account in candidates:
-        try:
-            allocations = allocate_fifo_lots(
-                inventory,
-                resource_id=resource_id,
-                quantity=quantity,
-                at_tick=state.current_tick,
-                account_id=account_id,
-            )
-        except ValueError:
-            continue
-        return account_id, account, inventory, allocations
-    return None
-
-
-def _is_holder_account(account: Any, *, owner_id: UUID, resource_id: str) -> bool:
-    return (
-        account is not None
-        and account.account_type == "holder"
-        and account.owner_id == owner_id
-        and account.resource_id == resource_id
-    )
-
-
-def _inventory_or_none(entity: WorldEntity) -> InventoryComponent | None:
-    raw_inventory = entity.components.get("inventory")
-    if raw_inventory is None:
-        return None
-    try:
-        return InventoryComponent.model_validate(raw_inventory)
-    except ValidationError as exc:
-        raise InvalidEvent("Promise participant has invalid registered inventory.") from exc
 
 
 def _queued_promise_schedule(state: WorldState, promise: RelationshipPromise) -> ScheduledEventRecord:

@@ -840,6 +840,8 @@ function PromisesPanel({ promises, entities, promiseDataAvailable, projectionAva
             <div className="shipment-cargo-row"><span>{resourceId}</span><strong>{String(quantity)}</strong></div>
           </div>}
           {!active && resolvedTick !== null && <p className="shipment-remaining">结清 tick {resolvedTick}</p>}
+          {promise.breach_assessment === 'blocked' && <p className="shipment-remaining">复审时发现交付障碍，到期时仍未解决。</p>}
+          {promise.breach_assessment === 'refuse' && <p className="shipment-remaining">复审时具备交付条件，承诺人当时选择不履行。</p>}
           {active && promiseId && role === 'promisor' && <div className="promise-actions">
             <button
               className="button button-secondary button-small"

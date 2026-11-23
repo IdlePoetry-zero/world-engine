@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 from .errors import InvalidEvent
+from .investigation import entity_visible_to_actor
+from .promise_availability import assess_return_promise
 from .promise_events import PromiseDeadlineBreachedEvent, PromiseItemReturnedEvent
 from .promise_late_return_event import PromiseItemReturnedLateEvent
 from .promise_reducers import apply_late_promise_return, apply_promise_event
@@ -17,7 +19,7 @@ from .promise_trust import (
 )
 from .promise_trust_events import PromiseDeadlineBreachedWithTrustEvent, PromiseItemReturnedWithTrustEvent
 from .promise_trust_state import PromiseTrustProjection, apply_promise_trust_plan
-from .relationship_promises import PROMISE_TRUST_POLICY_ID
+from .relationship_promises import PROMISE_TRUST_POLICY_ID, PromiseReviewReceipt, RelationshipPromise
 
 if TYPE_CHECKING:
     from .models import WorldState
@@ -96,6 +98,7 @@ def build_trusted_promise_settlement(
         evidence = PromiseBreachEvidence(
             **evidence_fields, outcome="breached", event_type=PROMISE_BREACHED_EVENT_V2,
             effective_tick=event.resolved_tick,
+            review_receipt=_applicable_breach_review(state, promise),
         )
     trust = plan_promise_trust_effect(
         promise, evidence, snapshot, schedule, command, promise_policy_id=promise.trust_policy_id,
@@ -110,6 +113,20 @@ def build_trusted_promise_settlement(
             )
         return PromiseItemReturnedWithTrustEvent(event_id=event.event_id, settlement=event, trust=trust)
     return PromiseDeadlineBreachedWithTrustEvent(event_id=event.event_id, settlement=event, trust=trust)
+
+
+def _applicable_breach_review(state: WorldState, promise: RelationshipPromise) -> PromiseReviewReceipt | None:
+    receipt = promise.review_receipt
+    if receipt is None or receipt.choice == "refuse":
+        return receipt
+    # A once-observed obstacle does not justify mitigation after it clears.
+    # The cutoff check does not extend the inclusive deadline or attempt a return.
+    actor = state.entities[promise.promisor_id]
+    visible = {promise.promisee_id} if entity_visible_to_actor(state, actor.id, promise.promisee_id) else set()
+    delivery, stock = assess_return_promise(state, actor, promise, visible_counterpart_ids=visible)
+    if actor.status == "active" and delivery == "recipient_available_here" and stock:
+        return None
+    return receipt
 
 
 def apply_trusted_promise_settlement(state: WorldState, event: TrustedSettlement) -> WorldState:

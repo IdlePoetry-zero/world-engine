@@ -156,6 +156,8 @@ def validate_promise_state(state: PromiseState) -> None:
                 schedules_by_id.setdefault(schedule_id, []).append(schedule)
 
         for promise in normalized:
+            if promise.review_receipt is not None and promise.review_receipt.at_tick > state.current_tick:
+                raise ValueError("A promise review cannot be recorded in the future.")
             promisor = state.entities.get(promise.promisor_id)
             promisee = state.entities.get(promise.promisee_id)
             _require_character_exists(promisor, "promisor")

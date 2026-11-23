@@ -84,6 +84,7 @@ async def invoke_npc_planning(operations, repository, scope, lease, job, decisio
         npc_planning_rejection=proposal.error_code,
         npc_planning_status=proposal.status, npc_plan=proposal.plan,
         npc_plan_state_hash=proposal.state_hash, npc_model_call_id=call_id,
+        promise_choice=getattr(proposal, "promise_choice", None),
     )
 
 

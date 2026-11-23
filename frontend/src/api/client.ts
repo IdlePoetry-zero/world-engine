@@ -180,6 +180,7 @@ export type OwnPromise = {
   text?: string
   status?: 'active' | 'fulfilled' | 'breached' | 'released' | string
   late_returned?: boolean
+  breach_assessment?: 'blocked' | 'refuse'
   can_return_late?: boolean
   created_tick?: string | number
   deadline_tick?: string | number

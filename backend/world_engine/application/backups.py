@@ -1444,6 +1444,8 @@ class BackupApplication:
                         raise BackupArchiveError("The genesis branch must start at state version zero.")
                     if checkpoint.institutional_credit_contracts:
                         raise BackupArchiveError("Institutional credit needs committed events after genesis.")
+                    if any(promise.review_receipt is not None for promise in checkpoint.relationship_promises):
+                        raise BackupArchiveError("Promise review receipts need committed events after genesis.")
                 else:
                     source_id, source_seq = _effective_archive_branch_point(
                         row_by_id, row.parent_branch_id, row.fork_seq
@@ -2504,6 +2506,8 @@ def _validate_and_replay(
                 raise BackupArchiveError("The genesis branch must start at state version zero.")
             if branch.initial_state.institutional_credit_contracts:
                 raise BackupArchiveError("Institutional credit needs committed events after genesis.")
+            if any(promise.review_receipt is not None for promise in branch.initial_state.relationship_promises):
+                raise BackupArchiveError("Promise review receipts need committed events after genesis.")
         else:
             source_id, source_seq = _effective_branch_point(by_id, branch.parent_branch_id, branch.fork_seq)
             source_point = point_hashes.get((source_id, source_seq))

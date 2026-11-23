@@ -34,7 +34,10 @@ from world_engine.domain.promise_trust_state import PromiseTrustProjection
 from world_engine.domain.reducers import state_hash
 from world_engine.domain.story_nodes import StoryReaction
 from world_engine.rules import RuleContext, RuleEngine
-from world_engine.rules.promise_actions import assess_return_promise, build_fulfill_return_promise_event
+from world_engine.domain.npc_commitments import review_return_commitment
+from world_engine.domain.promise_availability import assess_return_promise
+from world_engine.domain.relationship_promises import PromiseReviewChoice
+from world_engine.rules.promise_actions import build_fulfill_return_promise_event
 from world_engine.simulation.contracts import DecisionResponse, WorldAdvancePlan
 from world_engine.simulation.engine import SimulationEngine, SimulationPolicy
 from world_engine.storage.database import Database
@@ -862,6 +865,118 @@ def test_npc_executes_its_own_return_plan_and_story_replays(
         else:
             importer.import_verified_backup(scope, backup.validate_archive(archive))
         assert restored_repo.replay(scope, world, branch).state_hash == result.state_hash
+    finally:
+        restored_db.dispose()
+        db.dispose()
+
+
+
+@pytest.mark.parametrize(("has_stock", "choice", "expected_loss"), [(True, "refuse", "-8"), (False, "blocked", "-2")])
+def test_npc_breach_uses_only_an_evidence_bound_return_assessment(tmp_path, has_stock, choice, expected_loss):
+    state, promisor, promisee, source_account, *_ = _fixture_state()
+    player = uuid4()
+    original_stock = state.resources[source_account]
+    original_inventory = state.entities[promisor].components["inventory"]
+    entities = state.entities | {player: WorldEntity(id=player, kind="character", name="Bystander")}
+    resources = state.resources
+    if not has_stock:
+        actor = entities[promisor]
+        entities[promisor] = actor.model_copy(update={"components": {"inventory": {"lots": []}}})
+        resources = resources | {source_account: resources[source_account].model_copy(update={"balance": Decimal("0")})}
+    state = WorldState.model_validate(state.model_dump(mode="python") | {
+        "player_id": player,
+        "entities": entities, "resources": resources,
+        "metadata": state.metadata | {"npc_return_commitment_reviews_v1": True},
+    })
+    scope = AccessScope(tenant_id=uuid4(), user_id=uuid4())
+    db = Database(f"sqlite:///{(tmp_path / 'review-choice.db').as_posix()}")
+    db.create_schema()
+    restored_db = Database(f"sqlite:///{(tmp_path / 'review-choice-restored.db').as_posix()}")
+    restored_db.create_schema()
+    try:
+        repo = WorldRepository(db)
+        draft = NewWorld(title="Commitment decision evidence", state=state)
+        repo.create_world(scope, draft)
+        world, branch = draft.world_id, draft.branch_id
+        _commit_action(repo, scope, world, branch, promisor, "record_return_promise", {
+            "promisee_id": str(promisee), "resource_id": RESOURCE_ID, "quantity": "1",
+            "deadline_tick": 4, "private_text": "I will return one herb before closing.",
+        }, key="record-promise-for-review-choice")
+        before = repo.read_world(scope, world, branch)
+        promise, = before.state.relationship_promises
+        fork = repo.fork(scope, world, branch, before.last_seq, "Unresolved promise before assessment").branch_id
+        choice_data = PromiseReviewChoice(promise_id=promise.id, choice=choice)
+        assert review_return_commitment(before.state, promisor, choice_data) == promise
+        with pytest.raises(InvalidEvent, match="observed fulfillment conditions"):
+            review_return_commitment(before.state, promisor, PromiseReviewChoice(
+                promise_id=promise.id, choice="blocked" if has_stock else "refuse",
+            ))
+        with pytest.raises(InvalidEvent, match="own current commitment"):
+            review_return_commitment(before.state, promisee, choice_data)
+        jobs = SimulationJobs(repo)
+        job = jobs.enqueue_world_advance(scope, world, branch, WorldAdvancePlan(started_tick=0, target_tick=6),
+            idempotency_key="resolve-with-assessment", speed="balanced", depth="standard",
+            expected_state_version=before.branch.state_version)
+        lease = repo.claim_job("commitment-assessor")
+        assert lease and lease.job_id == job.job_id
+        for _ in range(14):
+            if repo.read_job(scope, job.job_id).status == "succeeded":
+                break
+            outcome = jobs.advance(scope, lease)
+            if not outcome.decision_requests:
+                continue
+            request, = outcome.decision_requests
+            current = repo.read_world(scope, world, branch)
+            jobs.advance(scope, lease, model_decision=DecisionResponse(
+                request_id=request.request_id, state_version=request.state_version, at_tick=request.at_tick,
+                source="policy", option_id="plan", npc_planning_status="defer", npc_plan_state_hash=current.state_hash,
+                promise_choice=choice_data if request.at_tick == 2 else None,
+            ))
+            if request.at_tick == 2:
+                assessed_state = repo.read_world(scope, world, branch).state
+                assessed = assessed_state.relationship_promises[0]
+                assert assessed.status == "active" and assessed.review_receipt.choice == choice
+                with pytest.raises(InvalidEvent, match="cannot seed promise reviews"):
+                    repo.validate_initial_world_state(assessed_state)
+                if not has_stock:
+                    actor = assessed_state.entities[promisor]
+                    restored_stock = WorldState.model_validate(assessed_state.model_dump(mode="python") | {
+                        "current_tick": assessed.deadline_tick + 1,
+                        "resources": assessed_state.resources | {source_account: original_stock},
+                        "entities": assessed_state.entities | {promisor: actor.model_copy(update={
+                            "components": actor.components | {"inventory": original_inventory},
+                        })},
+                    })
+                    deadline = next(row for row in restored_stock.scheduled_events if row.id == assessed.deadline_schedule_id)
+                    breach = RuleEngine().resolve_scheduled(
+                        restored_stock, deadline, _rule_context(current, scope.user_id, uuid4()),
+                    ).events[0]
+                    assert breach.trust.receipt.assessed_choice is None
+                    assert breach.trust.applied_delta == Decimal("-8")
+        assert repo.read_job(scope, job.job_id).status == "succeeded"
+        final = repo.read_world(scope, world, branch)
+        missed, = final.state.relationship_promises
+        projection, bond = _trust_for_pair(final.state, promisee, promisor, branch)
+        assert (missed.status, missed.resolved_tick) == ("breached", 5)
+        assert bond.trust == Decimal(expected_loss)
+        receipt = projection.receipts[missed.id]
+        assert receipt.assessed_choice == choice
+        assert missed.review_receipt.at_tick == 2
+        assert repo.read_world(scope, world, fork).state_hash == before.state_hash
+        assert repo.replay(scope, world, branch, from_genesis=True).state_hash == final.state_hash
+
+        projected = final.state.model_dump(mode="json")
+        issuer = project_player_state(projected, str(promisor))["own_promises"][0]
+        recipient = project_player_state(projected, str(promisee))["own_promises"][0]
+        assert issuer["breach_assessment"] == choice and "review_receipt" not in issuer
+        assert "breach_assessment" not in recipient and "review_receipt" not in recipient
+        assert not project_player_state(projected, str(player))["own_promises"]
+
+        backup = BackupApplication(repo)
+        restored_repo = WorldRepository(restored_db)
+        with backup.validate_archive_file_streaming(io.BytesIO(backup.export_world(scope, world))) as verified:
+            WorldBackupImporter(restored_repo).import_verified_backup(scope, verified)
+        assert restored_repo.replay(scope, world, branch).state_hash == final.state_hash
     finally:
         restored_db.dispose()
         db.dispose()
