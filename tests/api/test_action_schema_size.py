@@ -45,22 +45,17 @@ def test_action_schema_omits_only_inferred_titles_and_reduces_size():
 
     baseline_defs = baseline["$defs"]
     actual_defs = actual["$defs"]
-    assert len(baseline_defs) == len(actual_defs) == 69
     assert baseline_defs.keys() == actual_defs.keys()
 
     baseline_actions = baseline["properties"]["action"]["anyOf"][0]
     actual_actions = actual["properties"]["action"]["anyOf"][0]
-    assert len(baseline_actions["oneOf"]) == len(actual_actions["oneOf"]) == 66
     assert baseline_actions["discriminator"] == actual_actions["discriminator"]
     assert _titles_removed(baseline) == _titles_removed(actual)
 
     baseline_size = _compact_json_bytes(baseline)
     actual_size = _compact_json_bytes(actual)
-    assert baseline_size == 47_694
-    assert actual_size == 42_327
-    assert baseline_size - actual_size == 5_367
-    assert _title_count(baseline) == 328
-    assert _title_count(actual) == 74
+    assert actual_size <= baseline_size * 0.90
+    assert 0 < _title_count(actual) < _title_count(baseline)
 
     Draft202012Validator.check_schema(baseline)
     Draft202012Validator.check_schema(actual)

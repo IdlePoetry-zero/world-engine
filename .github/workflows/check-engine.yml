@@ -1,0 +1,48 @@
+name: Engine checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend (${{ matrix.suite }})
+    runs-on: windows-2025
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [Rules, SQLite]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: '0.13.8'
+          enable-cache: true
+          cache-dependency-glob: requirements.lock.txt
+      - run: |
+          uv python install 3.13.18 --install-dir .runtime/python --no-bin --no-registry
+          uv venv .runtime/venv313 --python .runtime/python/cpython-3.13.18-windows-x86_64-none/python.exe
+          uv pip install --python .runtime/venv313/Scripts/python.exe -r requirements.lock.txt -e .
+      - run: ./scripts/check-engine.ps1 -Suite ${{ matrix.suite }}
+
+  frontend:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.15.0'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build

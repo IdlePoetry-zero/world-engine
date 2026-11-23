@@ -26,6 +26,22 @@ npm --prefix frontend run build
 
 2026-11-15 首次切换运行时的回归为 51 项通过，有一条 Starlette TestClient 针对 httpx 的弃用提示。当前回归、真实供应商验证与干净安装记录见[验收证据](acceptance-matrix.md)。替身测试中的供应商故障由 MockTransport 注入。
 
+## 本地回归与持续集成
+
+在项目根目录运行以下命令。脚本会先显示 Python 和 SQLite 版本。测试用 SQLite 临时库，不需要启动网页或提供模型凭据。
+
+```powershell
+.\scripts\check-engine.ps1
+.\scripts\check-engine.ps1 -Suite Rules
+.\scripts\check-engine.ps1 -Suite SQLite
+```
+
+默认快速检查覆盖工资计划、路线到期、聊天请求和动作 schema。`Rules` 运行内容、领域与规则组。`SQLite` 运行 API、持久作业、权限、备份、分支回放、并发与模型适配器的自动化检查。Windows 工作流用锁定依赖运行两组完整后端测试，另用前端锁文件安装依赖、检查并构建前端。SQLite 的最低版本与应用启动检查一致，以纳入 WAL 修复。 [工作流定义](../../.github/workflows/check-engine.yml) · [SQLite 3.51.3 发布说明](https://sqlite.org/releaselog/3_51_3.html)
+
+本地 Python 3.13.18 和 SQLite 3.53.1 上，快速检查通过 70 项，规则组通过 1263 项。动作 schema 压缩回归核对去除推断标题前后的结构和校验结果，现有输出从 47,801 字节降到 42,415 字节。工作流已通过 actionlint，本地前端 lint 和生产构建通过，GitHub 托管运行待发布后验证。
+
+真实模型验收使用本地已配置的模型连接，按照单独的探针和实玩记录复核。长程容量和性能使用下文的隔离存档审计。两者的结果需要独立记录。 [供应商接入与验证](providers.md) · [验收矩阵](acceptance-matrix.md)
+
 ## 现有 Ollama 复用
 
 `scripts/start-local-model.py` 读取指定旧项目的可执行文件和模型清单，对所有引用的 blob 检查大小与 SHA-256，在新项目 `.runtime/ollama-models` 建立内容寻址 blob 的硬链接并复制清单。模型内容不修改、不重新下载；元数据、用户目录、临时文件和日志使用新项目目录。没有调用旧项目的启动脚本，也不修改其 PID 或日志。
