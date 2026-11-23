@@ -8,6 +8,7 @@ import './JourneyRoute.css'
 import type { Notice } from '../App'
 
 import { errorMessage, FOREGROUND_STATUS_POLL_INTERVAL_MS, jobReasonLabel } from '../utils'
+import { formatTick, formatWorldDuration, isValidCalendarLength } from '../worldTime'
 
 
 
@@ -1798,36 +1799,6 @@ function formatWorldRelativeTick(tick: bigint | null, daySeconds: number, yearDa
   return `世界第 ${formatTick(dayIndex + 1n)} 日 ${clock}（tick ${formatTick(tick)}）`
 }
 
-function formatWorldDuration(value: bigint, daySeconds: number, yearDays: number): string {
-  if (!isValidCalendarLength(daySeconds)) return `${formatTick(value)} tick`
-  const dayLength = BigInt(daySeconds)
-  const negative = value < 0n
-  let remaining = negative ? -value : value
-  const parts: string[] = []
-
-  if (isValidCalendarLength(yearDays)) {
-    const yearLength = dayLength * BigInt(yearDays)
-    const years = remaining / yearLength
-    remaining %= yearLength
-    if (years > 0n) parts.push(`${formatTick(years)} 年`)
-  }
-
-  const days = remaining / dayLength
-  remaining %= dayLength
-  if (days > 0n) parts.push(`${formatTick(days)} 日`)
-
-  const hours = remaining / 3_600n
-  remaining %= 3_600n
-  if (hours > 0n) parts.push(`${formatTick(hours)} 小时`)
-
-  const minutes = remaining / 60n
-  remaining %= 60n
-  if (minutes > 0n) parts.push(`${formatTick(minutes)} 分钟`)
-  if (remaining > 0n || parts.length === 0) parts.push(`${formatTick(remaining)} 秒`)
-
-  return `${negative ? '−' : ''}${parts.join(' ')}`
-}
-
 function formatSafeWorldDuration(seconds: number, daySeconds: number, yearDays: number): string {
   return Number.isSafeInteger(seconds) && seconds >= 0
     ? formatWorldDuration(BigInt(seconds), daySeconds, yearDays)
@@ -1838,10 +1809,6 @@ function formatTickDurationDetail(value: bigint | null, daySeconds: number, year
   if (value === null) return '未知'
   if (!isValidCalendarLength(daySeconds)) return `${formatTick(value)} tick`
   return `${formatWorldDuration(value, daySeconds, yearDays)}（${formatTick(value)} tick）`
-}
-
-function isValidCalendarLength(value: number): boolean {
-  return Number.isSafeInteger(value) && value > 0
 }
 
 function studySkillOptionLabel(skill: OwnStudySkill): string {
@@ -1894,10 +1861,6 @@ function formatWorldTick(value: string | null | undefined, daySeconds: number, y
   const tick = parseTick(value)
   if (tick !== null) return formatWorldRelativeTick(tick, daySeconds, yearDays)
   return value ? `无法精确读取世界时间（tick ${value}）` : '无法精确读取世界时间'
-}
-
-function formatTick(value: bigint | null): string {
-  return value === null ? '未知' : value.toLocaleString('zh-HK')
 }
 
 function formatExactInteger(value: string): string {

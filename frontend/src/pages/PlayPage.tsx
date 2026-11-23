@@ -17,6 +17,7 @@ import { SafeConductPanel } from '../components/SafeConductPanel'
 import { ShipmentReliefPanel } from '../components/ShipmentReliefPanel'
 import type { Notice, Page } from '../App'
 import { errorMessage, FOREGROUND_STATUS_POLL_INTERVAL_MS, jobReasonLabel } from '../utils'
+import { formatWorldDuration } from '../worldTime'
 
 const CombatTrucePanel = lazy(() => import('../components/CombatTrucePanel').then((module) => ({ default: module.CombatTrucePanel })))
 const CultivationBreakthroughPanel = lazy(() => import('../components/CultivationBreakthroughPanel').then((module) => ({ default: module.CultivationBreakthroughPanel })))
@@ -452,6 +453,11 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
                   {message.kind && <span>{messageKindLabel(message.kind)}</span>}
                   {message.worldEffect && <small className="message-world-effect">已写入世界</small>}
                   {message.elapsedTicks === '0' && <small className="message-no-time">时间未推进</small>}
+                  {message.elapsedTicks && /^[1-9]\d*$/.test(message.elapsedTicks) && (
+                    <small title={`${message.elapsedTicks} 世界秒`}>
+                      已推进 {formatWorldDuration(BigInt(message.elapsedTicks), view?.state.calendar?.day_seconds ?? 0, view?.state.calendar?.year_days ?? 0)}
+                    </small>
+                  )}
                   {message.delivery === 'pending' && <small>等待确认</small>}
                   {message.delivery === 'accepted' && <small>已提交</small>}
                   {message.delivery === 'failed' && <small>未送达</small>}

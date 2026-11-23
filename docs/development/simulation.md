@@ -64,6 +64,10 @@ The Nine Bridges Vale test uses a registered day-long road whose travel interval
 
 Leased travel saves a departure with the route, endpoints, departure tick and planned arrival tick. A pending journey remains in the branch event stream, with a single scheduled resolution, and the traveller has no local position while in transit. Subsequent windows settle ordinary background activities and scheduled events before the exact arrival or hazard tick. Recovery and forks retain the committed departure and schedule. A paused job may resume the same journey. Cancelling a job stops that job's advancement and the journey stays on the branch. An unavailable destination pauses its resolution for later handling. The atomic movement representation remains available for ordinary movement and replay of existing saves.
 
+聊天请求的普通移动若遇到 NPC 正在执行的限时行动，也进入同一旅行作业。有租约的集成检查分别覆盖出发时已有训练到期，以及训练在途中到期的情形。NPC 的技能结算记录自己的到期时刻，旅人按登记路程抵达。复发同一请求时继续使用原作业，创世回放需匹配存档摘要。测试使用确定性计划和结构化意图。 [旅行聊天测试](../../tests/api/test_travel_chat.py)
+
+对话回执显示已经提交的推进时长。它与长行动面板共用格式，按世界包的日长和年长显示时间，原始值以精确整数保留。
+
 The separation between a traveller's waiting process and other processes that may wake or interrupt it follows SimPy's discrete-event process model. [SimPy process interaction](https://simpy.readthedocs.io/en/latest/topical_guides/process_interaction.html)
 
 ## 聊天与面板的持续工作验收

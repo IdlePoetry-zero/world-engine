@@ -780,6 +780,7 @@ class RulesActionDispatcher:
             "scheduled_event_due", "scheduled_boundary_required",
             "lifespan_expiry_pending", "lifespan_boundary_required",
             "background_deprivation_pending", "background_boundary_required",
+            "npc_action_due", "npc_action_boundary",
         }:
             return enqueue_travel_for_move(
                 scope, view, request, action, self.simulation_jobs, self.engine,

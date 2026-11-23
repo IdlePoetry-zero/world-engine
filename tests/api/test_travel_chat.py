@@ -1,7 +1,7 @@
 import json
 from decimal import Decimal
 from types import SimpleNamespace
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 from jsonschema import Draft202012Validator
 import pytest
@@ -18,7 +18,7 @@ from world_engine.application.travel_chat import (
     travel_queue_reply,
 )
 from world_engine.application.worlds import WorldApplication
-from world_engine.domain.components import NeedsComponent, PlaceComponent, PlaceRoute
+from world_engine.domain.components import GoalRecord, NeedsComponent, PlaceComponent, PlaceRoute
 from world_engine.domain.models import (
     AccessScope,
     CommandEnvelope,
@@ -29,13 +29,16 @@ from world_engine.domain.models import (
     WorldEntity,
     WorldState,
 )
+from world_engine.domain.npc_plan_review import build_npc_plan_review_schedule
+from world_engine.domain.npc_plans import NPC_SHARED_TRAINING_POLICY, NpcPlan, NpcPlanStep
 from world_engine.domain.relationship_promises import (
     ReturnItemTerms,
     build_promise_deadline_schedule,
     create_return_promise,
 )
 from world_engine.rules import ACTION_INTENT_ADAPTER, MoveIntent, RuleContext, RuleEngine
-from world_engine.simulation import LongActionPlan
+from world_engine.simulation import LongActionPlan, WorldAdvancePlan
+from world_engine.simulation.contracts import DecisionResponse
 from world_engine.storage.database import Database
 from world_engine.storage.repository import WorldRepository
 
@@ -57,6 +60,7 @@ def _create_world(
     promise_boundary=False,
     water_stock: str | None = None,
     water_value: int = 10,
+    npc_training: bool = False,
 ):
     actor_id, origin_id, destination_id = _id(1), _id(2), _id(3)
     routes = [
@@ -153,11 +157,26 @@ def _create_world(
         scheduled_events=schedules,
         metadata={"resource_roles": {"water_resource_id": "core.water"}} if water_stock is not None else {},
     )
+    draft = NewWorld(title="Travel chat", state=state)
+    if npc_training:
+        learner_id, goal_id = _id(11), _id(12)
+        learner = WorldEntity(
+            id=learner_id, kind="person", status="active", location_id=origin_id,
+            components={"skills": {"skills": {"skill.local_knowledge": {"level": "1"}}}},
+        )
+        state = WorldState.model_validate(state.model_dump(mode="python") | {
+            "entities": state.entities | {learner_id: learner},
+            "goals": [GoalRecord(id=goal_id, owner_id=learner_id, title="Study local history")],
+            "metadata": state.metadata | {NPC_SHARED_TRAINING_POLICY: True},
+        })
+        review = build_npc_plan_review_schedule(state, draft.world_id, learner_id, 0)
+        state = state.model_copy(update={"scheduled_events": [*state.scheduled_events, review]})
+        draft = draft.model_copy(update={"state": state})
     database = Database(f"sqlite:///{(tmp_path / 'travel-chat.db').as_posix()}")
     database.create_schema()
     repository = WorldRepository(database)
     scope = AccessScope(tenant_id=uuid4(), user_id=uuid4())
-    created = repository.create_world(scope, NewWorld(title="Travel chat", state=state))
+    created = repository.create_world(scope, draft)
     return database, repository, scope, created, {
         "actor": actor_id,
         "origin": origin_id,
@@ -259,6 +278,79 @@ def _request(created, actor_id, *, request_id=None):
         mode="action",
         text="现在沿路线前往目的地。",
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("start_tick", [0, 10])
+async def test_chat_travel_settles_npc_training_at_its_own_boundary(tmp_path, start_tick):
+    database, repo, scope, created, ids = _create_world(tmp_path, npc_training=True)
+    try:
+        actor, world, branch = ids["actor"], created.world.world_id, created.branch.branch_id
+        learner_id, goal_id = _id(11), _id(12)
+        skill_id, due_tick = "skill.local_knowledge", 10
+        jobs = SimulationJobs(repo)
+        setup = jobs.enqueue_world_advance(
+            scope, world, branch, WorldAdvancePlan(started_tick=0, target_tick=due_tick),
+            idempotency_key="start-npc-training", speed="balanced", depth="standard",
+        )
+        lease = repo.claim_job("npc-training-setup")
+        assert lease and lease.job_id == setup.job_id
+        pending, = jobs.advance(scope, lease).decision_requests
+        snapshot = repo.read_world(scope, world, branch)
+        plan = NpcPlan(
+            plan_id=uuid5(pending.request_id, f"npc.plan.v1:{learner_id}:{pending.state_version}"),
+            actor_id=learner_id, goal_ids=[goal_id], revision=1, status="ready", created_tick=0, updated_tick=0,
+            next_review_tick=0, current_step=0, steps=[NpcPlanStep(capability_id="world.action.train.v1", arguments={
+                "skill_id": skill_id, "duration_ticks": due_tick,
+            })], reason="Practice local history",
+        )
+        jobs.advance(scope, lease, model_decision=DecisionResponse(
+            request_id=pending.request_id, state_version=pending.state_version, at_tick=0,
+            source="policy", option_id="plan", npc_planning_status="ready", npc_plan=plan,
+            npc_plan_state_hash=snapshot.state_hash,
+        ))
+        jobs.advance(scope, lease)
+        if start_tick == due_tick:
+            assert jobs.advance(scope, lease).next_tick == due_tick
+        repo.control_job(scope, setup.job_id, "cancel")
+        before = repo.read_world(scope, world, branch)
+        assert before.state.current_tick == start_tick and before.state.npc_plans[0].active_execution is not None
+
+        class Models:
+            async def generate(self, scope, request):
+                assert request.role_task == RoleTask.INTENT
+                return SimpleNamespace(normalized_output={
+                    "action": {"kind": "move", "destination_id": str(ids["destination"])}, "clarification": "",
+                })
+
+        models = Models()
+        rules = RuleEngine()
+        actions = RulesActionDispatcher(repo, models, rules, ACTION_INTENT_ADAPTER, RuleContext)
+        chat = ConversationApplication(WorldApplication(repo, None), models,
+                                       ConversationStore(OperationsStore(tmp_path / "ops.db")), actions=actions)
+        message = _request(before, actor)
+        reply = await chat.send(scope, message)
+        assert not reply["world_effect"]
+        assert repo.read_world(scope, world, branch).state_hash == before.state_hash
+        job_id = UUID(reply["job_id"])
+        lease = repo.claim_job("travel-during-training")
+        assert lease and lease.job_id == job_id
+        for _ in range(12):
+            jobs.advance(scope, lease)
+            job = repo.read_job(scope, job_id)
+            if job.status != JobStatus.RUNNING:
+                break
+        assert job.status == JobStatus.SUCCEEDED, job.result
+        after = repo.read_world(scope, world, branch)
+        assert after.state.current_tick == start_tick + 20
+        assert after.state.entities[actor].location_id == ids["destination"]
+        learner = after.state.entities[learner_id]
+        assert learner.components["skills"]["skills"][skill_id]["last_practiced_tick"] == due_tick
+        assert after.state.npc_plans[0].status == "completed"
+        assert await chat.send(scope, message) == reply
+        assert repo.replay(scope, world, branch, from_genesis=True).state_hash == after.state_hash
+    finally:
+        database.dispose()
 
 
 @pytest.mark.asyncio
