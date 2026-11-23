@@ -3167,6 +3167,8 @@ def _story_resolution_updates(
     updates: dict[str, object] = {
         "story_milestones": [*state.story_milestones, milestone], "scheduled_events": schedules,
     }
+    if event.delivered_knowledge:
+        updates["knowledge"] = [*state.knowledge, *event.delivered_knowledge]
     if not milestone.arrival_actor_ids:
         return updates
     new_ids = set(milestone.arrival_actor_ids)

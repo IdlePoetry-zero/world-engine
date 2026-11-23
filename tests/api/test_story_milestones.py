@@ -13,6 +13,7 @@ from world_engine.application.conversation import ConversationApplication, Conve
 from world_engine.application.operations import OperationsStore
 from world_engine.application.world_packs import WorldPackManifest, load_world_pack, write_world_pack
 from world_engine.application.simulation_jobs import SimulationJobs
+from world_engine.application.visibility import project_player_state
 from world_engine.content.distant_station_story import _id as station_id
 from world_engine.content.distant_station_story import build_archive as build_station_archive
 from world_engine.content.gensokyo_reference import build_archive
@@ -28,7 +29,9 @@ from world_engine.domain.npc_plans import NpcPlan, NpcPlanStep
 from world_engine.domain.reducers import apply_event, ledger_postings
 from world_engine.simulation.contracts import DecisionResponse
 from world_engine.domain.story_nodes import (
-    STORY_NODE_HANDLER, STORY_NODE_VERSION, StoryNode, StoryMilestoneResolvedEvent, settle_story_milestone,
+    MAX_STORY_DEPTH, MAX_STORY_FANOUT, MAX_TRACED_STORY_NODES, STORY_NODE_HANDLER, STORY_NODE_VERSION,
+    StoryNode, StoryMilestoneResolvedEvent,
+    settle_story_milestone, story_dispatch_knowledge_id,
 )
 from world_engine.runtime import build_application, local_identity
 from world_engine.rules import RuleContext, RuleEngine
@@ -474,6 +477,146 @@ def test_imported_challenge_rules_change_outcomes_without_engine_changes(tmp_pat
             assert receipt.payload.get("fee") is None
             assert repository.replay(scope, world_id, branch, from_genesis=True).state_hash == final.state_hash
 
+
+def _station_dispatch_template():
+    template = load_world_pack(build_station_archive()).template
+    opening = next(row for row in template["story_openings"] if row["opening_id"] == "arrival")
+    scenario = opening["scenario"]
+    landing, shelter, operator = map(station_id, ("landing", "shelter", "operator"))
+    recipient, outsider, dispatch_id = map(station_id, ("dispatcher", "visitor", "dispatch:reserve-ready"))
+    scenario["entities"].update({str(actor_id): WorldEntity(
+        id=actor_id, name=name, kind="character", status="active", location_id=landing,
+    ).model_dump(mode="json") for actor_id, name in ((recipient, "接驳台调度员"), (outsider, "临时候车人"))})
+    private_nodes = {str(station_id("shelter-supply")), str(station_id("supply-report"))}
+    for reaction in scenario["story_reactions"]:
+        if reaction["reaction_id"] in private_nodes:
+            reaction["node"]["visibility"] = "author_only"
+    scenario["story_followups"].append({
+        "followup_id": str(dispatch_id), "after_id": str(station_id("supply-report")), "after_outcome": "ready",
+        "delay_ticks": 40, "dispatch": {
+            "from_place_id": str(shelter), "to_place_id": str(landing),
+            "recipient_ids": [str(recipient), str(operator)], "message": "调度回执：避护区已收到三块备用电池。",
+        },
+        "node": {"title": "受限的备件回执", "visibility": "author_only",
+                 "fallback": {"key": "delivery-window", "effect": "occurred", "summary": "接驳台收件窗口结束。"}},
+    })
+    scenario["story_reactions"].append({
+        "reaction_id": str(station_id("dispatch:acknowledged")),
+        "when": [{"kind": "knowledge", "actor_id": str(recipient),
+                  "record_id": str(story_dispatch_knowledge_id(dispatch_id, recipient))}],
+        "node": {"title": "调度员登记回执", "visibility": "author_only",
+                 "fallback": {"key": "acknowledged", "effect": "occurred", "summary": "接驳台完成签收登记。"}},
+    })
+    return {"story_openings": [opening]}
+
+
+def test_private_cross_place_dispatch_uses_committed_source_and_recipient_location(tmp_path):
+    app = build_application(data_directory=tmp_path, run_simulation_worker=False)
+    repo = app.state.worlds.repository
+    scope = local_identity(tmp_path)
+    jobs = SimulationJobs(repo)
+    recipient, outsider, operator = map(station_id, ("dispatcher", "visitor", "operator"))
+    supply_id, report_id, dispatch_id, ack_id = map(station_id, (
+        "shelter-supply", "supply-report", "dispatch:reserve-ready", "dispatch:acknowledged",
+    ))
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        client.get("/api/v1/session").raise_for_status()
+        for deliver in (True, False):
+            template = _station_dispatch_template()
+            if not deliver:
+                scenario = template["story_openings"][0]["scenario"]
+                report = next(row for row in scenario["story_reactions"] if row["reaction_id"] == str(report_id))
+                report["node"]["variants"] = [{
+                    "when": report["when"],
+                    "outcome": {"key": "held", "effect": "occurred", "summary": "值守员继续核对，暂缓发报。"},
+                }]
+            zip_data = write_world_pack(manifest=WorldPackManifest(
+                pack_id="test.station-dispatch", title="远岬站调度演练", version="1.0.0" if deliver else "1.1.0",
+            ), template=template)
+            upload = {"Content-Type": "application/zip", "Origin": "http://127.0.0.1:8000"}
+            preview = client.post("/api/v1/packs/import/preview", content=zip_data, headers=upload).raise_for_status().json()
+            imported = client.post("/api/v1/packs/import", content=zip_data, headers=upload | {
+                "Idempotency-Key": str(uuid4()), "X-World-Pack-Sha256": preview["archive_sha256"],
+                "X-Story-Opening": "arrival",
+            }).raise_for_status().json()
+            world, branch = map(UUID, (imported["world_id"], imported["active_branch_id"]))
+            route = station_id(f"route:{station_id('landing')}")
+            _run_http_job(client, repo, jobs, scope, world, branch, "long-actions", 60, activity="travel", route_id=str(route))
+            source = repo.read_world(scope, world, branch)
+            supply, report = source.state.story_milestones[:2]
+            assert (supply.schedule_id, report.schedule_id) == (supply_id, report_id)
+            assert (supply.resolved_tick, report.resolved_tick) == (60, 60)
+            assert source.state.resources[station_id("main-stock")].balance == 0
+            assert source.state.resources[station_id("shelter-reserve")].balance == 3
+            assert not build_agent_knowledge(source.state, recipient).known_records
+            assert not project_player_state(source.state.model_dump(mode="json"), str(recipient)).get("story_milestones")
+            _run_http_job(client, repo, jobs, scope, world, branch, "world-advance", 39)
+            before = repo.read_world(scope, world, branch)
+            assert before.state.current_tick == 99 and not build_agent_knowledge(before.state, recipient).known_records
+            undelivered = repo.fork(scope, world, branch, before.last_seq, "调度回执尚未抵达") if deliver else None
+            _run_http_job(client, repo, jobs, scope, world, branch, "world-advance", 1)
+            final = repo.read_world(scope, world, branch)
+            events = {row.event_id: row for row in repo.list_events(scope, world, branch).events}
+            assert events[report.settlement_event_id].payload["trigger_event_ids"] == [str(supply.settlement_event_id)]
+            if deliver:
+                by_node = {row.schedule_id: row for row in final.state.story_milestones}
+                delivery, ack = by_node[dispatch_id], by_node[ack_id]
+                assert delivery.resolved_tick == ack.resolved_tick == 100
+                knowledge, = build_agent_knowledge(final.state, recipient).known_records
+                assert knowledge.received_tick == 100 and knowledge.source_event_id == report.settlement_event_id
+                assert knowledge.source_refs == [report.settlement_event_id, delivery.settlement_event_id]
+                assert events[delivery.settlement_event_id].payload["trigger_event_ids"] == [str(report.settlement_event_id)]
+                assert events[ack.settlement_event_id].payload["trigger_event_ids"] == [str(delivery.settlement_event_id)]
+                held, = project_player_state(final.state.model_dump(mode="json"), str(recipient))["knowledge"]
+                assert str(knowledge.id) == held["id"]
+                assert undelivered is not None
+                alternate = repo.read_world(scope, world, undelivered.branch_id)
+                assert not build_agent_knowledge(alternate.state, recipient).known_records
+                backups = BackupApplication(repo)
+                restored_db = Database(f"sqlite:///{(tmp_path / 'dispatch-restored.db').as_posix()}")
+                restored_db.create_schema()
+                try:
+                    restored = WorldRepository(restored_db)
+                    with backups.validate_archive(backups.export_world(scope, world)) as backup:
+                        WorldBackupImporter(restored).import_verified_backup(scope, backup)
+                    assert restored.replay(scope, world, branch, from_genesis=True).state_hash == final.state_hash
+                    assert restored.replay(scope, world, undelivered.branch_id, from_genesis=True).state_hash == alternate.state_hash
+                finally:
+                    restored_db.dispose()
+            else:
+                assert not any(row.schedule_id in {dispatch_id, ack_id} for row in final.state.story_milestones)
+                assert not build_agent_knowledge(final.state, recipient).known_records
+            for other in (outsider, operator):
+                assert not build_agent_knowledge(final.state, other).known_records
+                assert not project_player_state(final.state.model_dump(mode="json"), str(other))["knowledge"]
+            assert repo.replay(scope, world, branch, from_genesis=True).state_hash == final.state_hash
+
+
+
+@pytest.mark.parametrize("limit", ["fan-out", "depth", "node", "cycle"])
+def test_story_dispatch_graph_rejects_unbounded_or_circular_dependencies(limit):
+    scenario = _station_dispatch_template()["story_openings"][0]["scenario"]
+    report, ack = map(station_id, ("supply-report", "dispatch:acknowledged"))
+    if limit == "cycle":
+        producer = next(row for row in scenario["story_reactions"] if row["reaction_id"] == str(report))
+        producer["when"].append({"kind": "prior_outcome", "schedule_id": str(ack), "outcome": "acknowledged"})
+    else:
+        previous, outcome = report, "ready"
+        count = {"fan-out": MAX_STORY_FANOUT, "depth": MAX_STORY_DEPTH, "node": MAX_TRACED_STORY_NODES - 5}[limit]
+        for _ in range(count):
+            reaction_id = uuid4()
+            when = (scenario["story_reactions"][0]["when"] if limit == "node" else [
+                {"kind": "prior_outcome", "schedule_id": str(previous), "outcome": outcome},
+            ])
+            scenario["story_reactions"].append({
+                "reaction_id": str(reaction_id), "when": when,
+                "node": {"title": "Dependency boundary", "visibility": "author_only",
+                         "fallback": {"key": "receipt", "effect": "occurred", "summary": "Dependency verified."}},
+            })
+            if limit == "depth":
+                previous, outcome = reaction_id, "receipt"
+    with pytest.raises(ValueError, match=limit):
+        WorldState.model_validate(scenario)
 
 
 def test_staged_npc_is_targetable_only_after_arrival_and_dialogue_branches_the_story(tmp_path):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable
 from decimal import Decimal, localcontext
 from graphlib import CycleError, TopologicalSorter
@@ -10,7 +11,10 @@ from uuid import UUID, uuid4, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, StringConstraints, model_validator
 
-from .components import ExactDecimal, GoalCondition, ResourceName, ScheduledEventRecord, SignedRelationValue, SkillsComponent, Tick
+from .components import (
+    ExactDecimal, GoalCondition, KnowledgeRecord, ProvenanceReference, ResourceName,
+    ScheduledEventRecord, SignedRelationValue, SkillsComponent, Tick, VisibilityScope,
+)
 from .errors import InvalidEvent
 from .contests import contest_score
 from .json_types import JsonObject
@@ -25,6 +29,9 @@ STORY_NODE_HANDLER = "story.milestone"
 STORY_NODE_VERSION = "1.0.0"
 STORY_NODE_RESOLVED = "core.story_milestone_resolved.v1"
 STORY_OPENING_METADATA = "world_pack_story_opening_id"
+MAX_TRACED_STORY_NODES = 128
+MAX_STORY_DEPTH = 16
+MAX_STORY_FANOUT = 8
 
 _Key = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_.-]{0,79}$")]
 _Summary = Annotated[str, StringConstraints(min_length=1, max_length=600)]
@@ -156,6 +163,22 @@ class StoryReaction(_StoryModel):
     node: StoryNode
 
 
+class StoryDispatch(_StoryModel):
+    """An author's preapproved bulletin to a finite roster at another place."""
+
+    version: Literal["1.0.0"] = "1.0.0"
+    from_place_id: UUID
+    to_place_id: UUID
+    recipient_ids: tuple[UUID, ...] = Field(min_length=1, max_length=8)
+    message: _Summary
+
+    @model_validator(mode="after")
+    def validate_route_and_roster(self) -> StoryDispatch:
+        if self.from_place_id == self.to_place_id or len(set(self.recipient_ids)) != len(self.recipient_ids):
+            raise ValueError("Story dispatches require distinct places and unique recipients.")
+        return self
+
+
 class StoryFollowup(_StoryModel):
     followup_id: UUID
     after_id: UUID
@@ -163,6 +186,13 @@ class StoryFollowup(_StoryModel):
     delay_ticks: Annotated[int, Field(strict=True, gt=0, le=2**63 - 1)]
     priority: Annotated[int, Field(strict=True, ge=-100, le=100)] = 0
     node: StoryNode
+    dispatch: StoryDispatch | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @model_validator(mode="after")
+    def dispatch_requires_confirmed_outcome(self) -> StoryFollowup:
+        if self.dispatch is not None and (self.after_outcome is None or self.node.visibility != "author_only"):
+            raise ValueError("A dispatch requires a specific confirmed outcome and an author-only delivery node.")
+        return self
 
     def schedule_after(self, parent: StoryMilestone | None) -> ScheduledEventRecord | None:
         if parent is None or (self.after_outcome is not None and parent.outcome != self.after_outcome):
@@ -180,6 +210,7 @@ class StoryMilestone(_StoryModel):
     resolved_tick: Tick
     outcome: _Key
     arrival_actor_ids: tuple[UUID, ...] = Field(default=(), max_length=256, exclude_if=lambda ids: not ids)
+    settlement_event_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class StoryMilestoneResolvedEvent(_StoryModel):
@@ -188,6 +219,8 @@ class StoryMilestoneResolvedEvent(_StoryModel):
     milestone: StoryMilestone
     arrival_world_id: UUID | None = Field(default=None, exclude_if=lambda ident: ident is None)
     transfer: StoryTransfer | None = Field(default=None, exclude_if=lambda value: value is None)
+    trigger_event_ids: tuple[UUID, ...] = Field(default=(), max_length=25, exclude_if=lambda ids: not ids)
+    delivered_knowledge: tuple[KnowledgeRecord, ...] = Field(default=(), max_length=8, exclude_if=lambda rows: not rows)
     visibility: JsonObject = Field(default_factory=lambda: {"policy": "author_only"})
 
 
@@ -272,8 +305,32 @@ def _arrival_matches(arrival: StoryArrival, ident: UUID, outcome: str) -> bool:
     return arrival.trigger_id == ident and (arrival.outcome is None or arrival.outcome == outcome)
 
 
+def story_dispatch_knowledge_id(followup_id: UUID, recipient_id: UUID) -> UUID:
+    return uuid5(followup_id, f"story.dispatch:{recipient_id}")
+
+
+def _dispatch_knowledge(state: WorldState, followup: StoryFollowup, parent: StoryMilestone, event_id: UUID) -> tuple[KnowledgeRecord, ...]:
+    dispatch = followup.dispatch
+    assert dispatch is not None and parent.settlement_event_id is not None
+    if any(state.entities[place].status != "active" for place in (dispatch.from_place_id, dispatch.to_place_id)):
+        return ()
+    return tuple(
+        KnowledgeRecord(
+            id=story_dispatch_knowledge_id(followup.followup_id, recipient_id), holder_id=recipient_id,
+            claim=dispatch.message, kind="claim", received_tick=state.current_tick, valid_from_tick=state.current_tick,
+            source_event_id=parent.settlement_event_id, source_refs=[parent.settlement_event_id, event_id],
+            provenance=[ProvenanceReference(kind="event", reference_id=str(parent.settlement_event_id))],
+            visibility=VisibilityScope(policy="subject_ids", subject_ids=[recipient_id]),
+        )
+        for recipient_id in dispatch.recipient_ids
+        if (recipient := state.entities.get(recipient_id)) is not None and recipient.status == "active"
+        and recipient.location_id == dispatch.to_place_id
+    )
+
+
 def _resolved_story_event(
     state: WorldState, ident: UUID, node: StoryNode, event_id: UUID, *, world_id: UUID | None,
+    activation_gates: tuple[StoryGate, ...] = (),
 ) -> StoryMilestoneResolvedEvent:
     outcome = story_outcome(state, node)
     arrivals = [
@@ -284,10 +341,37 @@ def _resolved_story_event(
     requires_review = any(arrival.review_delay_ticks is not None for arrival in arrivals)
     if requires_review and world_id is None:
         raise InvalidEvent("A story arrival with an NPC review must identify its world.")
+    trace = any(followup.dispatch is not None for followup in state.story_followups)
+    trigger_event_ids = ()
+    knowledge = ()
+    if trace:
+        followup = next((row for row in state.story_followups if row.followup_id == ident), None)
+        parent_id = followup.after_id if followup is not None else None
+        outcome_gates = next((variant.when for variant in node.variants if variant.outcome.key == outcome.key), ())
+        preceding_ids = {gate.schedule_id for gate in (*activation_gates, *outcome_gates)
+                         if isinstance(gate, StoryPriorOutcomeGate)}
+        known_story_events = {record.settlement_event_id for record in state.story_milestones if record.settlement_event_id}
+        cited_knowledge = {gate.record_id for gate in (*activation_gates, *outcome_gates)
+                           if isinstance(gate, StoryKnowledgeGate)}
+        evidence = {record.source_refs[-1] for record in state.knowledge if record.id in cited_knowledge
+                    and record.source_refs and record.source_refs[-1] in known_story_events}
+        trigger_event_ids = tuple(
+            record.settlement_event_id for record in state.story_milestones
+            if record.settlement_event_id is not None and (
+                record.schedule_id == parent_id or record.schedule_id in preceding_ids or record.settlement_event_id in evidence
+            )
+        )
+        if followup is not None and followup.dispatch is not None:
+            parent = next((record for record in state.story_milestones if record.schedule_id == parent_id), None)
+            if parent is None or parent.settlement_event_id is None or parent.outcome != followup.after_outcome:
+                raise InvalidEvent("A dispatch must cite its committed source outcome.")
+            knowledge = _dispatch_knowledge(state, followup, parent, event_id)
     return StoryMilestoneResolvedEvent(
         event_id=event_id, transfer=outcome.transfer, arrival_world_id=world_id if requires_review else None,
+        trigger_event_ids=trigger_event_ids, delivered_knowledge=knowledge,
         milestone=StoryMilestone(schedule_id=ident, resolved_tick=state.current_tick, outcome=outcome.key,
-                                 arrival_actor_ids=tuple(arrival.actor.id for arrival in arrivals)),
+                                 arrival_actor_ids=tuple(arrival.actor.id for arrival in arrivals),
+                                 settlement_event_id=event_id if trace else None),
     )
 
 
@@ -314,7 +398,8 @@ def story_reaction_event_id(command_id: UUID, reaction_id: UUID) -> UUID:
 def settle_story_reaction(
     state: WorldState, reaction: StoryReaction, event_id: UUID, *, world_id: UUID | None = None,
 ) -> StoryMilestoneResolvedEvent:
-    return _resolved_story_event(state, reaction.reaction_id, reaction.node, event_id, world_id=world_id)
+    return _resolved_story_event(state, reaction.reaction_id, reaction.node, event_id, world_id=world_id,
+                                 activation_gates=reaction.when)
 
 
 def validate_story_arrival_world(events: Iterable[object], world_id: UUID) -> None:
@@ -350,6 +435,13 @@ def validate_story_state(state: WorldState) -> None:
         raise ValueError("Completed story schedules must have exactly one milestone receipt.")
     if any(schedule.status == "queued" and schedule.due_tick < state.current_tick for schedule in schedules.values()):
         raise ValueError("A queued story milestone cannot precede the world clock.")
+    traced = any(followup.dispatch is not None for followup in followups.values())
+    if traced:
+        if len(nodes) > MAX_TRACED_STORY_NODES:
+            raise ValueError("A story with dispatches exceeds the node budget.")
+        settlement_ids = {record.settlement_event_id for record in records.values()}
+        if None in settlement_ids or len(settlement_ids) != len(records):
+            raise ValueError("Traced story milestones require distinct settlement event IDs.")
     for key, record in records.items():
         if ((key in schedules and record.resolved_tick != schedules[key].due_tick) or record.resolved_tick > state.current_tick
                 or record.outcome not in allowed_outcomes[key]):
@@ -404,7 +496,8 @@ def validate_story_state(state: WorldState) -> None:
                    for reference in (condition.subject_id, condition.target_id)):
                 raise ValueError("An arrival goal must reference an existing entity, its actor, or another goal for that actor.")
             goal_ids.add(goal.id)
-    dependencies = TopologicalSorter()
+    parents: dict[UUID, set[UUID]] = {key: set() for key in nodes}
+    dispatch_knowledge: dict[UUID, tuple[StoryFollowup, UUID]] = {}
     challenge_ids = {challenge.challenge_id for challenge in state.challenges}
     contest_ids = {contest.definition_id for contest in state.contest_definitions}
     all_schedules = {schedule.id: schedule for schedule in state.scheduled_events}
@@ -413,7 +506,17 @@ def validate_story_state(state: WorldState) -> None:
             followup.after_outcome is not None and followup.after_outcome not in allowed_outcomes[followup.after_id]
         ):
             raise ValueError("A story follow-up must reference an existing milestone or outcome.")
-        dependencies.add(key, followup.after_id)
+        parents[key].add(followup.after_id)
+        dispatch = followup.dispatch
+        if dispatch is not None:
+            if any((place := state.entities.get(ident)) is None or place.kind not in {"place", "location"}
+                   for ident in (dispatch.from_place_id, dispatch.to_place_id)) or any(
+                (actor := known_entities.get(ident)) is None or actor.kind not in {"character", "person"}
+                for ident in dispatch.recipient_ids
+            ):
+                raise ValueError("A dispatch must reference registered places and character recipients.")
+            for recipient_id in dispatch.recipient_ids:
+                dispatch_knowledge[story_dispatch_knowledge_id(key, recipient_id)] = (followup, recipient_id)
         scheduled = all_schedules.get(key)
         expected = followup.schedule_after(records.get(followup.after_id))
         if scheduled is not None and scheduled.status == "completed":
@@ -429,6 +532,11 @@ def validate_story_state(state: WorldState) -> None:
         if key in reactions:
             gates.extend(reactions[key].when)
         for gate in gates:
+            if isinstance(gate, StoryKnowledgeGate) and gate.record_id in dispatch_knowledge:
+                producer, recipient_id = dispatch_knowledge[gate.record_id]
+                if gate.actor_id != recipient_id:
+                    raise ValueError("A dispatch knowledge gate must name its authorized recipient.")
+                parents[key].add(producer.followup_id)
             if isinstance(gate, StoryChallengeGate) and gate.challenge_id not in challenge_ids:
                 raise ValueError("Story gates may only reference a registered challenge.")
             if isinstance(gate, StoryContestGate) and gate.definition_id not in contest_ids:
@@ -448,12 +556,39 @@ def validate_story_state(state: WorldState) -> None:
                 and schedules[prior].due_tick >= schedules[key].due_tick
             ):
                 raise ValueError("Story prerequisites must reference an earlier valid outcome.")
-            dependencies.add(key, prior)
+            parents[key].add(prior)
         for variant in node.variants:
             transfer = variant.outcome.transfer
             if transfer is not None and not _transfer_accounts_match(state, transfer):
                 raise ValueError("Story transfers must reference holder accounts for the same resource.")
+    for knowledge in state.knowledge if dispatch_knowledge else ():
+        link = dispatch_knowledge.get(knowledge.id)
+        if link is None:
+            continue
+        followup, recipient_id = link
+        delivery = records.get(followup.followup_id)
+        source = records.get(followup.after_id)
+        if delivery is None or source is None or (
+            knowledge.holder_id != recipient_id or knowledge.owner_id is not None
+            or knowledge.visibility != VisibilityScope(policy="subject_ids", subject_ids=[recipient_id])
+            or knowledge.received_tick != delivery.resolved_tick or knowledge.valid_from_tick != delivery.resolved_tick
+            or knowledge.source_refs != [source.settlement_event_id, delivery.settlement_event_id]
+            or knowledge.source_event_id != source.settlement_event_id
+            or knowledge.claim != followup.dispatch.message or knowledge.kind != "claim"
+        ):
+            raise ValueError("Dispatch knowledge requires a matching private delivery receipt and committed source.")
     try:
-        dependencies.prepare()
+        dependencies = TopologicalSorter(parents)
+        if not traced:
+            dependencies.prepare()
+            return
+        fanout = Counter(parent_id for edges in parents.values() for parent_id in edges)
+        if any(count > MAX_STORY_FANOUT for count in fanout.values()):
+            raise ValueError("A story dependency exceeds the fan-out budget.")
+        depths: dict[UUID, int] = {}
+        for key in dependencies.static_order():
+            depths[key] = 1 + max((depths[parent] for parent in parents[key]), default=0)
+            if depths[key] > MAX_STORY_DEPTH:
+                raise ValueError("A story dependency exceeds the depth budget.")
     except CycleError as error:
         raise ValueError("Story prerequisites cannot form a cycle.") from error
