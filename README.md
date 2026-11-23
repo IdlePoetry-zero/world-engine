@@ -2,6 +2,8 @@
 
 设计基线为 1.0。当前版本可在本机启动并试玩。完整验收进度见 [需求与验收证据](docs/development/acceptance-matrix.md)。
 
+时间推进、跨地点剧情与世界包复用的复现步骤见 [改造验收记录](docs/development/engine-improvement-acceptance.md)。
+
 产品面向个人本地使用，以自然语言与 GM 沟通，支持多背景设定、自定义关键 NPC、完整 RPG 玩法和长期社会模拟。账号、多人协调及媒体扩展保留明确接口。所有玩法均在本次交付范围内，实施顺序不等于功能删减。
 
 ## 本地启动
