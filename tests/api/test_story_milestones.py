@@ -11,7 +11,7 @@ from world_engine.application.actions import RulesActionDispatcher
 from world_engine.application.backups import BackupApplication
 from world_engine.application.conversation import ConversationApplication, ConversationStore
 from world_engine.application.operations import OperationsStore
-from world_engine.application.world_packs import WorldPackManifest, write_world_pack
+from world_engine.application.world_packs import WorldPackManifest, load_world_pack, write_world_pack
 from world_engine.application.simulation_jobs import SimulationJobs
 from world_engine.content.distant_station_story import _id as station_id
 from world_engine.content.distant_station_story import build_archive as build_station_archive
@@ -412,6 +412,67 @@ def test_each_discipline_uses_the_same_growth_and_challenge_contract(discipline)
         state = apply_event(state, event)
     qualified = settle_challenge(state, challenge, actor, uuid4())
     assert qualified.attempt.completed_tick == 60 and qualified.attempt.passed
+
+
+def test_imported_challenge_rules_change_outcomes_without_engine_changes(tmp_path):
+    original = build_station_archive()
+    station = load_world_pack(original)
+    for opening in station.template["story_openings"]:
+        challenge, = opening["scenario"]["challenges"]
+        challenge["pass_level"] = "19"
+    stricter = write_world_pack(
+        manifest=station.manifest.model_copy(update={"version": "1.3.1"}), template=station.template,
+    )
+
+    actor, grove, challenge_id = uuid4(), uuid4(), uuid4()
+    grove_state = WorldState(player_id=actor, entities={
+        actor: WorldEntity(id=actor, name="阿桑", kind="character", location_id=grove,
+                           components={"skills": {"skills": {"grove.breathing": {"level": "18"}}}}),
+        grove: WorldEntity(id=grove, kind="place", name="听风林"),
+    }, challenges=[ChallengeDefinition(
+        challenge_id=challenge_id, venue_id=grove, title="辨息", description="闭目辨认林中气流的来向。",
+        skill_id="grove.breathing", pass_level="16",
+    )])
+    forest = write_world_pack(
+        manifest=WorldPackManifest(pack_id="test.whispering-grove", version="1.0.0", title="听风林"),
+        template={"scenario": grove_state.model_dump(mode="json")},
+    )
+
+    app = build_application(data_directory=tmp_path, run_simulation_worker=False)
+    scope = local_identity(tmp_path)
+    repository = app.state.worlds.repository
+    origin = "http://127.0.0.1:8000"
+    with TestClient(app, base_url=origin) as client:
+        client.get("/api/v1/session").raise_for_status()
+        for archive, opening_id, passed in (
+            (original, "shelter-shift", True), (stricter, "shelter-shift", False), (forest, None, True),
+        ):
+            upload = {"Content-Type": "application/zip", "Origin": origin}
+            preview = client.post("/api/v1/packs/import/preview", content=archive, headers=upload).raise_for_status().json()
+            headers = upload | {"Idempotency-Key": str(uuid4()), "X-World-Pack-Sha256": preview["archive_sha256"]}
+            if opening_id is not None:
+                headers["X-Story-Opening"] = opening_id
+            world = client.post("/api/v1/packs/import", content=archive, headers=headers).raise_for_status().json()
+            world_id, branch = map(UUID, (world["world_id"], world["active_branch_id"]))
+            start = repository.read_world(scope, world_id, branch)
+            assert all(entity.kind in {"character", "person", "place"} for entity in start.state.entities.values())
+            assert {account.resource_id for account in start.state.resources.values()} <= {"station.power_cells"}
+            definition, = start.state.challenges
+            assert definition.version == "1.0.0" and definition.fee is None
+            attempt = client.post(f"/api/v1/worlds/{world_id}/challenges/{definition.challenge_id}/attempt", json={
+                "branch_id": str(branch), "actor_id": str(start.state.player_id),
+                "expected_state_version": str(start.branch.state_version),
+            }, headers={"Idempotency-Key": str(uuid4())}).raise_for_status().json()
+            assert attempt["passed"] is passed
+            final = repository.read_world(scope, world_id, branch)
+            assert final.state.current_tick == start.state.current_tick
+            assert sum(row.balance for row in final.state.resources.values()) == sum(
+                row.balance for row in start.state.resources.values()
+            )
+            events = repository.list_events(scope, world_id, branch).events
+            receipt, = [event for event in events if event.type == "core.challenge_resolved.v1"]
+            assert receipt.payload.get("fee") is None
+            assert repository.replay(scope, world_id, branch, from_genesis=True).state_hash == final.state_hash
 
 
 
