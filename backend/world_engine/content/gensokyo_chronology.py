@@ -15,6 +15,9 @@ from world_engine.domain.world_books import WorldBookEntry
 from .gensokyo_reference import _id
 from .gensokyo_village_life import local_aid
 
+MORIYA_SURVEY_PERMIT = "gensokyo.moriya_survey_passage"
+MORIYA_SURVEY_ID = _id("world:incident:mountain-shrine:survey")
+
 
 @dataclass(frozen=True)
 class Chapter:
@@ -116,7 +119,7 @@ def incident_nodes(
     evidence: WorldBookEntry,
     player_id: UUID,
     contact_id: UUID,
-) -> tuple[ScheduledEventRecord, tuple[StoryFollowup, StoryFollowup]]:
+) -> tuple[ScheduledEventRecord, tuple[StoryFollowup, ...]]:
     """Openings share rule types, while the encounter and its outcome vary by incident."""
     incident_id = _id(f"world:incident:{chapter.key}")
     references = evidence.provenance.citations
@@ -125,6 +128,22 @@ def incident_nodes(
         "visibility": "public",
         "references": references,
         "participant_ids": [contact_id],
+        "opportunity": {
+            "title": f"{evidence.title}的首轮调查",
+            "detail": "到现场了解情况。想提交线索时，可联系调查人并登记；你也可以先继续自己的安排。",
+            "place_id": _id(f"place:{chapter.meeting}"),
+            "contact_id": contact_id,
+            "lead_ticks": chapter.hours * 3600,
+            **({
+                "known_cost": "从人间之里到博丽神社，按当前开放路线步行约需 45 分钟。",
+                "possible_impact": "及时登记现场目击可让灵梦将其列入调查，并影响神社安置受红雾影响的来客。",
+            } if chapter.key == "scarlet-mist" else {}),
+            **({
+                "detail": "可去守矢神社联系早苗并登记来客顾虑，也可在妖怪之山完成山道安全核查。",
+                "known_cost": "两种处理方式都要赶在首轮交涉结束前到场。核查另需具备器具检验能力。",
+                "possible_impact": "交涉提案可促成口粮援助。若只完成核查，可获得山道试行资格。",
+            } if chapter.key == "mountain-shrine" else {}),
+        },
         "variants": [{
             "when": [
                 {"kind": "challenge_passed", "actor_id": player_id,
@@ -135,7 +154,14 @@ def incident_nodes(
                 }},
             ],
             "outcome": {"key": "player-report", "effect": "mitigated", "summary": chapter.joined},
-        }],
+        }, *([{
+            "when": [{"kind": "challenge_passed", "actor_id": player_id, "challenge_id": MORIYA_SURVEY_ID}],
+            "outcome": {
+                "key": "survey-passage", "effect": "mitigated",
+                "summary": "山道核查获认可。守矢神社准许你试行已核查的近道，口粮仍依原来安排。",
+                "awards": [{"actor_id": player_id, "capability": MORIYA_SURVEY_PERMIT}],
+            },
+        }] if chapter.key == "mountain-shrine" else [])],
         "fallback": {"key": "independent", "effect": "occurred", "summary": chapter.independent},
     })
     schedule = ScheduledEventRecord(
@@ -170,7 +196,10 @@ def incident_nodes(
             }),
         )
 
-    return schedule, (
+    afters = (
         after("player-report", "本轮记录保留了玩家提供的线索。"),
         after("independent", "本轮记录按原有调查渠道汇总。"),
     )
+    if chapter.key == "mountain-shrine":
+        afters += (after("survey-passage", "山道试行资格已登记，外来访客仍适用原有通行安排。"),)
+    return schedule, afters

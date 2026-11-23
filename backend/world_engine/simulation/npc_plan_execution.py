@@ -507,22 +507,14 @@ def _finish_exploration(state, plan, context, before_hash, engine, active) -> Np
     ):
         return _empty_transition(state, context, before_hash, outcome="invalid_receipt", plan=plan,
                                  reason_code="npc_exploration_scope_mismatch")
-    place = state.entities.get(intent.place_id)
-    resolution = None
-    if place is None or place.status != "active" or engine._exploration_site_issue(state, actor, intent):
-        code = "interrupted"
-    else:
-        start_context = RuleContext(
-            world_id=active.world_id, branch_id=active.branch_id, command_id=active.start_command_id,
-            actor_id=actor.id, ruleset_version=active.ruleset_version,
-        )
-        outcome, search_events, rolls = engine._exploration_search(
-            state, actor, intent, start_context, observed_tick=state.current_tick,
-        )
-        code = outcome.code
-        resolution = RuleResolution(outcome=outcome, events=search_events, rolls=rolls,
-                                    ruleset_version=context.ruleset_version)
-    return _settle_timed_action(state, plan, context, before_hash, "exploration", code, resolution)
+    start_context = RuleContext(
+        world_id=active.world_id, branch_id=active.branch_id, command_id=active.start_command_id,
+        actor_id=actor.id, ruleset_version=active.ruleset_version,
+    )
+    resolution = engine.settle_exploration(state, intent, start_context)
+    if resolution.outcome.status == "rejected":
+        return _settle_timed_action(state, plan, context, before_hash, "exploration", "interrupted", None)
+    return _settle_timed_action(state, plan, context, before_hash, "exploration", resolution.outcome.code, resolution)
 
 
 def _finish_trade(state, plan, context, before_hash, engine, active: ActiveNpcTrade) -> NpcPlanTransition:

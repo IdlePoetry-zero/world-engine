@@ -11,6 +11,7 @@ import pytest
 from world_engine.adapters.models.contracts import RoleTask
 from world_engine.application.operations import ModelOperations
 from world_engine.application.simulation_jobs import SimulationJobs
+from world_engine.content.gensokyo_chronology import MORIYA_SURVEY_ID, MORIYA_SURVEY_PERMIT
 from world_engine.content.gensokyo_reference import _id
 from world_engine.content.gensokyo_village_life import local_aid
 from world_engine.content.gensokyo_world import CHAPTERS, actor_id, build_archive
@@ -221,3 +222,183 @@ def test_scarlet_mist_dialogue_changes_the_chapter_with_autonomous_npc_travel(tm
             assert departure["payload"]["journey"]["to_place_id"] == village
 
         assert planning_branches == [main, dialogue_only, no_contact]
+
+
+def test_moriya_survey_report_and_inactivity_have_distinct_world_consequences(tmp_path, monkeypatch):
+    # Import the published opening and use the real rules, HTTP API, and leased
+    # simulation. The model double keeps Sanae on site and other NPC plans deferred.
+    opening = "mountain-shrine"
+    sanae = str(actor_id("sanae"))
+    incident = str(_id(f"world:incident:{opening}"))
+    report_id = str(_id(f"world:incident:{opening}:report"))
+    shrines = {key: str(_id(f"place:{key}")) for key in ("moriya-shrine", "shrine")}
+    player_words = "早苗，我想把来客对山路通行的顾虑告诉你。"
+
+    async def generate(_scope, request):
+        if request.role_task == RoleTask.INTENT:
+            assert player_words in request.messages[-1].content
+            output = {"target_id": sanae, "clarification": ""}
+        elif request.role_task == RoleTask.SOCIAL_ADJUDICATION:
+            assert player_words in request.messages[-1].content
+            output = {"utterance": "我愿意听听来客对这段山路的顾虑。"}
+        elif request.role_task == RoleTask.NPC_DECISION:
+            output = {"kind": "defer", "reason": "暂时留在原地，稍后再回顾目标。"}
+        elif request.role_task == RoleTask.MEMORY_SUMMARY:
+            output = {"outlook": "defer"}
+        else:
+            pytest.fail(f"Unexpected model role {request.role_task}")
+        return SimpleNamespace(normalized_output=output)
+
+    monkeypatch.setattr(ModelOperations, "generate", staticmethod(generate))
+    app = build_application(data_directory=tmp_path, run_simulation_worker=False)
+    repository = app.state.worlds.repository
+    scope = local_identity(tmp_path)
+    jobs = SimulationJobs(repository)
+    models = SimpleNamespace(generate=generate)
+    origin = "http://127.0.0.1:8000"
+
+    with TestClient(app, base_url=origin) as client:
+        client.get("/api/v1/session").raise_for_status()
+        archive = build_archive()
+        upload = {"Content-Type": "application/zip", "Origin": origin}
+        preview = client.post("/api/v1/packs/import/preview", headers=upload, content=archive).raise_for_status().json()
+        created = client.post("/api/v1/packs/import", headers=upload | {
+            "Idempotency-Key": opening, "X-World-Pack-Sha256": preview["archive_sha256"],
+            "X-Story-Opening": opening,
+        }, content=archive).raise_for_status().json()
+        world_id = UUID(created["world_id"])
+        survey_branch = created["active_branch_id"]
+        path = f"/api/v1/worlds/{world_id}"
+
+        def view(branch, mode="player"):
+            return client.get(f"{path}/view", params={"branch_id": branch, "mode": mode}).raise_for_status().json()
+
+        def fork(label):
+            return client.post(f"{path}/branches", headers={"Idempotency-Key": label}, json={
+                "branch_id": survey_branch, "sequence": view(survey_branch)["last_seq"], "label": label,
+            }).raise_for_status().json()["branch_id"]
+
+        def run_job(branch, endpoint, duration, **params):
+            submitted = client.post(f"{path}/{endpoint}", headers={"Idempotency-Key": str(uuid4())}, json={
+                "branch_id": branch, "expected_state_version": view(branch)["branch"]["state_version"],
+                "duration_seconds": duration, **params,
+            }).raise_for_status().json()
+            job_id = UUID(submitted["job_id"])
+            lease = repository.claim_job("moriya-acceptance-worker", lease_seconds=120)
+            assert lease and lease.job_id == job_id and str(lease.branch_id) == branch
+
+            async def advance():
+                response = None
+                for _ in range(128):
+                    window = jobs.advance(scope, lease, model_decision=response)
+                    current = repository.read_job(scope, job_id)
+                    if current.status == JobStatus.SUCCEEDED:
+                        return
+                    assert current.status == JobStatus.RUNNING, current.result
+                    response = None
+                    if window.decision_requests:
+                        decision, = window.decision_requests
+                        assert decision.decision_owner == "model"
+                        response = await _invoke_worker_model_decision(models, repository, scope, lease, current, decision)
+                        if response is not None:
+                            assert response.npc_planning_status != "invalid", response.npc_planning_rejection
+                pytest.fail(f"Simulation job {job_id} did not reach its target")
+
+            asyncio.run(advance())
+
+        def advance_to(branch, tick):
+            delta = tick - int(view(branch)["branch"]["current_tick"])
+            assert delta > 0
+            run_job(branch, "world-advance", delta)
+
+        def travel(branch, destination):
+            destination_name = view(branch, "author")["state"]["entities"][destination]["name"]
+            route, = [item for item in view(branch)["state"]["travel_options"] if item["destination_name"] == destination_name]
+            run_job(branch, "long-actions", int(route["travel_ticks"]), activity="travel", route_id=route["route_id"])
+
+        def attempt(branch, challenge_id):
+            current = view(branch)
+            assert any(item["challenge_id"] == challenge_id for item in current["state"]["local_challenges"])
+            result = client.post(f"{path}/challenges/{challenge_id}/attempt", headers={
+                "Idempotency-Key": f"moriya-{challenge_id}",
+            }, json={
+                "branch_id": branch, "actor_id": player, "expected_state_version": current["branch"]["state_version"],
+            }).raise_for_status().json()
+            assert result["passed"]
+
+        def relief_balances(state):
+            return tuple(state["resources"][str(account)]["balance"]
+                         for account in (relief.from_account_id, relief.to_account_id))
+
+        player = view(survey_branch)["state"]["player_id"]
+        aid = local_aid(opening)
+        relief = aid.transfer
+        incident_tick = 8 * 3600
+        aid_tick = incident_tick + 255 * 60
+
+        # Give each branch the same approach to the mountain. All three later
+        # reach Moriya via the public route so only the outcome changes shortcut access.
+        for destination in (shrines["shrine"], str(_id("place:forest")), str(_id("place:youkai-mountain"))):
+            travel(survey_branch, destination)
+        report_branch = fork("Report to Sanae")
+        inactive_branch = fork("Travel without intervening")
+        attempt(survey_branch, str(MORIYA_SURVEY_ID))
+        branches = {
+            survey_branch: "survey-passage",
+            report_branch: "player-report",
+            inactive_branch: "independent",
+        }
+        shortcut = str(_id(f"world-path:{shrines['moriya-shrine']}:{shrines['shrine']}"))
+        for branch in branches:
+            travel(branch, shrines["moriya-shrine"])
+            assert not any(item["route_id"] == shortcut for item in view(branch)["state"]["travel_options"])
+
+        report_view = view(report_branch)
+        result = client.post(f"{path}/messages", headers={"Origin": origin}, json={
+            "world_id": str(world_id), "branch_id": report_branch, "request_id": str(uuid4()),
+            "session_id": str(uuid4()), "actor_id": player, "expected_state_version": report_view["branch"]["state_version"],
+            "mode": "roleplay", "text": player_words,
+        }).raise_for_status().json()
+        assert result["kind"] == "dialogue" and result["world_effect"]
+        assert result["references"] == [sanae]
+        attempt(report_branch, report_id)
+
+        for branch, expected in branches.items():
+            advance_to(branch, incident_tick)
+            head = view(branch, "author")
+            state = head["state"]
+            milestone, = [row for row in state["story_milestones"] if row["schedule_id"] == incident]
+            assert (milestone["outcome"], int(milestone["resolved_tick"])) == (expected, incident_tick)
+            permits = state["entities"][player]["components"]["capabilities"]["grants"]
+            assert (MORIYA_SURVEY_PERMIT in permits) == (branch == survey_branch)
+            assert relief_balances(state) == ("18", "0")
+            assert any(row["route_id"] == shortcut for row in view(branch)["state"]["travel_options"]) == (
+                branch == survey_branch
+            )
+            assert repository.replay(scope, world_id, UUID(branch), from_genesis=True).state_hash == head["state_hash"]
+
+            advance_to(branch, aid_tick - 1)
+            assert relief_balances(view(branch, "author")["state"]) == ("18", "0")
+            advance_to(branch, aid_tick)
+            after = view(branch, "author")
+            state = after["state"]
+            followup_id = str(_id(f"world:incident:{opening}:{expected}:followup"))
+            followup, = [row for row in state["story_milestones"] if row["schedule_id"] == followup_id]
+            if branch == report_branch:
+                assert (followup["outcome"], int(followup["resolved_tick"])) == ("aid-delivered", aid_tick)
+                assert relief_balances(state) == ("14", "4")
+            else:
+                assert (followup["outcome"], int(followup["resolved_tick"])) == ("recorded", incident_tick + 3600)
+                assert relief_balances(state) == ("18", "0")
+            assert (MORIYA_SURVEY_PERMIT in state["entities"][player]["components"]["capabilities"]["grants"]) == (
+                branch == survey_branch
+            )
+            assert repository.replay(scope, world_id, UUID(branch), from_genesis=True).state_hash == after["state_hash"]
+
+        shortcut_route, = [row for row in view(survey_branch)["state"]["travel_options"] if row["route_id"] == shortcut]
+        assert int(shortcut_route["travel_ticks"]) == 75 * 60
+        run_job(survey_branch, "long-actions", 75 * 60, activity="travel", route_id=shortcut)
+        arrived = view(survey_branch, "author")
+        assert arrived["state"]["entities"][player]["location_id"] == shrines["shrine"]
+        assert int(arrived["branch"]["current_tick"]) == aid_tick + 75 * 60
+        assert repository.replay(scope, world_id, UUID(survey_branch), from_genesis=True).state_hash == arrived["state_hash"]

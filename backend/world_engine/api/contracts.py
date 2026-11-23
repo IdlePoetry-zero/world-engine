@@ -7,6 +7,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 from world_engine.adapters.models.contracts import Capability
+from world_engine.application.action_drafts import DraftControl
 from world_engine.application.work_chat import RoutineWorkScheduleRequest
 from world_engine.domain.contests import ContestAction
 from world_engine.domain.travel_itinerary import MAX_TRAVEL_ITINERARY_LEGS
@@ -56,6 +57,7 @@ class MessageRequest(RequestModel):
     mode: Literal["auto", "ask_gm", "roleplay", "action", "author"] = "auto"
     text: str = Field(min_length=1, max_length=100_000)
     profile: QualityProfile = Field(default_factory=QualityProfile)
+    draft: DraftControl | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class NarrativeRewriteRequest(RequestModel):
@@ -184,3 +186,4 @@ class RoleRoute(RequestModel):
 class SettingsRequest(QualityProfile):
     routes: dict[str, RoleRoute] = Field(default_factory=dict)
     local_only: bool = False
+    revision: Annotated[int, Field(strict=True, ge=0)] | None = None

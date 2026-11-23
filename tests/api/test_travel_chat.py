@@ -59,6 +59,7 @@ def _create_world(
     route_risk=Decimal("0"),
     grants=("world.travel",),
     promise_boundary=False,
+    promise_deadline=10,
     water_stock: str | None = None,
     water_value: int = 10,
     npc_training: bool = False,
@@ -121,7 +122,7 @@ def _create_world(
                 promisee_account_id=recipient_account_id,
             ),
             created_tick=0,
-            deadline_tick=10,
+            deadline_tick=promise_deadline,
         )
         promises.append(promise)
         schedules.append(build_promise_deadline_schedule(promise))
@@ -288,18 +289,22 @@ def _request(created, actor_id, *, request_id=None):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("activity", "outside_time"), [
-    ("wait", False), ("rest", False), ("idle", False), ("train", False), ("train", True),
+@pytest.mark.parametrize(("activity", "outside_time", "boundary_tick"), [
+    ("wait", False, 11), ("rest", False, 11), ("idle", False, 11),
+    ("train", False, 11), ("train", True, 11),
+    ("explore", False, 11), ("explore", True, 11), ("explore", False, 600),
 ])
 async def test_stationary_chat_preserves_intent_and_elapsed_recovery_across_short_boundary(
-    tmp_path, monkeypatch, activity, outside_time,
+    tmp_path, monkeypatch, activity, outside_time, boundary_tick,
 ):
-    database, repo, scope, created, ids = _create_world(tmp_path, promise_boundary=True, water_stock="2", injured=True)
+    database, repo, scope, created, ids = _create_world(
+        tmp_path, promise_boundary=True, promise_deadline=boundary_tick - 1, water_stock="2", injured=True,
+    )
     try:
         actor, world, branch = ids["actor"], created.world.world_id, created.branch.branch_id
         calls = []
         skill_id = "skill.local_knowledge"
-        duration = 59 if activity == "train" else 7200
+        duration = {"train": 59, "explore": 600}.get(activity, 7200)
 
         class Models:
             async def generate(self, scope, request):
@@ -307,13 +312,16 @@ async def test_stationary_chat_preserves_intent_and_elapsed_recovery_across_shor
                 action = {"kind": activity, "duration_ticks": duration}
                 if activity == "train":
                     action["skill_id"] = skill_id
+                elif activity == "explore":
+                    action = {"kind": "explore", "place_id": str(ids["origin"])}
                 return SimpleNamespace(normalized_output={"action": action, "clarification": ""})
 
         models = Models()
         actions = RulesActionDispatcher(repo, models, RuleEngine(), ACTION_INTENT_ADAPTER, RuleContext)
         chat = ConversationApplication(WorldApplication(repo, None), models,
                                        ConversationStore(OperationsStore(tmp_path / "ops.db")), actions=actions)
-        text = {"rest": "现在休息两小时。", "train": "现在练习本地知识 59 秒。"}.get(activity, "原地等两个小时。")
+        text = {"rest": "现在休息两小时。", "train": "现在练习本地知识 59 秒。",
+                "explore": "我现在搜查这个地方。"}.get(activity, "原地等两个小时。")
         message = _request(created, actor).model_copy(update={"text": text})
 
         def interrupted_finish(*args, **kwargs):
@@ -327,13 +335,17 @@ async def test_stationary_chat_preserves_intent_and_elapsed_recovery_across_shor
         reply = await chat.send(scope, message)
         assert calls == [RoleTask.INTENT] and reply["elapsed_ticks"] == "0"
         job_id = UUID(reply["job_id"])
-        assert repo.read_job(scope, job_id).payload["plan"]["stationary_only"] is True
+        plan = repo.read_job(scope, job_id).payload["plan"]
+        if activity == "explore":
+            assert plan["exploration"]["place_id"] == str(ids["origin"])
+        else:
+            assert plan["stationary_only"] is True
         initial = repo.read_world(scope, world, branch)
         due, = initial.state.scheduled_events
         lease = repo.claim_job("stationary-window")
         assert lease and lease.job_id == job_id
         jobs = SimulationJobs(repo)
-        assert jobs.advance(scope, lease).next_tick == due.due_tick < 60
+        assert jobs.advance(scope, lease).next_tick == due.due_tick == boundary_tick
         interrupted = repo.read_world(scope, world, branch)
         assert interrupted.state.entities[actor].components["health"]["current"] == 5
         assert interrupted.state.entities[actor].components["skills"]["skills"][skill_id]["experience"] == 0
@@ -357,13 +369,13 @@ async def test_stationary_chat_preserves_intent_and_elapsed_recovery_across_shor
             assert repo.read_job(scope, job_id).status is JobStatus.PAUSED
             final = repo.read_world(scope, world, branch)
             trained = final.state.entities[actor].components["skills"]["skills"][skill_id]
-            assert (trained["trained_ticks"], trained["experience"]) == (11, 0)
+            assert (trained["trained_ticks"], trained["experience"]) == ((11, 0) if activity == "train" else (0, 0))
             return
         repo.control_job(scope, job_id, "resume")
         lease = repo.claim_job("stationary-window-restored")
         assert lease and lease.job_id == job_id
         for _ in range(12):
-            jobs.advance(scope, lease)
+            result = jobs.advance(scope, lease)
             job = repo.read_job(scope, job_id)
             if job.status is JobStatus.SUCCEEDED:
                 break
@@ -372,6 +384,8 @@ async def test_stationary_chat_preserves_intent_and_elapsed_recovery_across_shor
             pytest.fail("The requested station time did not finish")
         final = repo.read_world(scope, world, branch)
         assert final.state.current_tick == duration and final.state.entities[actor].location_id == ids["origin"]
+        if activity == "explore":
+            assert result.rule_resolution.outcome.code == "nothing_hidden_found"
         assert final.state.relationship_promises[0].status == "breached"
         assert final.state.resources[_id(8)].balance == 2
         assert final.state.entities[actor].components["health"]["current"] == (6 if activity == "rest" else 5)

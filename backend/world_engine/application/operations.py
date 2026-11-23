@@ -208,13 +208,43 @@ class OperationsStore:
 
     def settings(self, scope: AccessScope) -> dict[str, Any]:
         with self.connect() as db:
-            row = db.execute("SELECT document FROM preferences WHERE tenant=? AND principal=?", self.identity(scope)).fetchone()
-        return json.loads(row[0]) if row else {"speed": "balanced", "depth": "deep", "routes": {}, "local_only": False}
+            return self._read_settings(db, scope)
 
-    def save_settings(self, scope: AccessScope, settings: dict[str, Any]):
+    def _read_settings(self, db: sqlite3.Connection, scope: AccessScope) -> dict[str, Any]:
+        row = db.execute(
+            "SELECT document FROM preferences WHERE tenant=? AND principal=?", self.identity(scope),
+        ).fetchone()
+        defaults = {"speed": "balanced", "depth": "deep", "routes": {}, "local_only": False, "revision": 0}
+        return defaults | json.loads(row[0]) if row else defaults
+
+    def save_settings(
+        self, scope: AccessScope, settings: dict[str, Any], *, expected_revision: int | None = None,
+        protect_local_only: bool = False,
+    ) -> dict[str, Any]:
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            current = self._read_settings(db, scope)
+            revision = current["revision"]
+            if expected_revision is not None and revision != expected_revision:
+                raise ApplicationFailure("SETTINGS_STALE", "运行设置已在另一处更改，请刷新后重试。")
+            if protect_local_only and expected_revision is None and current["local_only"] and settings.get("local_only") is False:
+                raise ApplicationFailure("SETTINGS_STALE", "关闭仅本地策略需要最新版本的运行设置。")
+            saved = current | settings | {"revision": revision + 1}
+            self._validate_routes(db, scope, current["routes"], saved["routes"])
+            db.execute(
+                "INSERT INTO preferences VALUES(?,?,?) ON CONFLICT(tenant,principal) DO UPDATE SET document=excluded.document",
+                (*self.identity(scope), json.dumps(saved, allow_nan=False)),
+            )
+        return saved
+
+    def _validate_routes(
+        self, db: sqlite3.Connection, scope: AccessScope, previous: dict[str, Any], routes: dict[str, Any],
+    ) -> None:
         # Role and target validation also prevents silently accepting misspelled routes.
-        for role, route in settings["routes"].items():
+        for role, route in routes.items():
             RoleTask(role)
+            if route == previous.get(role):
+                continue
             primary_provider_id = route.get("provider_id")
             fallbacks = route.get("fallbacks", [])
             if fallbacks and not primary_provider_id:
@@ -226,7 +256,13 @@ class OperationsStore:
                 provider_id = target["provider_id"]
                 provider = providers.get(provider_id)
                 if provider is None:
-                    provider = self.provider(scope, provider_id)
+                    row = db.execute(
+                        "SELECT document FROM providers WHERE tenant=? AND principal=? AND id=?",
+                        (*self.identity(scope), provider_id),
+                    ).fetchone()
+                    if row is None:
+                        raise NotFound("Provider does not exist")
+                    provider = json.loads(row[0])
                     providers[provider_id] = provider
                 if not provider["enabled"]:
                     raise Conflict("A disabled provider cannot be selected")
@@ -237,10 +273,6 @@ class OperationsStore:
                 if identity in seen_targets:
                     raise ValueError("A role route cannot repeat a provider/model target")
                 seen_targets.add(identity)
-        with self.connect() as db:
-            db.execute("INSERT INTO preferences VALUES(?,?,?) ON CONFLICT(tenant,principal) DO UPDATE SET document=excluded.document",
-                       (*self.identity(scope), json.dumps(settings, allow_nan=False)))
-        return settings
 
     def record_trace(self, scope: AccessScope, trace: CallTrace):
         data = trace.to_public_dict()
@@ -287,7 +319,8 @@ class ModelOperations:
             primary = routes.get(role_route_key, {})
         if not primary.get("provider_id"):
             raise ApplicationFailure("MODEL_ROUTE_REQUIRED", "尚未配置当前任务的模型。请在模型后台选择供应商和模型后重试。")
-        policy = DataPolicy.LOCAL_ONLY if settings["local_only"] else request.data_policy
+        policy = self._effective_policy(settings, request.data_policy)
+        request = replace(request, refresh_data_policy=lambda: self._effective_policy(self.store.settings(scope), policy))
         target_specs = [primary, *primary.get("fallbacks", [])]
         has_alternatives = len(target_specs) > 1
         eligible: list[tuple[dict[str, Any], dict[str, Any], ProviderConfig]] = []
@@ -307,7 +340,7 @@ class ModelOperations:
                 unavailable_errors.append(error)
                 continue
             config = self.store.config(document)
-            if policy is DataPolicy.LOCAL_ONLY and not config.is_local_endpoint:
+            if not config.permits_data_policy(policy):
                 unavailable_errors.append(self._local_policy_error(config, self._target_request(request, target, document, policy)))
                 continue
             eligible.append((target, document, config))
@@ -342,6 +375,10 @@ class ModelOperations:
         # The list is non-empty and every call either returns or raises at its
         # terminal target, so reaching here means the loop itself was changed.
         raise RuntimeError("Model route had no executable target")
+
+    @staticmethod
+    def _effective_policy(settings: dict[str, Any], request_policy: DataPolicy = DataPolicy.CLOUD_ALLOWED) -> DataPolicy:
+        return DataPolicy.LOCAL_ONLY if settings["local_only"] else request_policy
 
     @staticmethod
     def _disabled_provider_error() -> ApplicationFailure:
@@ -424,6 +461,9 @@ class ModelOperations:
         queue_seconds = None
         try:
             async with self.scheduler.slot(config, request.profile.speed) as queue_seconds:
+                request = replace(request, data_policy=request.current_data_policy())
+                if not config.permits_data_policy(request.data_policy):
+                    raise self._local_policy_error(config, request)
                 result = await self.gateway.generate(config, request)
         except asyncio.CancelledError as error:
             trace = getattr(error, "call_trace", None)
@@ -462,5 +502,8 @@ class ModelOperations:
         document = self.store.provider(scope, provider_id)
         if not document["enabled"]:
             raise Conflict("The selected provider is disabled")
-        models = await self.gateway.discover(self.store.config(document))
+        config = self.store.config(document)
+        if not config.permits_data_policy(self._effective_policy(self.store.settings(scope))):
+            raise ApplicationFailure("MODEL_LOCAL_ONLY", "仅本地策略已启用，无法访问非回环供应商的模型目录。", status_code=403)
+        models = await self.gateway.discover(config)
         return [model.to_public_dict() for model in models]

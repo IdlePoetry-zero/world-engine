@@ -402,6 +402,9 @@ class SimulationEngine:
         actor = state.entities.get(plan.actor_id)
         if actor is None or actor.kind not in {"character", "person"}:
             raise ValueError("Long-action actor must be a character in the current state.")
+        if plan.exploration is not None and actor.status != "active":
+            self._reject_unconsumed_decisions(context)
+            return self._stop_exploration(state, plan, context, "explorer_unavailable")
         if actor.status in {"dead", "retired"}:
             raise ValueError(f"A {actor.status} character cannot act.")
         if actor.status == "incapacitated":
@@ -417,6 +420,8 @@ class SimulationEngine:
             raise ValueError("Long-action target_tick cannot precede the current world tick.")
         if plan.started_tick is not None and plan.started_tick > state.current_tick:
             raise ValueError("Long-action started_tick cannot be in the future.")
+        if plan.exploration is not None:
+            return self._advance_exploration(state, plan, context, actor)
         if self._stop_satisfied(state, plan.stop_conditions):
             self._reject_unconsumed_decisions(context)
             return self._empty(
@@ -1337,6 +1342,47 @@ class SimulationEngine:
             boundary=boundary,
             interruption=interruption,
             continuation=continuation,
+        )
+
+    def _advance_exploration(self, state, plan, context, actor) -> SimulationResolution:
+        intent = plan.exploration
+        place = state.entities.get(intent.place_id)
+        if (place is None or place.status != "active"
+            or self.rule_engine._exploration_site_issue(state, actor, intent) is not None):
+            self._reject_unconsumed_decisions(context)
+            return self._stop_exploration(state, plan, context, "exploration_site_unavailable")
+        if state.current_tick == plan.target_tick:
+            self._reject_unconsumed_decisions(context)
+            rule_context = RuleContext(
+                world_id=context.world_id, branch_id=context.branch_id, command_id=context.command_id,
+                actor_id=plan.actor_id, ruleset_version=context.ruleset_version or RULES_VERSION,
+            )
+            resolution = self.rule_engine.settle_exploration(state, intent, rule_context)
+            self._validate_rule_batch(state, resolution)
+            return self._resolved(state, context, resolution, outcome="completed",
+                                  boundary=resolution.outcome.code, interruption=None)
+        routine = self._resolve_npc_routine(state, plan, context)
+        if routine is not None:
+            return routine
+        horizon = min(plan.target_tick, state.current_tick + context.max_step_ticks,
+                      state.current_tick + self.policy.max_macro_step_seconds)
+        external = self._next_external_boundary(
+            state, horizon, actor_id=plan.actor_id,
+            externally_controlled_actor_ids=context.externally_controlled_actor_ids,
+            include_meeting_start=context.allow_autonomous_meeting_attendance,
+        )
+        external = self._with_npc_routine_boundary(state, horizon, plan, context, external)
+        if external is not None:
+            tick, reason, reference, subject = external
+        else:
+            tick, reason, reference, subject = horizon, "stationary_action_window", None, plan.actor_id
+        return self._advance_to_boundary(state, plan, context, tick, reason, reference, subject, "wait")
+
+    def _stop_exploration(self, state, plan, context, reason) -> SimulationResolution:
+        return self._empty(
+            state, context, outcome="stopped", reason=reason,
+            interruption=Interruption(kind="boundary", tick=state.current_tick,
+                                      reason_code=reason, subject_id=plan.actor_id),
         )
 
     def _execute_exact_consumption(self, state, plan, context) -> SimulationResolution:

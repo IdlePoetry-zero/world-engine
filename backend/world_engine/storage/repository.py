@@ -4060,7 +4060,7 @@ class WorldRepository:
             now = utc_now()
             if action == "resume" and job.job_type == "simulation.long_action":
                 plan = job.payload_json.get("plan")
-                if isinstance(plan, dict) and plan.get("stationary_only") is True:
+                if isinstance(plan, dict) and (plan.get("stationary_only") is True or plan.get("activity") == "explore"):
                     self._resume_stationary_from_current_checkpoint(session, branch, job, now)
                 elif isinstance(plan, dict) and plan.get("activity") == "study":
                     self._resume_study_from_current_checkpoint(session, branch, job, plan, now)

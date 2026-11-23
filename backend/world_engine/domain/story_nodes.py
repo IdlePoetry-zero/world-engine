@@ -145,11 +145,24 @@ class StoryEnrollment(_StoryModel):
     leader: StrictBool = False
 
 
+class StoryOpportunity(_StoryModel):
+    """An explicitly public lead shown before a milestone resolves."""
+
+    title: Annotated[str, StringConstraints(min_length=1, max_length=120)]
+    detail: _Summary
+    place_id: UUID
+    contact_id: UUID | None = None
+    lead_ticks: Annotated[int, Field(strict=True, gt=0, le=2**63 - 1)]
+    known_cost: _Summary | None = Field(default=None, exclude_if=lambda value: value is None)
+    possible_impact: _Summary | None = Field(default=None, exclude_if=lambda value: value is None)
+
+
 class StoryNode(_StoryModel):
     title: Annotated[str, StringConstraints(min_length=1, max_length=160)]
     visibility: Literal["public", "author_only"]
     references: tuple[WorldBookCitation, ...] = Field(default=(), max_length=4)
     participant_ids: tuple[UUID, ...] = Field(default=(), max_length=24)
+    opportunity: StoryOpportunity | None = Field(default=None, exclude_if=lambda value: value is None)
     opens_place_ids: tuple[UUID, ...] = Field(default=(), max_length=32, exclude_if=lambda ids: not ids)
     opens_organization_ids: tuple[UUID, ...] = Field(default=(), max_length=16, exclude_if=lambda ids: not ids)
     reveals_entry_ids: tuple[UUID, ...] = Field(default=(), max_length=64, exclude_if=lambda ids: not ids)
@@ -161,6 +174,8 @@ class StoryNode(_StoryModel):
     @model_validator(mode="after")
     def validate_outcomes(self) -> StoryNode:
         outcomes = [self.fallback, *(variant.outcome for variant in self.variants)]
+        if self.opportunity is not None and self.visibility != "public":
+            raise ValueError("Only public milestones may declare a visible opportunity.")
         if len({outcome.key for outcome in outcomes}) != len(outcomes):
             raise ValueError("Story outcome keys must be unique within a milestone.")
         for identifiers in (self.opens_place_ids, self.opens_organization_ids, self.reveals_entry_ids):
@@ -631,6 +646,13 @@ def validate_story_state(state: WorldState) -> None:
         if expected != scheduled:
             raise ValueError("A story follow-up schedule must match the committed parent milestone and delay.")
     for key, node in nodes.items():
+        if node.opportunity is not None:
+            opportunity = node.opportunity
+            place = state.entities.get(opportunity.place_id)
+            contact = known_entities.get(opportunity.contact_id) if opportunity.contact_id is not None else None
+            if (place is None or place.kind not in {"place", "location"}
+                    or opportunity.contact_id is not None and (contact is None or contact.kind not in {"character", "person"})):
+                raise ValueError("A story opportunity must reference a place and an optional character.")
         if len(set(node.participant_ids)) != len(node.participant_ids) or any(
             entity not in known_entities for entity in node.participant_ids
         ):

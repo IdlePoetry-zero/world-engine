@@ -15,14 +15,15 @@ def operations_router(operations: ModelOperations, scope: Callable) -> APIRouter
 
     @router.get("/providers")
     def providers(request: Request):
-        return {"items": operations.store.list_providers(scope(request))}
+        return {"items": [_provider_view(operations, item) for item in operations.store.list_providers(scope(request))]}
 
     @router.post("/providers", status_code=201)
     def create_provider(request: Request, body: ProviderRequest):
         try:
-            return operations.store.save_provider(
+            saved = operations.store.save_provider(
                 scope(request), body.model_dump(mode="json"), public_config=True,
             )
+            return _provider_view(operations, saved)
         except ValueError as error:
             raise InvalidEvent("Invalid provider configuration") from error
 
@@ -31,9 +32,10 @@ def operations_router(operations: ModelOperations, scope: Callable) -> APIRouter
         identity = scope(request)
         operations.store.provider(identity, provider_id)
         try:
-            return operations.store.save_provider(
+            saved = operations.store.save_provider(
                 identity, body.model_dump(mode="json"), provider_id, public_config=True,
             )
+            return _provider_view(operations, saved)
         except ValueError as error:
             raise InvalidEvent("Invalid provider configuration") from error
 
@@ -44,7 +46,10 @@ def operations_router(operations: ModelOperations, scope: Callable) -> APIRouter
     @router.put("/settings")
     def save_settings(request: Request, body: SettingsRequest):
         try:
-            return operations.store.save_settings(scope(request), body.model_dump())
+            return operations.store.save_settings(
+                scope(request), body.model_dump(exclude={"revision"}, exclude_unset=True), expected_revision=body.revision,
+                protect_local_only=True,
+            )
         except ValueError as error:
             raise InvalidEvent("Invalid role route") from error
 
@@ -64,6 +69,10 @@ def operations_router(operations: ModelOperations, scope: Callable) -> APIRouter
         return {"items": [_call_view(item) for item in operations.store.list_calls(scope(request))]}
 
     return router
+
+
+def _provider_view(operations: ModelOperations, document):
+    return document | {"is_local_endpoint": operations.store.config(document).is_local_endpoint}
 
 
 def _model_view(model):

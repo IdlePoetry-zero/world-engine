@@ -202,6 +202,12 @@ LLM 可提出参数与备选语义，不能决定余额检查结果或自行创�
 
 要求 `Idempotency-Key` 的入口将请求键绑定到请求内容。直接提交长动作与世界快进返回 202 和作业 ID。页面以已提交时刻、分支版本、活动类型和等待决策等实际字段显示进度。
 
+消息接口接受可选的 `draft`。`prepare` 新建本地交易或在场人物邀约草稿，`update`、`confirm`、`cancel` 同时提交草稿 ID 与版本。草稿按账号、角色、世界、分支和会话隔离。只有确认后才把审核过的类型化提案交给现有规则，提交前复核场景版本及角色位置，沿用消息幂等键和事件提交事务。已提交结果可以从世界回执找回。草稿保存在本机服务，不随世界备份恢复。
+
+玩家投影可携带已公开且仍在期限内的 `scene_opportunities`，以及在场角色中显式公开的活动时段和自己的近期获知记录 `scene_npc_readback`。公开时间窗不会揭示实际路线、改期或未来地点。调查中的 `investigation` 小节仅由已有类型化观察、可见证词或规则生成的复核记录产生，证据引用留在原玩家作用域。
+
+明确的原地搜查遇到外部边界时，聊天会登记固定时窗与地点。作业先处理该时刻的事件，再继续剩余授权时间。最终观察由玩家和 NPC 共用搜查结算，结束前不能揭示线索。暂停期间由其他操作推进的时间不计入原搜查。
+
 统一错误结构包含 code、message、retryable、field_errors、correlation_id、committed_through_tick。主要错误为 AUTH_REQUIRED、FORBIDDEN、STALE_VERSION、AMBIGUOUS_INTENT、RULE_REJECTED、INSUFFICIENT_RESOURCE、MODEL_UNAVAILABLE、MODEL_INVALID_OUTPUT、PACK_INCOMPATIBLE、JOB_CANCELLED 和 STORAGE_UNAVAILABLE。RULE_REJECTED 是游戏结果或可纠正输入，不自动当服务 500 错误。
 
 ## 多人协调接口

@@ -250,6 +250,58 @@ async def test_explicit_price_ceiling_allows_equality_and_persists_payment_ledge
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("lose_receipt", [False, True])
+async def test_trade_draft_updates_and_commits_only_after_review(market_conversation, monkeypatch, lose_receipt):
+    from world_engine.application.action_drafts import DraftControl
+
+    data = market_conversation
+    before = _snapshot(data)
+    prepare = _request(data, text="我想购买两份矿石。").model_copy(update={
+        "draft": DraftControl(operation="prepare"),
+    })
+    first = await data.service.send(data.identity, prepare)
+    assert first["action_draft"]["revision"] == 1
+    assert _snapshot(data).state_hash == before.state_hash
+    change = prepare.model_copy(update={
+        "request_id": uuid4(), "text": "这笔交易总价不超过10信用点。",
+        "draft": DraftControl(operation="update", draft_id=prepare.request_id, revision=1),
+    })
+    updated = await data.service.send(data.identity, change)
+    assert updated["action_draft"]["revision"] == 2
+    assert "总价上限 10" in updated["action_draft"]["review"]
+    assert _snapshot(data).state_hash == before.state_hash
+    restored = data.service.default_conversation(data.identity, data.world_id, data.branch_id)
+    assert restored["action_draft"] == updated["action_draft"]
+    confirm = prepare.model_copy(update={
+        "request_id": uuid4(), "text": "确认执行。",
+        "draft": DraftControl(operation="confirm", draft_id=prepare.request_id, revision=2),
+    })
+    if lose_receipt:
+        class SimulatedProcessLoss(BaseException):
+            pass
+
+        def fail_after_commit(*args, **kwargs):
+            raise SimulatedProcessLoss()
+
+        with monkeypatch.context() as patch:
+            patch.setattr(data.service.store.drafts, "finish", fail_after_commit)
+            with pytest.raises(SimulatedProcessLoss):
+                await data.service.send(data.identity, confirm)
+        assert data.service.store.recover_inflight() == 1
+        recovered = data.service.status(data.identity, confirm.request_id)
+        assert recovered["status"] == "succeeded"
+        confirmed = recovered["result"]
+    else:
+        confirmed = await data.service.send(data.identity, confirm)
+    assert confirmed["closed_draft_id"] == str(prepare.request_id)
+    assert await data.service.send(data.identity, confirm) == confirmed
+    assert len(data.models.calls) == 2
+    after = _snapshot(data)
+    assert after.state.resources[data.account_ids["buyer_goods"]].balance == Decimal("2")
+    _assert_replay_matches_head(data)
+
+
+@pytest.mark.asyncio
 async def test_model_cannot_invent_or_change_the_player_written_ceiling(market_conversation):
     data = market_conversation
     data.models.proposed_ceiling = {

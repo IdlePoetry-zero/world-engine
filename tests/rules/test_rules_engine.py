@@ -98,22 +98,16 @@ def test_discovery_unlocks_the_hidden_route_only_for_the_discoverer():
     # An interval host has already advanced the shared clock when it resolves a search.
     search_state = apply_event(state, next(event for event in result.events if isinstance(event, TimeAdvancedEvent)))
     search_intent = parse_action(proposal)
-    outcome, search_events, rolls = engine._exploration_search(
-        search_state, search_state.entities[player], search_intent, context,
-        observed_tick=search_state.current_tick,
-    )
-    assert outcome == result.outcome and rolls == result.rolls
+    boundary = engine.settle_exploration(search_state, search_intent, context)
+    assert boundary.outcome == result.outcome and boundary.rolls == result.rolls
     search_event_types = {"core.entity_discovered.v1", "core.knowledge_acquired.v1"}
-    assert search_events == [event for event in result.events if event.type in search_event_types]
-    search_after = _replay(search_state, search_events)
+    assert boundary.events == [event for event in result.events if event.type in search_event_types]
+    search_after = _replay(search_state, boundary.events)
     assert search_after.current_tick == search_state.current_tick
     assert search_after.entities[player].components.get("needs") == search_state.entities[player].components.get("needs")
     changed_site = apply_event(search_state, EntityFieldChangedEvent(entity_id=vault, field_name="status", value="retired"))
-    changed_outcome, changed_events, _ = engine._exploration_search(
-        changed_site, changed_site.entities[player], search_intent, context,
-        observed_tick=changed_site.current_tick,
-    )
-    assert changed_outcome.code == "nothing_hidden_found" and changed_events == []
+    changed_boundary = engine.settle_exploration(changed_site, search_intent, context)
+    assert changed_boundary.outcome.code == "nothing_hidden_found" and not changed_boundary.events
 
     after = _replay(state, result.events)
     assert after.entities[vault].components["hidden"] is True

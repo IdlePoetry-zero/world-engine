@@ -13,7 +13,7 @@ from decimal import Decimal
 from enum import Enum
 import ipaddress
 from types import MappingProxyType
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -173,6 +173,12 @@ class ModelRequest:
     data_policy: DataPolicy = DataPolicy.CLOUD_ALLOWED
     model: str | None = None
     temperature: float | None = None
+    refresh_data_policy: Callable[[], DataPolicy] | None = field(default=None, repr=False, compare=False)
+
+    def current_data_policy(self) -> DataPolicy:
+        if self.data_policy is DataPolicy.LOCAL_ONLY or self.refresh_data_policy is None:
+            return self.data_policy
+        return self.refresh_data_policy()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "messages", tuple(self.messages))
@@ -266,6 +272,9 @@ class ProviderConfig:
             return ipaddress.ip_address(host).is_loopback
         except ValueError:
             return host == "localhost"
+
+    def permits_data_policy(self, policy: DataPolicy) -> bool:
+        return policy is not DataPolicy.LOCAL_ONLY or self.is_local_endpoint
 
 
 @dataclass(frozen=True, slots=True)

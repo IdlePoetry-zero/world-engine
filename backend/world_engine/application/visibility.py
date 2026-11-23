@@ -185,6 +185,120 @@ def _own_private_gifts(
     return gifts
 
 
+def _scene_opportunities(
+    state: dict[str, Any], projected_entities: dict[str, Any], actor_id: str, tick: int, *, traveling: bool,
+) -> list[dict[str, Any]]:
+    visible = []
+    for scheduled in state.get("scheduled_events", ()):
+        if scheduled.get("handler_id") != STORY_NODE_HANDLER or scheduled.get("status") != "queued":
+            continue
+        node = scheduled["payload"]
+        opportunity = node.get("opportunity")
+        if node.get("visibility") != "public" or not opportunity:
+            continue
+        due = int(scheduled["due_tick"])
+        if not 0 < due - tick <= int(opportunity["lead_ticks"]):
+            continue
+        place_id = opportunity["place_id"]
+        place = projected_entities.get(place_id)
+        if not place or state["entities"][place_id].get("status") != "active":
+            continue
+        contact = projected_entities.get(opportunity.get("contact_id"))
+        name = contact.get("name") if contact and contact.get("status") == "active" else None
+        title = opportunity["title"]
+        published = {
+            "opportunity_id": scheduled["id"], "title": title, "detail": opportunity["detail"],
+            "deadline_tick": str(due),
+            "draft": {"mode": "ask_gm", "text": f"我目前知道「{title}」的哪些线索，可以从哪里入手？"},
+        }
+        if place.get("name"):
+            published["place_name"] = place["name"]
+        for field in ("known_cost", "possible_impact"):
+            if opportunity.get(field):
+                published[field] = opportunity[field]
+        if name:
+            published["contact_name"] = name
+        actor_location = projected_entities[actor_id].get("location_id")
+        if not traveling and name and actor_location == place_id and contact.get("location_id") == place_id:
+            published["draft"] = {"mode": "roleplay", "text": f"我问{name}：「关于{title}，现在我能帮上什么？」"}
+        visible.append(published)
+    return sorted(visible, key=lambda item: (int(item["deadline_tick"]), item["opportunity_id"]))[:8]
+
+
+def _scene_npc_readback(state, projected, actor_id, location, tick):
+    result: dict[str, Any] = {}
+    if location is None:
+        return result
+    observations = {}
+    last_contacts = {}
+    for item in state.get("knowledge", ()):
+        if not _owned_knowledge_is_eligible(item, actor_id, tick) or item.get("relationship_disclosure"):
+            continue
+        subject_id = item.get("subject_id")
+        if item.get("kind") in {"observation", "claim"} and isinstance(item.get("id"), str):
+            observations.setdefault(subject_id, []).append(item)
+        elif (item.get("kind") == "memory" and item.get("holder_id") == actor_id
+              and any(ref.get("kind") == "observation" for ref in item.get("provenance", ()))):
+            heard_at = int(item.get("received_tick", 0))
+            last_contacts[subject_id] = max(heard_at, last_contacts.get(subject_id, heard_at))
+    for npc_id, npc in projected.items():
+        if (npc_id == actor_id or npc.get("kind") not in {"character", "person"}
+            or npc.get("location_id") != location or npc.get("status") != "active"):
+            continue
+        components = state["entities"][npc_id].get("components", {})
+        cadences = components.get("routine_mobility", {}).get("cadences", {})
+        windows = []
+        for window in components.get("daily_routine", {}).get("windows", ()):
+            place = projected.get(window.get("place_id"))
+            if window.get("public") is not True or not place or not place.get("name"):
+                continue
+            cadence = cadences.get(window["window_id"], {})
+            windows.append({
+                "activity": window["activity"], "place_name": place["name"],
+                "start_second": window["start_second"], "duration_seconds": window["duration_seconds"],
+                "every_days": cadence.get("every_days", 1),
+            })
+        last_contact = last_contacts.get(npc_id)
+        recent = (item for item in observations.get(npc_id, ())
+                  if last_contact is None or int(item.get("received_tick", 0)) >= last_contact)
+        known = sorted(recent, key=lambda item: (int(item.get("received_tick", 0)), item["id"]),
+                       reverse=True)
+        known_changes = [{"claim": item["claim"], "received_tick": str(item.get("received_tick", 0))}
+                         for item in known[:2]]
+        if windows or known_changes or last_contact is not None:
+            result[npc_id] = {"public_schedule": windows[:4], "known_changes": known_changes}
+            if last_contact is not None:
+                result[npc_id]["last_contact_tick"] = str(last_contact)
+    return result
+
+
+def _project_knowledge(item, projected_entities):
+    visible = {key: deepcopy(item[key]) for key in (
+        "id", "claim", "summary", "confidence", "source_refs", "received_tick", "kind"
+    ) if key in item}
+    fact = item.get("fact")
+    assessment = item.get("assessment")
+    if isinstance(assessment, dict):
+        visible["investigation"] = {
+            "finding": assessment["finding"], "observation_id": assessment["observation_id"],
+            "claim_id": assessment["claim_id"], "effective_tick": str(assessment["effective_tick"]),
+            "predicate": assessment["predicate"],
+        }
+    elif isinstance(fact, dict) and item.get("kind") in {"observation", "belief", "claim", "rumor"}:
+        subject_id = item.get("subject_id")
+        disclosure = item.get("disclosure")
+        source_id = disclosure["speaker_id"] if isinstance(disclosure, dict) else subject_id
+        visible["investigation"] = {
+            "predicate": fact["predicate"], "effective_tick": str(fact["effective_tick"]),
+        }
+        if subject_id:
+            visible["investigation"]["subject_id"] = subject_id
+        source_name = projected_entities.get(source_id, {}).get("name")
+        if source_name:
+            visible["investigation"]["source_name"] = source_name
+    return visible
+
+
 def project_player_state(state: dict[str, Any], actor_id: str) -> dict[str, Any]:
     """Create an isolated allowlisted view; never mutate the authoritative state.
 
@@ -234,9 +348,7 @@ def project_player_state(state: dict[str, Any], actor_id: str) -> dict[str, Any]
         projected_entities[entity_id] = entry
 
     knowledge = [
-        {key: deepcopy(item[key]) for key in (
-            "id", "claim", "summary", "confidence", "source_refs", "received_tick", "kind"
-        ) if key in item}
+        _project_knowledge(item, projected_entities)
         for item in state.get("knowledge", [])
         if _owned_knowledge_is_eligible(item, actor_id, tick) and not item.get("relationship_disclosure")
     ]
@@ -391,6 +503,10 @@ def project_player_state(state: dict[str, Any], actor_id: str) -> dict[str, Any]
         for offer in state.get("accusation_repair_offers", [])
         if actor_id in (offer.get("accuser_id"), offer.get("suspect_id"))
     ]
+    own_case_repair_ids = {
+        offer["case_file_id"]: offer["offer_id"] for offer in state.get("accusation_repair_offers", [])
+        if offer.get("accuser_id") == actor_id and offer.get("case_file_id")
+    }
     result = {
         "entities": projected_entities,
         "own_study_skills": _own_study_skills(actor),
@@ -441,6 +557,17 @@ def project_player_state(state: dict[str, Any], actor_id: str) -> dict[str, Any]
                 "public_accusation",
             ) if key in case} | ({"public_accusation_corrected_tick": correction_ticks[case["id"]]}
                                  if case["id"] in correction_ticks else {})
+            | ({"repair_offer_id": own_case_repair_ids[case["id"]]} if case["id"] in own_case_repair_ids else {})
+            | (
+                {"suspect_name": visible_suspect["name"],
+                 "can_correct_public_accusation": bool(
+                     case.get("outcome") == "disconfirmed" and case.get("public_accusation")
+                     and case["id"] not in correction_ticks and visible_suspect.get("status") == "active"
+                     and visible_suspect.get("location_id") == location
+                 )}
+                if (visible_suspect := projected_entities.get(case.get("suspect_id"))) and visible_suspect.get("name")
+                else {}
+            )
             for case in state.get("investigation_cases", []) if case.get("owner_id") == actor_id
         ],
         "player_id": actor_id,
@@ -450,6 +577,13 @@ def project_player_state(state: dict[str, Any], actor_id: str) -> dict[str, Any]
             "pack_id", "public_title", "public_description"
         ) if key in state.get("metadata", {})},
     }
+    traveling = result["own_active_travel"] is not None
+    opportunities = _scene_opportunities(state, projected_entities, actor_id, tick, traveling=traveling)
+    if opportunities:
+        result["scene_opportunities"] = opportunities
+    contacts = _scene_npc_readback(state, projected_entities, actor_id, location, tick) if not traveling else {}
+    if contacts:
+        result["scene_npc_readback"] = contacts
     if state.get("story_milestones"):
         public_nodes = {item["id"]: item["payload"] for item in state.get("scheduled_events", [])
                         if item["handler_id"] == STORY_NODE_HANDLER and item["payload"].get("visibility") == "public"}

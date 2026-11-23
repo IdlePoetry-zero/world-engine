@@ -113,6 +113,10 @@ class ModelGateway:
         raw: RawModelResult | None = None
         final_error: ProviderError | None = None
         for attempt_number in range(1, config.max_retries + 2):
+            request = replace(request, data_policy=request.current_data_policy())
+            if not config.permits_data_policy(request.data_policy):
+                final_error = self._local_policy_error()
+                break
             remaining = deadline - time.perf_counter()
             if remaining <= 0:
                 final_error = ProviderError(ProviderErrorCode.TIMEOUT, "Model call exceeded its deadline", retryable=False, possibly_billed=bool(attempts))
@@ -256,6 +260,10 @@ class ModelGateway:
         completed = False
 
         for attempt_number in range(1, config.max_retries + 2):
+            request = replace(request, data_policy=request.current_data_policy())
+            if not config.permits_data_policy(request.data_policy):
+                final_error = self._local_policy_error()
+                break
             remaining = deadline - time.perf_counter()
             if remaining <= 0:
                 final_error = ProviderError(ProviderErrorCode.TIMEOUT, "Model stream exceeded its deadline", retryable=False, possibly_billed=bool(attempts))
@@ -442,9 +450,17 @@ class ModelGateway:
             raise ProviderError(ProviderErrorCode.INVALID_OUTPUT, "The referenced output schema could not be resolved")
         return replace(request, output_schema=schema)
 
+    @staticmethod
+    def _local_policy_error() -> ProviderError:
+        return ProviderError(
+            ProviderErrorCode.UNAVAILABLE,
+            "Data policy forbids sending this request to a non-loopback endpoint",
+            possibly_billed=False,
+        )
+
     def _validate_policy_and_capabilities(self, adapter: ProviderAdapter, config: ProviderConfig, request: ModelRequest, *, streaming: bool) -> None:
-        if request.data_policy.value == "local_only" and not config.is_local_endpoint:
-            raise ProviderError(ProviderErrorCode.UNAVAILABLE, "Data policy forbids sending this request to a non-loopback endpoint")
+        if not config.permits_data_policy(request.current_data_policy()):
+            raise self._local_policy_error()
         if request.output_schema is not None:
             try:
                 validators.validator_for(request.output_schema).check_schema(dict(request.output_schema))

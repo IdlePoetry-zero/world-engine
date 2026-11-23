@@ -386,6 +386,11 @@ def create_app(
                 threshold = safety_conditions[0].get("threshold")
                 if type(threshold) is int and 0 <= threshold <= 100:
                     view["study_stop_safety_at_or_below"] = threshold
+        if (plan.get("activity") == "explore" and job.status.value == "succeeded"
+            and access is not None and job.payload.get("submitted_by") == str(access.user_id)):
+            boundary = (result.get("metrics") or {}).get("integration_boundary")
+            if boundary in {"discovered", "nothing_hidden_found", "search_failed"}:
+                view["reason_code"] = boundary
         if plan.get("activity") == "work" and access is not None and job.payload.get("submitted_by") == str(access.user_id):
             if job.status.value == "succeeded" and not view["reason_code"]:
                 view["reason_code"] = (result.get("metrics") or {}).get("integration_boundary")

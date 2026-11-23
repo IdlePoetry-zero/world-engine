@@ -22,7 +22,13 @@ class EmptyTestCatalog:
         return []
 
 
-def test_ruleset_upgrade_restores_same_history_and_records_new_events_under_target_version(tmp_path):
+@pytest.mark.parametrize("configured_source", [False, True])
+def test_ruleset_upgrade_restores_same_history_and_records_new_events_under_target_version(
+    tmp_path, monkeypatch, configured_source,
+):
+    if configured_source:
+        source_database = tmp_path / "configured-source.db"
+        monkeypatch.setenv("WORLD_ENGINE_DATABASE_URL", f"sqlite:///{source_database.as_posix()}")
     app = build_application(data_directory=tmp_path, catalog=EmptyTestCatalog(), run_simulation_worker=False)
     owner = local_identity(tmp_path)
     actor_id = uuid4()
@@ -58,6 +64,9 @@ def test_ruleset_upgrade_restores_same_history_and_records_new_events_under_targ
         assert repository.read_world(owner, world_id, branch_id) == before
     copy_path = Path(upgraded["data_directory"])
     copy_owner = local_identity(copy_path)
+    if configured_source:
+        assert source_database.is_file()
+        monkeypatch.delenv("WORLD_ENGINE_DATABASE_URL")
     copy = build_application(data_directory=copy_path, catalog=EmptyTestCatalog(), port=8001, run_simulation_worker=False)
     with TestClient(copy, base_url="http://127.0.0.1:8001") as client:
         client.get("/api/v1/session").raise_for_status()
@@ -97,6 +106,9 @@ def test_runtime_applies_migrations_and_preserves_configuration(tmp_path, monkey
         identity = client.get("/api/v1/session").json()
         providers = client.get("/api/v1/providers").json()["items"]
         assert {p["provider_id"] for p in providers} == {"deepseek", "ollama"}
+        initial = client.get("/api/v1/settings").json()
+        assert initial["local_only"] is True
+        assert initial["routes"]["gm_answer"]["fallbacks"] == [{"provider_id": "ollama"}]
         assert client.get("/api/v1/worlds").json() == {"items": []}
         assert client.put("/api/v1/settings", json={"local_only": True, "routes": {}}).status_code == 200
     with sqlite3.connect(tmp_path / "world-engine.db") as db:

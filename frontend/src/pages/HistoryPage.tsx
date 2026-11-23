@@ -78,6 +78,7 @@ export function BackupPreview() {
         event.currentTarget.value = ''
         if (file) void verify(file)
       }} />
+    <p className="restore-port-note">副本从归档中最后提交的世界状态开始。进行中的本机作业和待确认草稿需要在副本中重新安排。</p>
     <div role="status">{pending === 'verify' ? '正在校验归档及回放…' : pending === 'restore' ? '正在恢复独立副本…' : summary ?
       `已验证「${summary.title}」，${summary.branch_count} 个分支，${summary.event_count} 条事件。` : ''}</div>
     {summary?.ruleset_version && summary.pack_version && <p className="restore-port-note">
@@ -314,6 +315,7 @@ export function HistoryPage({ world, branches, branchId, onBranchChange, onBranc
       <a className="button button-secondary button-small" href={`/api/v1/worlds/${encodeURIComponent(world.world_id)}/backup?format_version=2.0`} download>
         <Icon name="download" size={15} />下载世界备份
       </a>
+      <p className="restore-port-note">备份包括已提交的世界状态、分支和事件。对话记录、模型配置、密钥和未完成的作业保存在本机。</p>
       {visibleHistory?.hasSourcePack && <a className="button button-secondary button-small"
         href={`/api/v1/worlds/${encodeURIComponent(world.world_id)}/source-world-pack`} download>
         <Icon name="download" size={15} />下载源世界包（含作者资料）

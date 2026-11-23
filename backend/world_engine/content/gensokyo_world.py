@@ -15,7 +15,7 @@ from .gensokyo_cast_habitats import HABITATS
 from .gensokyo_cast_middle import MIDDLE_CAST_FACTS, MIDDLE_CAST_SOURCES
 from .gensokyo_cast_personae_late import LATE_CAST_FACTS, LATE_CAST_PRIVATE_FACTS
 from .gensokyo_cast_relations_late import LATER_CAST_RELATIONS
-from .gensokyo_chronology import CHAPTERS, CONTINUATION_DAYS, HISTORY_WORKS, Chapter, incident_nodes
+from .gensokyo_chronology import CHAPTERS, CONTINUATION_DAYS, HISTORY_WORKS, MORIYA_SURVEY_ID, Chapter, incident_nodes
 from .gensokyo_disciplines import local_play, skill_levels
 from .gensokyo_original_profiles import GEOGRAPHY, PROFILES, source_id
 from .gensokyo_reference import (
@@ -28,7 +28,7 @@ from .gensokyo_village_life import RESOURCE_LABELS, add_local_economy
 
 
 PACK_ID = "author.gensokyo-world"
-PACK_VERSION = "1.1.0"
+PACK_VERSION = "1.2.0"
 PACK_TITLE = "东方幻想乡·异变年代"
 _HOUR = 3600
 
@@ -159,6 +159,8 @@ def _chapter_continuations(
             reports.append(_chapter_report(
                 later, evidence, entities, cast_entries[later.contact].title, scheduled.id, opens_after=trigger,
             ))
+            if later.key == "mountain-shrine":
+                reports.append(_moriya_survey(scheduled.id, opens_after=trigger))
             incident_id = scheduled.id
     return followups, arrivals, reports
 
@@ -178,6 +180,15 @@ def _chapter_report(
         opens_after_story_id=opens_after,
         closes_after_story_id=deadline,
         description=f"在首轮调查结算前，于{entities[meeting].name}提交线索并联系{contact_name}。",
+    )
+
+
+def _moriya_survey(deadline: UUID, *, opens_after: UUID | None = None) -> ChallengeDefinition:
+    return ChallengeDefinition(
+        challenge_id=MORIYA_SURVEY_ID, venue_id=_id("place:youkai-mountain"),
+        title="守矢交涉前的山道核查", skill_id="gensokyo.technology", skill_label="器具检验",
+        pass_level="10", opens_after_story_id=opens_after, closes_after_story_id=deadline,
+        description="用测量工具核对山道坡度与路标。仅完成核查时，首轮交涉可给予山道近路试行资格。",
     )
 
 
@@ -516,6 +527,7 @@ def _routines(
     windows.append({
         "window_id": outing, "start_second": start, "duration_seconds": 2 * _HOUR,
         "activity": activity, "place_id": str(errand),
+        **({"public": True} if key in {"reimu", "marisa", "aunn", "kosuzu", "keine"} else {}),
     })
     period = 3 + index % 5
     result["routine_mobility"] = {
@@ -611,6 +623,8 @@ def build_opening(chapter: Chapter) -> dict:
         _chapter_report(chapter, history[chapter.key], entities, cast_entries[chapter.contact].title, incident.id),
         *later_reports,
     ])
+    if chapter.key == "mountain-shrine":
+        challenges.append(_moriya_survey(incident.id))
     resources = add_local_economy(entities, player.id)
     state = WorldState(
         player_id=player.id, entities=entities, goals=goals, resources=resources,

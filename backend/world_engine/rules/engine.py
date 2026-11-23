@@ -2001,8 +2001,12 @@ class RuleEngine:
         issue = self._duration_issue(state, actor, duration)
         if issue is not None:
             return self._rejected(context, *issue)
+        observation_tick = state.current_tick + duration
+        if any(event.status == "queued" and event.due_tick == observation_tick for event in state.scheduled_events):
+            return self._rejected(context, "scheduled_boundary_required",
+                                  "A world event is due at the search observation boundary.")
         outcome, events, rolls = self._exploration_search(
-            state, actor, intent, context, observed_tick=state.current_tick + duration,
+            state, actor, intent, context, observed_tick=observation_tick,
         )
         needs_event, deprivation = self._time_need_effects(state, actor, duration, context)
         events.extend(item for item in (needs_event, deprivation) if item is not None)
@@ -2024,11 +2028,24 @@ class RuleEngine:
             return "not_at_place", "The character must be present to explore this place."
         place = state.entities.get(intent.place_id)
         observed_target_ids = _observed_entities(state, actor.id)
-        if place is None or place.kind not in {"place", "location"} or (
+        if place is None or place.kind not in {"place", "location"} or place.status != "active" or (
             place.components.get("hidden") is True and place.id not in observed_target_ids
         ):
             return "place_unavailable", "The place is not visible to this character."
         return None
+
+    def settle_exploration(self, state: WorldState, intent: ExploreIntent, context: RuleContext) -> RuleResolution:
+        """Use the shared search rules at the boundary of an authorized timed action."""
+        actor = state.entities.get(context.actor_id)
+        if actor is None or actor.status != "active":
+            return self._rejected(context, "explorer_unavailable", "The explorer cannot complete the search.")
+        issue = self._exploration_site_issue(state, actor, intent)
+        if issue is not None:
+            return self._rejected(context, *issue)
+        outcome, events, rolls = self._exploration_search(
+            state, actor, intent, context, observed_tick=state.current_tick,
+        )
+        return RuleResolution(outcome=outcome, events=events, rolls=rolls, ruleset_version=context.ruleset_version)
 
     def _exploration_search(
         self, state: WorldState, actor: WorldEntity, intent: ExploreIntent, context: RuleContext, *, observed_tick: int,

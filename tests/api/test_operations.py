@@ -1,4 +1,5 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import json
@@ -669,13 +670,65 @@ def test_configuration_persists_and_is_account_scoped(tmp_path):
                 "routes": {"gm_answer": {"provider_id": provider["provider_id"], "model": "fixture"}}}
     store.save_settings(user, settings)
     reopened = OperationsStore(path)
-    assert reopened.settings(user) == settings
+    assert reopened.settings(user) == settings | {"revision": 1}
     assert reopened.provider(user, provider["provider_id"])["name"] == "Test endpoint"
     another_user = AccessScope(tenant_id=user.tenant_id, user_id=uuid4())
     assert reopened.list_providers(another_user) == []
     assert reopened.settings(another_user)["routes"] == {}
+    assert reopened.settings(another_user)["revision"] == 0
     with pytest.raises(ValueError):
         store.save_provider(user, provider_document("http://remote.example/v1"))
+
+
+def test_settings_compare_and_swap_serializes_concurrent_writers_on_legacy_row(tmp_path):
+    store, user = OperationsStore(tmp_path / "ops.db"), scope()
+    initial = {"speed": "balanced", "depth": "deep", "local_only": False, "routes": {}}
+    with store.connect() as db:
+        db.execute("INSERT INTO preferences VALUES(?,?,?)", (*store.identity(user), json.dumps(initial)))
+    assert store.settings(user) == initial | {"revision": 0}
+
+    def save(patch):
+        try:
+            return store.save_settings(user, patch, expected_revision=0)
+        except ApplicationFailure as error:
+            return error.code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(save, [{"local_only": True}, {"speed": "fast"}]))
+    assert results.count("SETTINGS_STALE") == 1
+    assert next(result for result in results if isinstance(result, dict)) == store.settings(user)
+    assert store.settings(user)["revision"] == 1
+
+
+def test_http_settings_refresh_and_reapply_only_the_stale_tabs_intent(tmp_path):
+    store, user = OperationsStore(tmp_path / "ops.db"), scope()
+    operations = ModelOperations(store, ModelGateway())
+    session = LocalSession(str(user.user_id), str(user.tenant_id), frozenset({"http://testserver"}))
+    app = create_app(None, session, operations=operations)
+    with TestClient(app) as client:
+        client.get("/api/v1/session")
+        initial = client.get("/api/v1/settings").json()
+        route = {"gm_answer": {"max_output_tokens": 128}}
+        updated = client.put("/api/v1/settings", json=initial | {"local_only": True, "routes": route})
+        assert updated.status_code == 200
+        for stale in [initial, {key: value for key, value in initial.items() if key != "revision"}]:
+            response = client.put("/api/v1/settings", json=stale | {"speed": "fast"})
+            assert response.status_code == 409
+            assert response.json()["error"]["code"] == "SETTINGS_STALE"
+        assert client.get("/api/v1/settings").json() == updated.json()
+
+        updated = client.put("/api/v1/settings", json=updated.json() | {"speed": "fast"})
+        assert updated.status_code == 200
+        assert updated.json()["speed"] == "fast"
+        assert updated.json()["local_only"] is True
+        assert updated.json()["routes"] == route
+        legacy_field_update = client.put("/api/v1/settings", json={"depth": "exhaustive"})
+        assert legacy_field_update.status_code == 200
+        assert legacy_field_update.json()["local_only"] is True
+        assert legacy_field_update.json()["routes"] == route
+        opted_in = client.put("/api/v1/settings", json={"revision": legacy_field_update.json()["revision"], "local_only": False})
+        assert opted_in.status_code == 200
+        assert opted_in.json()["local_only"] is False
 
 
 def test_ollama_context_configuration_roundtrips_and_is_provider_specific(tmp_path):
@@ -729,6 +782,85 @@ async def test_calls_are_audited_without_prompts_and_locality_blocks_network(tmp
         await operations.generate(user, ModelRequest(role_task=RoleTask.GM_ANSWER, messages=(ChatMessage("user", "second"),)))
     assert len(calls) == 1
     assert len(store.list_calls(user)) == 2
+
+
+def test_local_policy_blocks_remote_catalogue_probe_and_generation_at_transport(tmp_path):
+    outbound = []
+
+    def handle(request):
+        outbound.append((request.url.host, request.url.path, request.method, bool(request.content)))
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": [{"id": "fixture"}]})
+        return httpx.Response(200, json={
+            "model": "fixture", "choices": [{"message": {"content": "answer"}, "finish_reason": "stop"}],
+        })
+
+    store, user = OperationsStore(tmp_path / "ops.db"), scope()
+    local = store.save_provider(user, provider_document())
+    remote = store.save_provider(user, provider_document("https://cloud.example/v1"))
+    gateway = ModelGateway(transports={ProviderKind.OPENAI_COMPATIBLE: httpx.MockTransport(handle)})
+    operations = ModelOperations(store, gateway)
+    session = LocalSession(str(user.user_id), str(user.tenant_id), frozenset({"http://testserver"}))
+    with TestClient(create_app(None, session, operations=operations)) as client:
+        client.get("/api/v1/session")
+        providers = client.get("/api/v1/providers").json()["items"]
+        assert {item["provider_id"]: item["is_local_endpoint"] for item in providers} == {
+            local["provider_id"]: True, remote["provider_id"]: False,
+        }
+        initial = client.get("/api/v1/settings").json()
+        routes = {"gm_answer": {
+            "provider_id": remote["provider_id"], "fallbacks": [{"provider_id": local["provider_id"]}],
+        }}
+        local_mode = client.put("/api/v1/settings", json=initial | {"local_only": True, "routes": routes}).json()
+        for endpoint, method in [
+            ("/api/v1/models?provider_id=" + remote["provider_id"], client.get),
+            (f"/api/v1/providers/{remote['provider_id']}/probe", client.post),
+        ]:
+            response = method(endpoint)
+            assert response.status_code == 403
+            assert response.json()["error"]["code"] == "MODEL_LOCAL_ONLY"
+        assert outbound == []
+        assert client.post(f"/api/v1/providers/{local['provider_id']}/probe").status_code == 200
+        request = ModelRequest(role_task=RoleTask.GM_ANSWER, messages=(ChatMessage("user", "fixture input"),))
+        assert asyncio.run(operations.generate(user, request)).normalized_output == "answer"
+        assert outbound == [
+            ("127.0.0.1", "/v1/models", "GET", False),
+            ("127.0.0.1", "/v1/chat/completions", "POST", True),
+        ]
+        assert client.put("/api/v1/settings", json=local_mode | {"local_only": False}).status_code == 200
+        assert client.get("/api/v1/models", params={"provider_id": remote["provider_id"]}).status_code == 200
+        assert outbound[-1] == ("cloud.example", "/v1/models", "GET", False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("primary_url", ["https://primary.example/v1", "http://127.0.0.1:9999/v1"])
+async def test_enabling_local_policy_during_call_blocks_next_cloud_attempt(tmp_path, primary_url):
+    store, user = OperationsStore(tmp_path / "ops.db"), scope()
+    primary = store.save_provider(user, provider_document(primary_url) | {"max_retries": 1})
+    fallback = store.save_provider(user, provider_document("https://fallback.example/v1"))
+    routes = {"gm_answer": {
+        "provider_id": primary["provider_id"], "fallbacks": [{"provider_id": fallback["provider_id"]}],
+    }}
+    store.save_settings(user, {"routes": routes})
+    outbound_hosts = []
+
+    async def handle(request):
+        outbound_hosts.append(request.url.host)
+        store.save_settings(user, {"local_only": True})
+        return httpx.Response(503, json={"error": "temporarily unavailable"})
+
+    gateway = ModelGateway(
+        transports={ProviderKind.OPENAI_COMPATIBLE: httpx.MockTransport(handle)},
+        sleeper=lambda _: asyncio.sleep(0),
+    )
+    operations = ModelOperations(store, gateway)
+    with pytest.raises(ProviderError) as raised:
+        await operations.generate(user, ModelRequest(
+            role_task=RoleTask.GM_ANSWER, messages=(ChatMessage("user", "fixture input"),),
+        ))
+    assert raised.value.code is ProviderErrorCode.UNAVAILABLE
+    assert raised.value.call_trace.data_policy is DataPolicy.LOCAL_ONLY
+    assert outbound_hosts == (["primary.example"] if primary_url.startswith("https:") else ["127.0.0.1"] * 2)
 
 
 def test_http_configuration_rejects_secret_values_and_unknown_roles(tmp_path):

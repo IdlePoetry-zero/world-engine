@@ -79,7 +79,7 @@ class SimulationJobs:
             elif profile is not None:
                 payload["max_steady_macro_days"] = profile.max_steady_macro_days
         if isinstance(plan, LongActionPlan) and (
-            plan.activity == "work" or plan.travel_itinerary is not None
+            plan.activity in {"work", "explore"} or plan.travel_itinerary is not None
         ):
             payload["submitted_by"] = str(scope.user_id)
         if isinstance(plan, LongActionPlan) and plan.activity == "work":

@@ -15,7 +15,7 @@ if str(BACKEND_DIR) not in sys.path:
 from world_engine.storage.models import Base  # noqa: E402
 
 config = context.config
-database_url = os.environ.get("WORLD_ENGINE_DATABASE_URL")
+database_url = config.attributes.get("database_url") or os.environ.get("WORLD_ENGINE_DATABASE_URL")
 if database_url:
     config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 

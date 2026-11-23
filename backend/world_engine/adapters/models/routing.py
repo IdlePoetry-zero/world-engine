@@ -46,7 +46,7 @@ class RoleRoutingConfig:
             provider = providers.get(target.provider_id)
             if provider is None:
                 continue
-            if data_policy is DataPolicy.LOCAL_ONLY and not provider.is_local_endpoint:
+            if not provider.permits_data_policy(data_policy):
                 continue
             allowed.append(target)
         if not allowed:

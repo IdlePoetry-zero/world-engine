@@ -17,6 +17,12 @@ export function jobReasonLabel(reason: string): string {
 
     action_step_complete: '行动规则到达一个结算边界',
 
+    discovered: '搜查发现了新线索，可在本角色的调查记录中查看',
+    nothing_hidden_found: '搜查已结束，暂未发现新线索',
+    search_failed: '搜查已结束，暂未发现新线索',
+    exploration_site_unavailable: '角色已离开原处或原地点无法继续搜查',
+    explorer_unavailable: '角色当前无法继续搜查',
+
     plan_constraint_do_not_eat: '计划要求停止进食活动',
 
     plan_constraint_do_not_rest: '计划要求停止休息活动',

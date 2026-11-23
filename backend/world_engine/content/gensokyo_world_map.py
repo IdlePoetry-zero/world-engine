@@ -8,6 +8,7 @@ from world_engine.domain.models import WorldEntity
 from world_engine.domain.story_nodes import StoryReaction
 
 from .gensokyo_reference import _id, build_geography_index
+from .gensokyo_chronology import MORIYA_SURVEY_PERMIT
 
 
 # Explicit walkable routes between atlas nodes without a source-backed parent.
@@ -118,6 +119,7 @@ def connect_world_map(entities: dict[UUID, WorldEntity]) -> None:
     )
     links = [(start, end, minutes, ()) for start, end, minutes in (*_SURFACE_ROUTES, *atlas_parents)]
     links.extend((start, end, minutes, (access,)) for start, end, minutes, access in _CROSSINGS)
+    links.append(("shrine", "moriya-shrine", 75, (MORIYA_SURVEY_PERMIT,)))
     routes: dict[UUID, dict[UUID, PlaceRoute]] = {}
     for first, second, minutes, access in links:
         first_id, second_id = _id(f"place:{first}"), _id(f"place:{second}")

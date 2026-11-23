@@ -403,6 +403,15 @@ export type PlayerKnowledgeView = {
   source_refs?: string[]
   received_tick?: number
   kind?: string
+  investigation?: {
+    subject_id?: string
+    effective_tick?: string | number
+    predicate?: 'entity_status' | 'entity_location'
+    source_name?: string
+    finding?: 'corroborated' | 'conflict'
+    observation_id?: string
+    claim_id?: string
+  }
 }
 export type AvailableCaseAnchor = {
   anchor_id: string
@@ -425,6 +434,9 @@ export type InvestigationCaseFileView = {
   closed_tick?: number | null
   outcome?: 'supported' | 'disconfirmed' | 'contested' | 'unresolved' | null
   suspect_id?: string | null
+  suspect_name?: string
+  can_correct_public_accusation?: boolean
+  repair_offer_id?: string
   public_accusation?: boolean
   public_accusation_corrected_tick?: string | number
 }
@@ -575,12 +587,29 @@ export type InstitutionalFinanceContext = {
   organizations: InstitutionalFinanceOrganization[]
   organizations_truncated: boolean
 }
+export type SceneOpportunity = {
+  opportunity_id: string
+  title: string
+  detail?: string
+  contact_name?: string
+  place_name?: string
+  deadline_tick?: string
+  known_cost?: string
+  possible_impact?: string
+  draft?: { mode: 'ask_gm' | 'roleplay' | 'action'; text: string }
+}
 export type WorldState = {
   entities: Record<string, CharacterEntity>
   player_id?: string
   calendar?: { name?: string; calendar_id?: string; day_seconds?: number; year_days?: number; [key: string]: unknown }
   world_book_entries?: WorldBookEntry[] | null
   story_milestones?: { record_id: string; title: string; summary: string; resolved_tick: string }[]
+  scene_opportunities?: SceneOpportunity[]
+  scene_npc_readback?: Record<string, {
+    public_schedule: { activity: string; place_name: string; start_second: number; duration_seconds: number; every_days: number }[]
+    known_changes: { claim: string; received_tick: string }[]
+    last_contact_tick?: string
+  }>
   local_challenges?: ChallengeOption[]
   local_contests?: ContestOption[]
   metadata?: Record<string, unknown>
@@ -678,6 +707,15 @@ export type WorldBookPreview = {
   expires_at?: string
 }
 export type WorldBookImportResult = { entry_count: number; state_version: string; duplicate: boolean }
+export type ActionDraft = {
+  draft_id: string
+  revision: number
+  action_kind: 'trade' | 'propose_relationship_invitation' | null
+  can_confirm: boolean
+  review: string
+}
+export type DraftControl = { operation: 'prepare' } |
+  { operation: 'update' | 'confirm' | 'cancel'; draft_id: string; revision: number }
 export type MessageRequest = {
   request_id: string
   world_id: string
@@ -687,9 +725,10 @@ export type MessageRequest = {
   expected_state_version: string
   mode: 'auto' | 'ask_gm' | 'roleplay' | 'action' | 'author'
   text: string
+  draft?: DraftControl
   profile: { speed: 'fast' | 'balanced' | 'patient'; depth: 'standard' | 'deep' | 'exhaustive' }
 }
-export type MessageResponse = { message_id: string; kind: string; content?: string; command_id?: string; job_id?: string; world_effect: boolean; committed_tick?: string; elapsed_ticks?: string; references?: string[]; state_version?: string }
+export type MessageResponse = { message_id: string; kind: string; content?: string; command_id?: string; job_id?: string; world_effect: boolean; committed_tick?: string; elapsed_ticks?: string; references?: string[]; state_version?: string; action_draft?: ActionDraft; closed_draft_id?: string }
 export type CommandStatus = { status: 'queued' | 'running' | 'waiting_input' | 'succeeded' | 'failed' | 'cancelled' | string; result?: string | { content?: string; kind?: string; world_effect?: boolean; elapsed_ticks?: string; references?: string[]; state_version?: string }; error?: ApiErrorBody; committed_through_tick?: string }
 export type LongActionWorkProgress = {
   shifts_paid: number
@@ -787,8 +826,8 @@ export type LongActionAccepted = {
 }
 export type JobDecisionOption = { option_id: string; label: string; effect_summary: string }
 export type JobDecision = { request_id: string; title: string; options: JobDecisionOption[] }
-export type Provider = { provider_id: string; kind: 'deepseek' | 'openai_compatible' | 'ollama' | 'anthropic'; name: string; base_url: string; secret_ref?: string; enabled: boolean; default_model?: string; ollama_context_tokens?: number | null }
-export type ProviderDraft = Omit<Provider, 'provider_id'>
+export type Provider = { provider_id: string; kind: 'deepseek' | 'openai_compatible' | 'ollama' | 'anthropic'; name: string; base_url: string; secret_ref?: string; enabled: boolean; is_local_endpoint: boolean; default_model?: string; ollama_context_tokens?: number | null }
+export type ProviderDraft = Omit<Provider, 'provider_id' | 'is_local_endpoint'>
 export type ProviderCredentialStatus = { configured: boolean; backend: 'windows_credential_manager' | 'unavailable' }
 export type ModelInfo = { id: string; name?: string; provider_id?: string; capability_evidence?: Record<string, unknown> | null; context_length?: number }
 export type ModelRouteTarget = { provider_id: string; model?: string; max_output_tokens?: number }
@@ -798,6 +837,7 @@ export type Settings = {
   depth: 'standard' | 'deep' | 'exhaustive'
   routes: Record<string, ModelRoute>
   local_only: boolean
+  revision: number
 }
 export type TransportFailureKind = 'connect_timeout' | 'connect' | 'read_timeout' | 'write_timeout' | 'pool_timeout' | 'timeout' | 'remote_protocol' | 'network' | 'request'
 export type CallAttemptRecord = {
@@ -839,16 +879,17 @@ export type GameMessage = {
   worldEffect?: boolean
   elapsedTicks?: string
   references?: string[]
+  jobId?: string
   rewriteSource?: { requestId: string; rewrites?: NarrativeRewrites }
 }
 export type ConversationItem = {
   request_id: string
   text: string
   status: 'running' | 'succeeded' | 'failed' | string
-  result?: { message_id?: string; kind?: string; content?: string; world_effect?: boolean; elapsed_ticks?: string; references?: string[]; state_version?: string; message?: string; error?: string | Record<string, unknown>; rewrites?: NarrativeRewrites } | null
+  result?: { message_id?: string; kind?: string; content?: string; job_id?: string; world_effect?: boolean; elapsed_ticks?: string; references?: string[]; state_version?: string; message?: string; error?: string | Record<string, unknown>; rewrites?: NarrativeRewrites } | null
   created_at?: string
 }
-export type Conversation = { session_id: string; actor_id: string; items: ConversationItem[] }
+export type Conversation = { session_id: string; actor_id: string; items: ConversationItem[]; action_draft?: ActionDraft }
 export type AuthorRevisionPreview = {
   preview_id: string
   world_id: string

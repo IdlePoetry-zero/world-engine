@@ -257,6 +257,7 @@ class DailyRoutineWindow(ComponentModel):
     duration_seconds: int = Field(gt=0, le=2**31 - 1)
     activity: Literal["rest", "work", "study", "socialize"]
     place_id: UUID
+    public: StrictBool = Field(default=False, exclude_if=lambda value: not value)
 
 
 class DailyRoutineComponent(ComponentModel):

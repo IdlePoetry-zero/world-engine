@@ -712,3 +712,7 @@ select { color-scheme: dark; }
 .call-status-error { color: #d5978c; background: rgba(191,103,89,.08); }
 .call-status-quiet { color: #a6aaa2; background: rgba(145,151,141,.08); }
 .call-status-unknown { color: #c9b77f; background: rgba(189,160,79,.08); }
+.cloud-route-details { margin: 12px 0; color: #a8b9ad; font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.cloud-route-details p { margin: 0 0 6px; }
+.cloud-route-details ul { margin: 0; padding-inline-start: 20px; }
+.cloud-change-actions { gap: 8px; }

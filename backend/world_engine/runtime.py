@@ -75,7 +75,7 @@ def local_identity(directory: Path) -> AccessScope:
 
 def migrate(database_url: str):
     configuration = Config(str(PROJECT_ROOT / "backend" / "migrations" / "alembic.ini"))
-    configuration.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
+    configuration.attributes["database_url"] = database_url
     command.upgrade(configuration, "head")
 
 
@@ -91,9 +91,14 @@ def initialize_model_settings(store: OperationsStore, identity: AccessScope):
         "default_model": "qwen3:8b-q4_k_m", "secret_ref": None, "enabled": True,
     }, "ollama")
     store.save_settings(identity, {
-        "speed": "balanced", "depth": "deep", "local_only": False,
-        "routes": {role.value: {"provider_id": deepseek["provider_id"], "model": "deepseek-flash"}
-                   for role in RoleTask if role is not RoleTask.EMBEDDING},
+        "speed": "balanced", "depth": "deep", "local_only": True,
+        "routes": {
+            role.value: {
+                "provider_id": deepseek["provider_id"], "model": "deepseek-flash",
+                "fallbacks": [{"provider_id": "ollama"}],
+            }
+            for role in RoleTask if role is not RoleTask.EMBEDDING
+        },
     })
 
 

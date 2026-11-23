@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from world_engine.application.quoted_speech_guard import visible_dialogue_targets
 from world_engine.application.simulation_jobs import SimulationJobs
+from world_engine.application.visibility import project_player_state
 from world_engine.application.world_packs import load_world_pack, write_world_pack
 from world_engine.content.gensokyo_cast_habitats import HABITATS
 from world_engine.content.gensokyo_reference import _id
@@ -16,6 +17,25 @@ from world_engine.domain.models import JobStatus, WorldState
 from world_engine.rules.engine import route_access_reason
 from world_engine.runtime import build_application, local_identity
 from world_engine.simulation.npc_routine_schedule import next_npc_routine_tick, npc_routine_candidate
+
+
+def test_scarlet_mist_scene_shows_the_current_lead_and_no_future_incident():
+    scenario = build_opening(CHAPTERS[0])["scenario"]
+    player = scenario["player_id"]
+    opportunities = project_player_state(scenario, player)["scene_opportunities"]
+    lead, = opportunities
+    assert lead["place_name"] == "博丽神社"
+    assert "红雾" in lead["title"]
+    assert lead["draft"]["mode"] == "ask_gm"
+    assert "contact_name" not in lead
+
+    scenario["entities"][player]["location_id"] = str(_id("place:shrine"))
+    present_lead, = project_player_state(scenario, player)["scene_opportunities"]
+    assert present_lead["contact_name"] == "博丽灵梦"
+    assert present_lead["draft"]["mode"] == "roleplay"
+
+    scenario["current_tick"] = int(lead["deadline_tick"])
+    assert "scene_opportunities" not in project_player_state(scenario, player)
 
 
 def _reachable_with_available_permits(state: WorldState) -> set[UUID]:

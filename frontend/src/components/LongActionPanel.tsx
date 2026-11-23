@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type Ref } from 'react'
 
 import { api, ApiError, type ItineraryRouteOption, type JobDecision, type JobStatusRecord, type LongActionItineraryProgress, type LongActionRequest, type LongActionWorkProgress, type LongActionWorkPurchaseAffordability, type LongActionWorkPurchaseTarget, type LongActionWorkResume, type MarketOfferQuote, type OwnActiveTravel, type OwnStudySkill, type OwnWorkAssignment, type Settings, type TravelOption, type WorkShiftOffer, type WorldAdvanceRequest } from '../api/client'
 
@@ -14,6 +14,8 @@ import { formatTick, formatWorldDuration, formatWorldRelativeTick, isValidCalend
 
 type Activity = LongActionRequest['activity']
 type TravelPlanMode = 'single' | 'itinerary'
+
+export type TravelDraftControls = { prepareRoute: (routeId: string) => boolean }
 
 type Unit = 'second' | 'hour' | 'day' | 'year'
 
@@ -116,6 +118,7 @@ export function LongActionPanel({
   daySeconds,
   yearDays,
   travelOptions,
+  travelDraftControls,
   itineraryRouteOptions,
   ownActiveTravel,
   currentPlaceId,
@@ -151,6 +154,7 @@ export function LongActionPanel({
   daySeconds?: number
   yearDays?: number
   travelOptions?: TravelOption[] | null
+  travelDraftControls?: Ref<TravelDraftControls>
   itineraryRouteOptions?: ItineraryRouteOption[] | null
   ownActiveTravel?: OwnActiveTravel | null
   currentPlaceId?: string | null
@@ -184,7 +188,7 @@ export function LongActionPanel({
     : null
 
   const [activitySelection, setActivitySelection] = useState<{ actorKey: string; activity: Activity } | null>(null)
-  const [selectedRouteId, setSelectedRouteId] = useState('')
+  const [travelRouteSelection, setTravelRouteSelection] = useState<{ key: string; routeId: string } | null>(null)
   const [travelPlanSelection, setTravelPlanSelection] = useState<{ key: string; mode: TravelPlanMode } | null>(null)
   const [travelItinerarySelection, setTravelItinerarySelection] = useState<{ key: string; routeIds: string[]; autoCare: boolean } | null>(null)
   const [studySkillSelection, setStudySkillSelection] = useState<{ actorKey: string; skillId: string } | null>(null)
@@ -341,8 +345,11 @@ export function LongActionPanel({
   const localTravelOptions = Array.isArray(travelOptions)
     ? travelOptions.filter((option) => Boolean(option.route_id) && parsePositiveTravelTicks(option.travel_ticks) !== null)
     : []
-  const selectedTravelRoute = localTravelOptions.find((option) => option.route_id === selectedRouteId) ?? localTravelOptions[0] ?? null
   const travelPlanKey = `${scopeKey}:${actorKey}:${currentPlaceId ?? ''}`
+  const selectedTravelRoute = !travelRouteSelection
+    ? localTravelOptions[0] ?? null
+    : localTravelOptions.find((option) => travelRouteSelection.key === travelPlanKey && option.route_id === travelRouteSelection.routeId) ?? null
+  const unavailableSelectedRoute = Boolean(travelRouteSelection && !selectedTravelRoute)
   const localItineraryRouteOptions = useMemo(() => {
     const validOptions = Array.isArray(itineraryRouteOptions) ? itineraryRouteOptions.filter(isItineraryRouteOption) : []
     const counts = new Map<string, number>()
@@ -423,7 +430,7 @@ export function LongActionPanel({
   const conflictingWorkSavingsGoals = balanceTarget !== '' && purchaseTargetFieldsPresent
   const currentActivity: Activity = activeJourney
     ? 'travel'
-    : (activity === 'travel' && localTravelOptions.length === 0 && !hasItineraryStartOptions)
+    : (activity === 'travel' && localTravelOptions.length === 0 && !hasItineraryStartOptions && !unavailableSelectedRoute)
       || (activity === 'study' && selectedStudySkill === null)
       || (activity === 'work' && selectedWorkAssignment === null) ? 'wait' : activity
   const explicitReplacementItinerary = progressMode === 'character'
@@ -817,6 +824,32 @@ export function LongActionPanel({
 
   }
 
+  useImperativeHandle(travelDraftControls, () => ({
+    prepareRoute(routeId) {
+      if (disabled || !currentPlaceId || activeJourney || submission || submitting) return false
+      const route = localTravelOptions.find((option) => option.route_id === routeId)
+      const ticks = route ? parsePositiveTravelTicks(route.travel_ticks) : null
+      if (ticks === null) return false
+
+      setProgressMode('character')
+      setActivitySelection({ actorKey, activity: 'travel' })
+      setTravelPlanSelection({ key: travelPlanKey, mode: 'single' })
+      setTravelRouteSelection({ key: travelPlanKey, routeId })
+      if (ticks <= 31_536_000n) {
+        setUnit('second')
+        setDuration(String(ticks))
+      } else if (hasWorldDayLength) {
+        const worldDay = BigInt(dayLength)
+        setUnit('day')
+        setDuration(String((ticks + worldDay - 1n) / worldDay))
+      } else {
+        setUnit('hour')
+        setDuration(String((ticks + 3_599n) / 3_600n))
+      }
+      return true
+    },
+  }))
+
   const openItineraryReplan = () => {
     setProgressMode('character')
     setActivitySelection({ actorKey, activity: 'travel' })
@@ -1179,7 +1212,7 @@ export function LongActionPanel({
 
             </div>}
 
-            {currentJob.reason_code && currentJob.status !== 'paused' && (currentJob.status !== 'succeeded' || WORK_REASON_CODES.has(currentJob.reason_code)) && <p className="long-action-reason">原因：{jobReasonLabel(currentJob.reason_code)}</p>}
+            {currentJob.reason_code && currentJob.status !== 'paused' && (currentJob.status !== 'succeeded' || WORK_REASON_CODES.has(currentJob.reason_code) || ['discovered', 'nothing_hidden_found', 'search_failed'].includes(currentJob.reason_code)) && <p className="long-action-reason">{jobReasonLabel(currentJob.reason_code)}</p>}
 
           </> : <div className="long-action-no-job">
 
@@ -1231,13 +1264,16 @@ export function LongActionPanel({
 
             {availableStudySkills.length > 0 && <option value="study">学习</option>}
 
-            {(activeJourney || localTravelOptions.length > 0 || hasItineraryStartOptions) && <option value="travel">旅行</option>}
+            {(activeJourney || localTravelOptions.length > 0 || hasItineraryStartOptions || unavailableSelectedRoute) && <option value="travel">旅行</option>}
 
             {availableWorkAssignments.length > 0 && <option value="work">按既有岗位排班工作</option>}
 
           </select>
 
         </label>}
+
+        {progressMode === 'character' && currentActivity === 'travel' && !activeJourney && selectedTravelMode === 'single'
+          && unavailableSelectedRoute && localTravelOptions.length === 0 && <p role="status">已选路线不可用。请回到场景查看当前可走的路线。</p>}
 
         {progressMode === 'character' && currentActivity === 'study' && selectedStudySkill && <label className="long-action-field">
 
@@ -1291,7 +1327,8 @@ export function LongActionPanel({
 
           <span>路线</span>
 
-          <select value={activeJourney?.route_id ?? selectedTravelRoute?.route_id ?? ''} onChange={(event) => setSelectedRouteId(event.target.value)} disabled={Boolean(submission) || submitting || Boolean(activeJourney)}>
+          <select value={activeJourney?.route_id ?? selectedTravelRoute?.route_id ?? ''} onChange={(event) => setTravelRouteSelection({ key: travelPlanKey, routeId: event.target.value })} disabled={Boolean(submission) || submitting || Boolean(activeJourney)}>
+            {!activeJourney && !selectedTravelRoute && <option value="" disabled>已选路线不可用，请重新选择</option>}
 
             {activeJourney
               ? <option value={activeJourney.route_id}>继续当前旅程 · {activeJourney.to_place_id.slice(0, 8)}</option>

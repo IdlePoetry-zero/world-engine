@@ -8,6 +8,7 @@ import pytest
 
 from world_engine.adapters.models import RoleTask
 from world_engine.api.contracts import MessageRequest, QualityProfile
+from world_engine.application.action_drafts import DraftControl
 from world_engine.application.actions import RulesActionDispatcher
 from world_engine.application.backups import BackupApplication
 from world_engine.application.conversation import ConversationApplication, ConversationStore
@@ -45,7 +46,7 @@ class FakeModels:
         return SimpleNamespace(normalized_output=output)
 
 
-def _make_world(repository, scope, *, meeting=None):
+def _make_world(repository, scope, *, meeting=None, propose=True):
     player_id, npc_id, place_id = uuid4(), uuid4(), uuid4()
     year_ticks = 86_400 * 360
     def person(entity_id, name, *, personality=False):
@@ -72,6 +73,8 @@ def _make_world(repository, scope, *, meeting=None):
             npc_id: person(npc_id, "Rae", personality=True),
         }),
     ))
+    if not propose:
+        return created, player_id, npc_id, None
     view = repository.read_world(scope, created.world.world_id, created.branch.branch_id)
     command_id = uuid4()
     payload = {"kind": "propose_relationship_invitation", "target_id": str(npc_id)}
@@ -110,6 +113,63 @@ def _request(created, player_id, invitation_id, *, request_id=None):
         text=f"请让对方自行回应我发出的这份待回复私人恋爱邀约 {invitation_id}。",
         profile=QualityProfile(speed="fast", depth="standard"),
     )
+
+
+@pytest.mark.asyncio
+async def test_timed_invitation_draft_requires_the_latest_explicit_confirmation(tmp_path):
+    database = Database(f"sqlite:///{(tmp_path / 'world.sqlite').as_posix()}")
+    database.create_schema()
+    repository = WorldRepository(database)
+    scope = AccessScope(tenant_id=uuid4(), user_id=uuid4())
+    try:
+        created, player, npc, _ = _make_world(repository, scope, propose=False)
+        world, branch = created.world.world_id, created.branch.branch_id
+        venue = repository.read_world(scope, world, branch).state.entities[npc].location_id
+        session = uuid4()
+        calls = []
+
+        class Models:
+            async def generate(self, _scope, request):
+                calls.append(request.role_task)
+                if len(calls) == 1:
+                    return SimpleNamespace(normalized_output={"action": None, "clarification": "请补充约会时段。"})
+                return SimpleNamespace(normalized_output={
+                    "action": {"kind": "propose_relationship_invitation", "target_id": str(npc),
+                               "meeting": {"start_tick": 60, "end_tick": 120, "venue_id": str(venue)}},
+                    "clarification": "",
+                })
+
+        service = _build_service(tmp_path, scope, repository, Models())
+        start = MessageRequest(
+            request_id=uuid4(), world_id=world, branch_id=branch, actor_id=player,
+            session_id=session, expected_state_version="0", mode="action",
+            text="准备向 Rae 提出一份约会邀约，时段和地点稍后补充。",
+            draft=DraftControl(operation="prepare"),
+        )
+        first = await service.send(scope, start)
+        assert first["action_draft"]["can_confirm"] is False
+        update = start.model_copy(update={
+            "request_id": uuid4(), "text": "从第60秒到第120秒，在 Courtyard。",
+            "draft": DraftControl(operation="update", draft_id=start.request_id, revision=1),
+        })
+        second = await service.send(scope, update)
+        assert "Rae" in second["content"] and "Courtyard" in second["content"]
+        assert second["action_draft"]["can_confirm"] is True
+        assert not repository.read_world(scope, world, branch).state.relationship_invitations
+        confirm = start.model_copy(update={
+            "request_id": uuid4(), "text": "确认执行。",
+            "draft": DraftControl(operation="confirm", draft_id=start.request_id, revision=2),
+        })
+        result = await service.send(scope, confirm)
+        assert result["world_effect"] and result["closed_draft_id"] == str(start.request_id)
+        assert await service.send(scope, confirm) == result
+        assert calls == [RoleTask.INTENT, RoleTask.INTENT]
+        final = repository.read_world(scope, world, branch)
+        invite, = final.state.relationship_invitations
+        assert invite.status == "pending" and invite.meeting.end_tick == 120
+        assert repository.replay(scope, world, branch, from_genesis=True).state_hash == final.state_hash
+    finally:
+        database.dispose()
 
 
 @pytest.mark.asyncio

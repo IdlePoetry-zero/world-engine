@@ -9,7 +9,7 @@ import hashlib
 import json
 import re
 import unicodedata
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from typing import Any, Protocol
 from uuid import UUID, uuid4, uuid5
 
@@ -21,6 +21,7 @@ from world_engine.adapters.models.errors import ProviderError, ProviderErrorCode
 from world_engine.agents import build_agent_knowledge
 from world_engine.domain.errors import Conflict, InvalidEvent, NotFound, StaleVersion, StorageBusy
 from world_engine.domain.models import AccessScope, MembershipRole
+from .action_drafts import ActionDraft, ActionDraftStore
 from .accusation_repair_decisions import ACCUSATION_REPAIR_OFFER_FEEDBACK, ACCUSATION_REPAIR_RESPONSE_FEEDBACK
 from .narrative_rewrites import NarrativeRewriteStore
 from .operations import ModelOperations, OperationsStore
@@ -78,6 +79,14 @@ _REST_CLOCK_QUESTION = re.compile(
 )
 
 
+def _draft_world_clock(tick: int, day_seconds: int) -> str:
+    day, second_of_day = divmod(tick, day_seconds)
+    hour, minute_and_second = divmod(second_of_day, 3600)
+    minute, second = divmod(minute_and_second, 60)
+    clock = f"{hour:02}:{minute:02}" if second == 0 else f"{hour:02}:{minute:02}:{second:02}"
+    return f"世界第 {day + 1} 日 {clock}"
+
+
 class ActionDispatcher(Protocol):
     async def execute(self, scope: AccessScope, view: Any, request: Any, intent: str) -> dict: ...
 
@@ -86,6 +95,7 @@ class ConversationStore:
     def __init__(self, operations: OperationsStore):
         self.operations = operations
         self.rewrites = NarrativeRewriteStore(operations)
+        self.drafts = ActionDraftStore(operations)
 
     def recover_inflight(self):
         """Call only after acquiring the exclusive local runtime process lock.
@@ -245,12 +255,16 @@ class ConversationApplication:
                 "PROCESS_INTERRUPTED", "REQUEST_CANCELLED", "REQUEST_FAILED", STORAGE_BUSY_CODE,
                 ProviderErrorCode.CONTEXT_LIMIT.value,
             }:
-                recovered = self._committed_status(
-                    scope, world_id, view.branch.branch_id, UUID(item["request_id"]), actor_id,
+                recovered = self._message_recovery(
+                    scope, world_id, view.branch.branch_id, UUID(item["request_id"]), actor_id, reconcile=True,
                 )
                 if recovered is not None:
                     item.update(recovered)
-        return {"session_id": str(session_id), "actor_id": str(actor_id), "items": items}
+        result = {"session_id": str(session_id), "actor_id": str(actor_id), "items": items}
+        draft = self.store.drafts.latest(scope, world_id, view.branch.branch_id, session_id, actor_id)
+        if draft is not None:
+            result["action_draft"] = draft.readback()
+        return result
 
     async def rewrite_narrative(self, scope: AccessScope, world_id: UUID, narrative_id: UUID, style: str) -> dict:
         record = self.store.read(scope, narrative_id)
@@ -313,9 +327,9 @@ class ConversationApplication:
         repository = self.worlds.repository
         repository.read_world(scope, record["world_id"], record["branch_id"])
         if record["status"] == "failed":
-            recovered = self._committed_status(
+            recovered = self._message_recovery(
                 scope, record["world_id"], record["branch_id"], request_id,
-                record["actor_id"],
+                record["actor_id"], reconcile=True,
             )
             if recovered is not None:
                 return recovered
@@ -363,7 +377,8 @@ class ConversationApplication:
             stationary_job = repository.find_job_by_key(scope, world_id, branch_id, stationary_message_key(scope, request_id))
             if stationary_job is not None and stationary_job.job_type == "simulation.long_action":
                 plan = stationary_job.payload.get("plan")
-                if isinstance(plan, dict) and plan.get("actor_id") == str(actor_id) and plan.get("stationary_only") is True:
+                if (isinstance(plan, dict) and plan.get("actor_id") == str(actor_id)
+                    and (plan.get("stationary_only") is True or plan.get("activity") == "explore")):
                     return {"status": "succeeded", "result": stationary_queue_reply(request_id, stationary_job)}
             return None
         for event in committed.events:
@@ -523,15 +538,45 @@ class ConversationApplication:
             "content": "行动结果已写入世界。详细结果请查看存档历史。",
         }}
 
+    def _message_recovery(self, scope, world_id, branch_id, request_id, actor_id, *, reconcile=False):
+        receipt = self.store.drafts.receipt(scope, world_id, branch_id, actor_id, request_id)
+        if receipt is None:
+            return self._committed_status(scope, world_id, branch_id, request_id, actor_id)
+        draft = ActionDraft.model_validate_json(receipt["document"])
+        status = receipt["status"]
+        if status == "open":
+            return {"status": "succeeded", "result": {
+                "message_id": str(request_id), "kind": "clarification", "content": draft.review,
+                "world_effect": False, "action_draft": draft.readback(),
+            }}
+        if status == "cancelled":
+            return {"status": "succeeded", "result": {
+                "message_id": str(request_id), "kind": "clarification", "content": "已取消这份草稿。",
+                "world_effect": False, "closed_draft_id": str(draft.draft_id),
+            }}
+        recovered = self._committed_status(scope, world_id, branch_id, request_id, actor_id)
+        if reconcile and status == "confirming":
+            self.store.drafts.reconcile(
+                scope, world_id, branch_id, actor_id, receipt["session_id"], draft.draft_id, request_id,
+                committed=recovered is not None,
+            )
+        if recovered is not None:
+            recovered["result"]["closed_draft_id"] = str(draft.draft_id)
+        return recovered
+
     async def send(self, scope: AccessScope, request):
         view = self.worlds.repository.read_world(scope, request.world_id, request.branch_id)
         self.worlds.assert_player_actor(scope, view, request.actor_id)
-        duplicate = self.store.begin(scope, request, recover_committed=lambda: self._committed_status(
+        duplicate = self.store.begin(scope, request, recover_committed=lambda: self._message_recovery(
             scope, request.world_id, request.branch_id, request.request_id, request.actor_id,
         ))
         if duplicate is not None:
             return duplicate
         try:
+            if getattr(request, "draft", None) is not None:
+                result = await self._handle_action_draft(scope, view, request)
+                self.store.finish(scope, request.request_id, result, succeeded=True)
+                return result
             choice = explicit_waypoint_choice(request.text) if request.mode in {"auto", "action"} else None
             if choice is not None and view.state.entities[request.actor_id].status == "active":
                 waypoint_result = self._submit_waypoint_text(scope, view, request, choice)
@@ -609,6 +654,96 @@ class ConversationApplication:
             }
             self.store.finish(scope, request.request_id, result, succeeded=False)
             raise
+
+    async def _handle_action_draft(self, scope, view, request):
+        control = request.draft
+        if request.mode != "action":
+            return self._response(request, "clarification", "请使用行动模式处理草稿。", False)
+        if self.actions is None:
+            raise ApplicationFailure("ACTION_SERVICE_UNAVAILABLE", "行动处理服务尚未就绪。", status_code=503)
+        location = view.state.entities[request.actor_id].location_id
+        previous = None if control.operation == "prepare" else self.store.drafts.read(scope, request, control)
+        if control.operation == "cancel":
+            self.store.drafts.claim(scope, request, previous, cancel=True)
+            return self._response(request, "clarification", "已取消这份草稿。", False) | {
+                "closed_draft_id": str(previous.draft_id),
+            }
+        if view.state.entities[request.actor_id].status != "active":
+            return self._response(request, "clarification", "当前角色无法执行这项行动。", False)
+        if previous is not None and location != previous.location_id:
+            return self._response(request, "clarification", "你已离开原场景。请在当前位置重新准备行动。", False)
+        if control.operation == "confirm":
+            if previous.action is None or previous.state_version != view.branch.state_version:
+                return self._response(request, "clarification", "这份草稿缺少明确条件，或场景已变化。请先更新并核对草稿。", False)
+            if int(request.expected_state_version) != view.branch.state_version:
+                raise StaleVersion(int(request.expected_state_version), view.branch.state_version)
+            self.store.drafts.claim(scope, request, previous)
+            sealed_request = request.model_copy(update={"text": previous.source_text})
+            try:
+                result = await self.actions.execute(scope, view, sealed_request, "action", approved_action=previous.action)
+            except (StaleVersion, StorageBusy):
+                self.store.drafts.finish(scope, request, previous, committed=False)
+                raise
+            committed = result.get("world_effect") is True
+            self.store.drafts.finish(scope, request, previous, committed=committed)
+            if not committed:
+                return result
+            return result | {"closed_draft_id": str(previous.draft_id)}
+
+        source_text = request.text if previous is None else f"{previous.source_text}\n补充：{request.text}"
+        if len(source_text) > 100_000:
+            return self._response(request, "clarification", "草稿已达到文本长度上限，请开始一份新草稿。", False)
+        proposal_request = request.model_copy(update={"text": source_text})
+        proposed = None
+
+        def review(action, scene):
+            nonlocal proposed
+            if action.kind == "trade":
+                offer = next((row for row in scene["market_offers"]
+                              if row["listing_id"] == str(action.listing_id)), None)
+                if offer is None:
+                    return self._response(request, "clarification", "请指定当前市场的一项可见商品。", False)
+                with localcontext() as pricing:
+                    pricing.prec = 80
+                    total = Decimal(offer["unit_price_minor"]) * action.quantity
+                if total != total.to_integral_value():
+                    return self._response(request, "clarification", "这个数量对应的总价不足一个完整的最小货币单位。请调整数量。", False)
+                catalog = view.state.metadata.get("resource_catalog", {})
+                goods = catalog.get(offer["resource_id"], offer["resource_id"]) if isinstance(catalog, dict) else offer["resource_id"]
+                currency = scene["market_currency_resource_id"]
+                currency_name = catalog.get(currency, currency) if isinstance(catalog, dict) else currency
+                text = f"购买 {goods} × {action.quantity}，当前总价 {total:f}（{currency_name}最小单位）。"
+                if action.price_ceiling:
+                    text += f" 整笔总价上限 {action.price_ceiling.max_total_minor}。"
+                    if total > action.price_ceiling.max_total_minor:
+                        return self._response(request, "clarification",
+                                              text + " 当前报价超过上限，请补充较少的数量，或取消后重新报价。", False)
+            else:
+                target = scene["entities"][str(action.target_id)]
+                if target.get("location_id") != str(location) or target.get("status") != "active":
+                    return self._response(request, "clarification", "请指定当前在场且可以接触的对象。", False)
+                text = f"向 {target.get('name') or '在场人物'} 提出邀约，等待对方自行决定。"
+                if action.meeting:
+                    venue = scene["entities"].get(str(action.meeting.venue_id), {}).get("name")
+                    if action.meeting.venue_id and not venue:
+                        return self._response(request, "clarification", "请指定当前可知的约会地点。", False)
+                    day_seconds = view.state.calendar.day_seconds
+                    start = _draft_world_clock(action.meeting.start_tick, day_seconds)
+                    end = _draft_world_clock(action.meeting.end_tick, day_seconds)
+                    text += f" 提议从{start}起，至{end}结束。"
+                    if venue:
+                        text += f" 地点 {venue}。"
+            proposed = action
+            return self._response(request, "clarification", text, False)
+
+        result = await self.actions.execute(scope, view, proposal_request, "action", review_action=review)
+        draft = ActionDraft(
+            draft_id=previous.draft_id if previous else request.request_id, location_id=location,
+            revision=previous.revision + 1 if previous else 1, state_version=view.branch.state_version,
+            source_text=source_text, action=proposed, review=result["content"],
+        )
+        self.store.drafts.save(scope, request, draft, previous_revision=previous.revision if previous else None)
+        return result | {"action_draft": draft.readback()}
 
     def _submit_waypoint_text(self, scope, view, request, choice):
         repository = self.worlds.repository

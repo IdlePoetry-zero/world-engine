@@ -10,7 +10,19 @@ import type { Notice } from '../App'
 
 type OpsTab = 'overview' | 'providers' | 'routes' | 'calls'
 type SettingsMutation = (settings: Settings) => Settings
-type SettingsUpdateJob = { mutation: SettingsMutation; resolve: (saved: boolean) => void }
+type SettingsUpdateJob = { mutation: SettingsMutation; approvedDestinations: string[]; resolve: (saved: boolean) => void }
+type CloudChange = { mutation: SettingsMutation; destinations: Provider[]; resolve: (saved: boolean) => void }
+
+function cloudDestinations(settings: Settings, providers: Provider[]): Provider[] {
+  if (settings.local_only) return []
+  const routedIds = new Set(Object.values(settings.routes).flatMap((route) => [route.provider_id, ...(route.fallbacks ?? []).map((target) => target.provider_id)]))
+  return providers.filter((provider) => provider.enabled && !provider.is_local_endpoint && routedIds.has(provider.provider_id))
+}
+
+function newlyAllowedDestinations(current: Settings, next: Settings, providers: Provider[]): Provider[] {
+  const existing = new Set(cloudDestinations(current, providers).map((provider) => provider.base_url))
+  return cloudDestinations(next, providers).filter((provider) => !existing.has(provider.base_url))
+}
 
 export function OperationsPage({ onNotice }: { onNotice: (notice: Notice) => void }) {
   const [tab, setTab] = useState<OpsTab>('overview')
@@ -18,12 +30,13 @@ export function OperationsPage({ onNotice }: { onNotice: (notice: Notice) => voi
   const [providers, setProviders] = useState<Provider[]>([])
   const [calls, setCalls] = useState<CallRecord[]>([])
   const [models, setModels] = useState<Record<string, ModelInfo[]>>({})
-  const [modelReadFailures, setModelReadFailures] = useState<string[]>([])
+  const [cloudChange, setCloudChange] = useState<CloudChange | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [savingSettings, setSavingSettings] = useState(false)
   const [providerModal, setProviderModal] = useState<Provider | 'new' | null>(null)
   const confirmedSettingsRef = useRef<Settings | null>(null)
+  const providersRef = useRef<Provider[]>([])
   const visibleSettingsRef = useRef<Settings | null>(null)
   const settingsQueueRef = useRef<SettingsUpdateJob[]>([])
   const settingsWriteActiveRef = useRef(false)
@@ -48,56 +61,60 @@ export function OperationsPage({ onNotice }: { onNotice: (notice: Notice) => voi
     settingsWriteActiveRef.current = true
     while (settingsQueueRef.current.length > 0) {
       const job = settingsQueueRef.current.shift()!
-      const confirmed = confirmedSettingsRef.current
-      if (!confirmed) {
-        job.resolve(false)
-        pendingSettingsWritesRef.current -= 1
-        continue
-      }
       try {
-        // Construct each full PUT from the most recently confirmed server state.
-        const next = job.mutation(confirmed)
-        if (next === confirmed) {
-          publishProjectedSettings()
-          job.resolve(false)
-          pendingSettingsWritesRef.current -= 1
-          if (mountedRef.current) setSavingSettings(pendingSettingsWritesRef.current > 0)
-          continue
+        let saved: Settings | undefined
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const confirmed = confirmedSettingsRef.current
+          if (!confirmed) throw new Error('请刷新运行设置后重试。')
+          const next = job.mutation(confirmed)
+          if (next === confirmed) throw new Error('原设置目标已更改，请核对后重新提交。')
+          if (newlyAllowedDestinations(confirmed, next, providersRef.current).some((provider) => !job.approvedDestinations.includes(provider.base_url))) {
+            throw new Error('云端目的地已更改，请重新确认。')
+          }
+          try {
+            saved = await api.updateSettings(next)
+            break
+          } catch (reason) {
+            if (!(reason instanceof ApiError) || reason.code !== 'SETTINGS_STALE' || attempt > 0) throw reason
+            const authoritative = await api.getSettings()
+            settingsRevisionRef.current += 1
+            confirmedSettingsRef.current = authoritative
+            publishSettings(authoritative)
+          }
         }
-        const saved = await api.updateSettings(next)
-        settingsRevisionRef.current += 1
-        confirmedSettingsRef.current = saved
-        publishProjectedSettings()
-        onNotice({ kind: 'success', text: '运行设置已保存。' })
-        job.resolve(true)
+        if (saved) {
+          settingsRevisionRef.current += 1
+          confirmedSettingsRef.current = saved
+          publishProjectedSettings()
+          if (mountedRef.current) onNotice({ kind: 'success', text: '运行设置已保存。' })
+        }
+        job.resolve(Boolean(saved))
       } catch (reason) {
         const writeError = errorMessage(reason)
         if (mountedRef.current) {
-          setError(`运行设置保存失败：${writeError}`)
-          onNotice({ kind: 'error', text: `运行设置保存失败：${writeError}` })
+          setError('运行设置保存失败：' + writeError)
+          onNotice({ kind: 'error', text: '运行设置保存失败：' + writeError })
         }
 
-        // A failed full PUT may have reached the server. Refresh the base before
-        // applying any queued mutations so later writes never spread stale routes.
+        // A failed response may follow a successful commit. Refresh before
+        // attempting any queued edit.
         try {
           const authoritative = await api.getSettings()
           settingsRevisionRef.current += 1
           confirmedSettingsRef.current = authoritative
           publishProjectedSettings()
-          job.resolve(false)
         } catch (readReason) {
           const readError = errorMessage(readReason)
           if (mountedRef.current) {
-            setError(`运行设置保存失败：${writeError}；重新读取权威设置也失败：${readError}。已取消后续排队的设置更改。`)
-            onNotice({ kind: 'error', text: `无法重新读取运行设置，已取消后续排队的设置更改。${readError}` })
+            setError('运行设置保存失败：' + writeError + '；重新读取服务端设置也失败：' + readError + '。已取消后续排队的设置更改。')
           }
-          job.resolve(false)
           while (settingsQueueRef.current.length > 0) {
             settingsQueueRef.current.shift()!.resolve(false)
             pendingSettingsWritesRef.current -= 1
           }
           publishSettings(confirmedSettingsRef.current)
         }
+        job.resolve(false)
       }
       pendingSettingsWritesRef.current -= 1
       if (mountedRef.current) setSavingSettings(pendingSettingsWritesRef.current > 0)
@@ -118,13 +135,8 @@ export function OperationsPage({ onNotice }: { onNotice: (notice: Notice) => voi
       publishSettings(settingsResult.value)
     }
     if (providersResult.status === 'fulfilled') {
+      providersRef.current = providersResult.value.items
       setProviders(providersResult.value.items)
-      const found = await Promise.allSettled(providersResult.value.items.map((provider) => api.listModels(provider.provider_id)))
-      const modelMap: Record<string, ModelInfo[]> = {}
-      const modelFailures: string[] = []
-      found.forEach((result, index) => { const id = providersResult.value.items[index].provider_id; if (result.status === 'fulfilled') modelMap[id] = result.value.items; else modelFailures.push(id) })
-      setModels(modelMap)
-      setModelReadFailures(modelFailures)
     }
     if (callsResult.status === 'fulfilled') setCalls(callsResult.value.items)
     const rejected = results.find((result) => result.status === 'rejected')
@@ -138,17 +150,35 @@ export function OperationsPage({ onNotice }: { onNotice: (notice: Notice) => voi
     return () => { mountedRef.current = false; window.clearTimeout(timer) }
   }, [loadData])
 
-  const updateSetting = useCallback((mutation: SettingsMutation): Promise<boolean> => {
+  const enqueueSetting = useCallback((mutation: SettingsMutation, approvedDestinations: string[]): Promise<boolean> => {
     const visible = visibleSettingsRef.current
     if (!visible) return Promise.resolve(false)
     settingsRevisionRef.current += 1
     pendingSettingsWritesRef.current += 1
     publishSettings(mutation(visible))
     setSavingSettings(true)
-    const saved = new Promise<boolean>((resolve) => settingsQueueRef.current.push({ mutation, resolve }))
+    const saved = new Promise<boolean>((resolve) => settingsQueueRef.current.push({ mutation, approvedDestinations, resolve }))
     void drainSettingsQueue()
     return saved
   }, [drainSettingsQueue, publishSettings])
+
+  const updateSetting = useCallback((mutation: SettingsMutation): Promise<boolean> => {
+    const visible = visibleSettingsRef.current
+    if (!visible) return Promise.resolve(false)
+    const destinations = newlyAllowedDestinations(visible, mutation(visible), providersRef.current)
+    if (destinations.length === 0) return enqueueSetting(mutation, [])
+    return new Promise<boolean>((resolve) => setCloudChange({ mutation, destinations, resolve }))
+  }, [enqueueSetting])
+
+  const completeCloudChange = (approved: boolean) => {
+    if (!cloudChange) return
+    setCloudChange(null)
+    if (!approved) {
+      cloudChange.resolve(false)
+      return
+    }
+    void enqueueSetting(cloudChange.mutation, cloudChange.destinations.map((provider) => provider.base_url)).then(cloudChange.resolve)
+  }
 
   const saveProvider = async (draft: ProviderDraft, provider?: Provider) => {
     const saved = provider ? await api.updateProvider(provider.provider_id, draft) : await api.createProvider(draft)
@@ -158,7 +188,7 @@ export function OperationsPage({ onNotice }: { onNotice: (notice: Notice) => voi
     try {
       const result = await api.probeProvider(provider.provider_id)
       onNotice({ kind: 'info', text: result.detail ?? `目录发现状态：${result.status ?? '服务端未提供状态标签'}` })
-      await reload()
+      setModels((current) => ({ ...current, [provider.provider_id]: result.models ?? [] }))
     } catch (reason) { onNotice({ kind: 'error', text: errorMessage(reason) }) }
   }
   const exportCsv = () => {
@@ -183,9 +213,10 @@ export function OperationsPage({ onNotice }: { onNotice: (notice: Notice) => voi
       <section className="profile-settings panel-card"><div className="panel-card-heading"><div><span className="panel-overline">EXECUTION PROFILE</span><h2>速度与深度</h2></div><span className={`save-indicator ${savingSettings ? 'saving' : ''}`}><i />{savingSettings ? '保存中…' : settings ? '自动保存' : '等待设置'}</span></div><p className="panel-description">两项设置分别影响调度节奏和模拟精度。无论选择哪一档，世界硬规则始终生效。</p>{settings ? <div className="profile-controls"><ProfileControl title="速度" subtitle="请求调度、并发与呈现策略" value={settings.speed} options={[['fast', '快速', '更快地调度独立请求'], ['balanced', '均衡', '保持交互与后台平衡'], ['patient', '耐心', '减少资源竞争，完整校验后呈现']]} onChange={(value) => void updateSetting((current) => ({ ...current, speed: value as Settings['speed'] }))} /><ProfileControl title="深度" subtitle="推演范围、记忆和复核层级" value={settings.depth} options={[['standard', '标准', '精简候选与回顾范围'], ['deep', '深入', '扩展因果与人物考虑'], ['exhaustive', '充分', '更完整的候选与冲突审视']]} onChange={(value) => void updateSetting((current) => ({ ...current, depth: value as Settings['depth'] }))} /></div> : <div className="settings-empty">{loading ? '正在读取运行设置…' : '服务端尚未返回运行设置。'}</div>}<div className="profile-separation"><span className="separation-icon"><Icon name="crosshair" size={15} /></span><span><strong>互相独立的两个维度</strong><small>快速 + 充分仍会执行充分推演；耐心 + 标准不会自动增加模拟深度。</small></span></div></section>
       <div className="ops-overview-bottom"><div className="mini-panel"><span className="panel-overline">LOCAL API</span><h3>连接检查</h3><p>设置状态来自服务端的运行配置响应。</p><button className="text-button" onClick={() => void reload()}>重新检测 <Icon name="arrow-right" size={14} /></button></div><div className="mini-panel"><span className="panel-overline">PRIVACY</span><h3>凭据只留在本机</h3><p>密钥只写入 Windows 凭据管理器；界面只接收状态和引用，不回读密钥。</p><span className="privacy-badge"><Icon name="shield" size={13} />本地凭据边界</span></div></div>
     </div>}
-    {tab === 'providers' && <div className="providers-page"><div className="subpage-header"><div><h2>模型连接</h2><p>目录发现只返回可见模型；生成能力需经过独立验证。</p></div><button className="button button-primary" onClick={() => setProviderModal('new')}><Icon name="plus" size={16} />添加供应商</button></div>{loading && providers.length === 0 ? <div className="provider-skeleton" /> : providers.length ? <div className="provider-list">{providers.map((provider) => <ProviderCard key={provider.provider_id} provider={provider} models={models[provider.provider_id] ?? []} modelsReadFailed={modelReadFailures.includes(provider.provider_id)} onEdit={() => setProviderModal(provider)} onProbe={() => void probeProvider(provider)} />)}</div> : <InlineState icon="plug" title="还没有模型连接" description="添加一个供应商端点后，可以发现模型目录。密钥由后端凭据库管理。" action={<button className="button button-primary" onClick={() => setProviderModal('new')}><Icon name="plus" size={15} />添加供应商</button>} />}</div>}
+    {tab === 'providers' && <div className="providers-page"><div className="subpage-header"><div><h2>模型连接</h2><p>目录发现只返回可见模型；生成能力需经过独立验证。</p></div><button className="button button-primary" onClick={() => setProviderModal('new')}><Icon name="plus" size={16} />添加供应商</button></div>{loading && providers.length === 0 ? <div className="provider-skeleton" /> : providers.length ? <div className="provider-list">{providers.map((provider) => <ProviderCard key={provider.provider_id} provider={provider} models={models[provider.provider_id]} cloudBlocked={!settings || settings.local_only} onEdit={() => setProviderModal(provider)} onProbe={() => void probeProvider(provider)} />)}</div> : <InlineState icon="plug" title="还没有模型连接" description="添加一个供应商端点后，可以发现模型目录。密钥由后端凭据库管理。" action={<button className="button button-primary" onClick={() => setProviderModal('new')}><Icon name="plus" size={15} />添加供应商</button>} />}</div>}
     {tab === 'routes' && <RoutesPage settings={settings} providers={providers} models={models} loading={loading} saving={savingSettings} onChange={updateSetting} />}
     {tab === 'calls' && <div className="calls-page"><div className="subpage-header"><div><h2>调用记录</h2><p>按任务角色核对总耗时、供应商报告的输入 / 输出 Token 与费用。未知值不会显示为零；完整安全追踪可展开查看。</p></div><button className="button button-secondary button-small" onClick={exportCsv} disabled={!calls.length}><Icon name="download" size={14} />导出 CSV</button></div>{calls.length ? <div className="calls-table-wrap"><table className="calls-table"><thead><tr><th>时间 / 调用</th><th>职责</th><th>供应商 / 模型</th><th>总耗时 / 阶段</th><th>Token 用量</th><th>费用</th><th>结果</th><th>追踪</th></tr></thead><tbody>{calls.map((call) => <tr key={call.request_id}><td><strong>{formatTime(call.started_at)}</strong><small>{call.request_id.slice(0, 12)}</small></td><td><strong>{roleLabel(call.role)}</strong><small>{call.role}</small></td><td><strong>{call.provider ?? '未知'}</strong><small>{call.model ?? '模型未知'}</small></td><td className="call-metrics-cell"><strong>{formatMilliseconds(call.duration_ms)}</strong><small>队列 {formatSeconds(traceNumber(call.trace, 'queue_seconds'))}</small><small>首 Token {formatSeconds(traceNumber(call.trace, 'first_token_seconds'))}</small></td><td className="call-metrics-cell"><strong>输入 {formatTokenCount(call.usage?.input_tokens)} · 输出 {formatTokenCount(call.usage?.output_tokens)}</strong><small>合计 {formatTokenCount(call.usage?.total_tokens)} tokens · {usageSourceLabel(call.usage?.source)}</small>{traceNumber(call.trace, 'max_output_tokens') != null && <small>本次输出上限 {formatTokenCount(traceNumber(call.trace, 'max_output_tokens'))} tokens</small>}{call.usage?.cached_input_tokens != null && <small>缓存输入 {formatTokenCount(call.usage.cached_input_tokens)} tokens</small>}{call.usage?.reasoning_tokens != null && <small>推理 {formatTokenCount(call.usage.reasoning_tokens)} tokens</small>}</td><td><CostCell cost={call.cost} /></td><td><span className={`call-status call-status-${callStatusTone(call.status)}`}>{callStatusLabel(call.status, call.trace?.error_code)}</span>{call.trace?.error_code === 'context_limit' && <small style={{ whiteSpace: 'normal', overflow: 'visible' }}>请在「模型与运行 → 模型连接」提高 Ollama 上下文容量；较大值会占用更多内存。</small>}<TransportFailure call={call} compact /></td><td><details className="trace-details"><summary>查看</summary><TransportFailure call={call} /><pre>{JSON.stringify(call.trace ?? { request_id: call.request_id, role: call.role, provider: call.provider, model: call.model, status: call.status }, null, 2)}</pre></details></td></tr>)}</tbody></table></div> : <InlineState icon="activity" title="还没有调用记录" description="请求实际通过模型后台后，服务端会返回可核对的运行信息。" />}</div>}
+    {cloudChange && <CloudChangeDialog destinations={cloudChange.destinations} onConfirm={() => completeCloudChange(true)} onClose={() => completeCloudChange(false)} />}
     {providerModal && <ProviderDialog key={providerModal === 'new' ? 'new' : providerModal.provider_id} provider={providerModal === 'new' ? undefined : providerModal} onClose={() => setProviderModal(null)} onSave={saveProvider} />}
   </section>
 }
@@ -206,7 +237,17 @@ function RoutesPage({ settings, providers, models, loading, saving, onChange }: 
   if (!Object.prototype.hasOwnProperty.call(settings.routes, 'npc_plan_review')) {
     routeEntries.push(['npc_plan_review', {}])
   }
-  return <div className="routes-page"><div className="subpage-header"><div><h2>职责路由</h2><p>每类任务独立选择首选模型；本地限定策略不会自动回退到云端。</p></div></div><div className="local-only-row"><span className="local-only-copy"><span className="route-local-icon"><Icon name="shield" size={16} /></span><span><strong>仅使用本地服务</strong><small>阻止选择的内容发送到云端供应商</small></span></span><button type="button" className={`toggle-switch ${settings.local_only ? 'on' : ''}`} aria-pressed={settings.local_only} onClick={() => { const localOnly = !settings.local_only; void onChange((current) => ({ ...current, local_only: localOnly })) }}><span /></button></div><div className="routes-list">{routeEntries.map(([role, route]) => {
+  return <div className="routes-page"><div className="subpage-header"><div><h2>职责路由</h2><p>每类任务独立选择首选模型；本地限定策略不会自动回退到云端。</p></div></div><div className="local-only-row">
+    <span className="local-only-copy"><span className="route-local-icon"><Icon name="shield" size={16} /></span><span>
+      <strong id="local-only-label">仅使用本地服务</strong>
+      <small id="local-only-help">启用后，生成、备用模型、目录发现和连接探测只访问本机回环地址。</small>
+    </span></span>
+    <button type="button" className={`toggle-switch ${settings.local_only ? 'on' : ''}`} role="switch" aria-labelledby="local-only-label" aria-describedby="local-only-help" aria-checked={settings.local_only} disabled={saving} onClick={() => {
+      const localOnly = !settings.local_only
+      void onChange((current) => ({ ...current, local_only: localOnly }))
+    }}><span /></button>
+  </div>
+  <CloudRouteDetails destinations={cloudDestinations(settings, providers)} /><div className="routes-list">{routeEntries.map(([role, route]) => {
     const isInheritedReviewer = role === 'npc_plan_review' && !Object.prototype.hasOwnProperty.call(settings.routes, role)
     const supportsOutputTokenLimit = role !== 'embedding' && (role !== 'npc_plan_review' || Boolean(route.provider_id))
     const routeModels = models[route.provider_id ?? ''] ?? []
@@ -312,7 +353,7 @@ function RoutesPage({ settings, providers, models, loading, saving, onChange }: 
             setManualModels((current) => { const next = { ...current }; delete next[role]; return next })
             void savePrimaryPatch({ model }, route.provider_id)
           }}>
-            <option value="">自动发现</option>
+            <option value="">供应商默认模型</option>
             {route.model && !routeModels.some((model) => model.id === route.model) && <option value={route.model}>已配置 · {route.model}</option>}
             {routeModels.map((model) => <option key={model.id} value={model.id}>{model.name ?? model.id}</option>)}
           </select>
@@ -338,6 +379,10 @@ function RoutesPage({ settings, providers, models, loading, saving, onChange }: 
       <FallbacksEditor role={role} route={route} providers={providers} models={models} saving={saving} onChange={onChange} />
     </div>
   })}</div>{routeEntries.length === 0 && <InlineState icon="route" title="暂无职责路由" description="当前设置没有返回可配置的职责。" />}</div>
+}
+
+function sameFallbackTarget(current: ModelRouteTarget | undefined, expected: ModelRouteTarget | undefined): boolean {
+  return current != null && expected != null && current.provider_id === expected.provider_id && current.model === expected.model
 }
 
 function maxOutputTokensError(value: string): string | null {
@@ -380,7 +425,7 @@ function FallbacksEditor({ role, route, providers, models, saving, onChange }: {
     return onChange((current) => {
       const currentRoute = current.routes[role]
       const currentFallbacks = currentRoute?.fallbacks ?? []
-      if (!currentRoute || !hasConfiguredPrimary(currentRoute) || !currentFallbacks[index]) return current
+      if (!currentRoute || !hasConfiguredPrimary(currentRoute) || !sameFallbackTarget(currentFallbacks[index], existing)) return current
       const nextCandidate = { ...currentFallbacks[index], ...patch }
       if (hasFallbackTargetConflict(nextCandidate, currentRoute, providers, index)) return current
       const nextFallbacks = [...currentFallbacks]
@@ -396,9 +441,8 @@ function FallbacksEditor({ role, route, providers, models, saving, onChange }: {
       const currentRoute = current.routes[role]
       const currentFallbacks = currentRoute?.fallbacks ?? []
       if (!currentRoute || !hasConfiguredPrimary(currentRoute) || currentFallbacks.length >= 3) return current
-      const target = createFallbackCandidate(currentRoute, providers, models)
-      if (!target) return current
-      return withFallbacks(current, role, currentRoute, [...currentFallbacks, target])
+      if (hasFallbackTargetConflict(addCandidate, currentRoute, providers, -1)) return current
+      return withFallbacks(current, role, currentRoute, [...currentFallbacks, addCandidate])
     })
   }
 
@@ -409,7 +453,7 @@ function FallbacksEditor({ role, route, providers, models, saving, onChange }: {
     void onChange((current) => {
       const currentRoute = current.routes[role]
       const currentFallbacks = currentRoute?.fallbacks ?? []
-      if (!currentRoute || !currentFallbacks[index]) return current
+      if (!currentRoute || !sameFallbackTarget(currentFallbacks[index], fallbacks[index])) return current
       return withFallbacks(current, role, currentRoute, currentFallbacks.filter((_, currentIndex) => currentIndex !== index))
     })
   }
@@ -423,7 +467,9 @@ function FallbacksEditor({ role, route, providers, models, saving, onChange }: {
       const currentRoute = current.routes[role]
       const currentFallbacks = [...(currentRoute?.fallbacks ?? [])]
       const destination = index + direction
-      if (!currentRoute || !hasConfiguredPrimary(currentRoute) || destination < 0 || destination >= currentFallbacks.length) return current
+      if (!currentRoute || !hasConfiguredPrimary(currentRoute)
+        || !sameFallbackTarget(currentFallbacks[index], fallbacks[index])
+        || !sameFallbackTarget(currentFallbacks[destination], fallbacks[destination])) return current
       const [moved] = currentFallbacks.splice(index, 1)
       currentFallbacks.splice(destination, 0, moved)
       return withFallbacks(current, role, currentRoute, currentFallbacks)
@@ -504,7 +550,7 @@ function FallbacksEditor({ role, route, providers, models, saving, onChange }: {
               setManualModels((current) => { const next = { ...current }; delete next[index]; return next })
               void updateFallback(index, { model: event.target.value || undefined })
             }}>
-              <option value="">自动发现</option>
+              <option value="">供应商默认模型</option>
               {target.model && !providerModels.some((item) => item.id === target.model) && <option value={target.model}>已配置 · {target.model}</option>}
               {providerModels.map((item) => <option key={item.id} value={item.id}>{item.name ?? item.id}</option>)}
             </select>
@@ -588,7 +634,49 @@ function withFallbacks(settings: Settings, role: string, route: ModelRoute, fall
   }
 }
 
-function ProviderCard({ provider, models, modelsReadFailed, onEdit, onProbe }: { provider: Provider; models: ModelInfo[]; modelsReadFailed: boolean; onEdit: () => void; onProbe: () => void }) { return <article className="provider-card"><div className="provider-card-head"><div className={`provider-avatar provider-${provider.kind}`}><Icon name={providerIcon(provider.kind)} size={18} /></div><div className="provider-name-block"><h3>{provider.name}</h3><span>{provider.kind} · {provider.base_url}</span></div><span className={`provider-enabled ${provider.enabled ? 'is-enabled' : ''}`}><i />{provider.enabled ? '已启用' : '已停用'}</span><button className="icon-button" aria-label={`编辑 ${provider.name}`} onClick={onEdit}><Icon name="edit" size={16} /></button></div><div className="provider-card-bottom"><div className="provider-model-stat"><span className="provider-meta-label">目录模型</span>{modelsReadFailed ? <strong title="模型目录请求失败">未知</strong> : <strong>{models.length}</strong>}{!modelsReadFailed && models.length > 0 && <span className="model-chip">{models.slice(0, 2).map((model) => model.name ?? model.id).join(' · ')}{models.length > 2 ? ` +${models.length - 2}` : ''}</span>}</div><div className="provider-probe-controls"><span className="discovery-note">发现目录不等同于生成验证</span><button className="button button-secondary button-small" onClick={onProbe} disabled={!provider.enabled}><Icon name="refresh" size={14} />发现模型目录</button></div></div></article> }
+function CloudRouteDetails({ destinations }: { destinations: Provider[] }) {
+  if (!destinations.length) return null
+  return <div className="cloud-route-details">
+    <p>生成请求可能发送玩家输入、近期对话、当前任务获准使用的世界与角色上下文，并使用已配置的 API 凭据向下列端点认证。</p>
+    <ul>{destinations.map((provider) => <li key={provider.provider_id}>{provider.name} · {provider.base_url}</li>)}</ul>
+  </div>
+}
+
+function CloudChangeDialog({ destinations, onConfirm, onClose }: { destinations: Provider[]; onConfirm: () => void; onClose: () => void }) {
+  const dialogRef = useRef<HTMLElement>(null)
+  useModalKeyboard(dialogRef, { onClose, busy: false })
+  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+    <section ref={dialogRef} tabIndex={-1} className="provider-dialog" role="dialog" aria-modal="true" aria-labelledby="cloud-change-title">
+      <h2 id="cloud-change-title">确认允许云端模型</h2>
+      <CloudRouteDetails destinations={destinations} />
+      <div className="dialog-footer-actions cloud-change-actions">
+        <button type="button" className="button button-secondary" data-dialog-initial-focus onClick={onClose}>取消</button>
+        <button type="button" className="button button-primary" onClick={onConfirm}>允许并保存</button>
+      </div>
+    </section>
+  </div>
+}
+
+function ProviderCard({ provider, models, cloudBlocked, onEdit, onProbe }: { provider: Provider; models?: ModelInfo[]; cloudBlocked: boolean; onEdit: () => void; onProbe: () => void }) {
+  const blocked = cloudBlocked && !provider.is_local_endpoint
+  return <article className="provider-card">
+    <div className="provider-card-head">
+      <div className={`provider-avatar provider-${provider.kind}`}><Icon name={providerIcon(provider.kind)} size={18} /></div>
+      <div className="provider-name-block"><h3>{provider.name}</h3><span>{provider.kind} · {provider.base_url}</span></div>
+      <span className={`provider-enabled ${provider.enabled ? 'is-enabled' : ''}`}><i />{provider.enabled ? '已启用' : '已停用'}</span>
+      <button className="icon-button" aria-label={`编辑 ${provider.name}`} onClick={onEdit}><Icon name="edit" size={16} /></button>
+    </div>
+    <div className="provider-card-bottom">
+      <div className="provider-model-stat"><span className="provider-meta-label">目录模型</span><strong>{models?.length ?? '未发现'}</strong>
+        {models && models.length > 0 && <span className="model-chip">{models.slice(0, 2).map((model) => model.name ?? model.id).join(' · ')}{models.length > 2 ? ` +${models.length - 2}` : ''}</span>}
+      </div>
+      <div className="provider-probe-controls">
+        <span className="discovery-note">{blocked ? '仅本地策略已阻止此连接' : provider.is_local_endpoint ? '发现目录不等同于生成验证' : '目录请求会访问上方端点，可能携带 API 凭据。'}</span>
+        <button className="button button-secondary button-small" aria-label={`发现 ${provider.name} 模型目录`} onClick={onProbe} disabled={blocked || !provider.enabled}><Icon name="refresh" size={14} />发现模型目录</button>
+      </div>
+    </div>
+  </article>
+}
 
 function CostCell({ cost }: { cost: CallRecord['cost'] }) {
   if (!cost || cost.state === 'unknown' || cost.amount == null) return <span className="cost-unknown" title="服务端没有报告确定费用">未知</span>

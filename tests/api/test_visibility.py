@@ -40,6 +40,41 @@ def state():
     }
 
 
+def test_scene_reunion_shows_public_hours_and_only_new_player_known_facts():
+    world = state()
+    world["current_tick"] = 100
+    npc = world["entities"]["n"]
+    npc["status"] = "active"
+    npc["components"]["daily_routine"] = {"windows": [
+        {"window_id": "public", "place_id": "town", "activity": "work",
+         "start_second": 1000, "duration_seconds": 60, "public": True},
+        {"window_id": "hidden", "place_id": "town", "activity": "rest",
+         "start_second": 2000, "duration_seconds": 60},
+        {"window_id": "elsewhere", "place_id": "remote", "activity": "study",
+         "start_second": 3000, "duration_seconds": 60, "public": True},
+    ]}
+    npc["components"]["routine_mobility"] = {"cadences": {"public": {"every_days": 3, "phase_day": 2}}}
+    world["knowledge"] = [
+        {"id": "contact", "holder_id": "p", "subject_id": "n", "kind": "memory", "received_tick": 40,
+         "claim": "上次交谈", "provenance": [{"kind": "observation", "reference_id": "previous"}]},
+        {"id": "old", "holder_id": "p", "subject_id": "n", "kind": "observation", "received_tick": 20,
+         "claim": "老事"},
+        {"id": "recent", "owner_id": "p", "subject_id": "n", "kind": "observation", "received_tick": 80,
+         "claim": "我看到商人收起了摊位。"},
+        {"id": "secret", "owner_id": "n", "subject_id": "n", "kind": "observation", "received_tick": 95,
+         "claim": "私事"},
+    ]
+    projected = project_player_state(world, "p")["scene_npc_readback"]
+    assert projected == {"n": {
+        "public_schedule": [{"place_name": "小镇", "activity": "work", "start_second": 1000,
+                             "duration_seconds": 60, "every_days": 3}],
+        "known_changes": [{"claim": "我看到商人收起了摊位。", "received_tick": "80"}],
+        "last_contact_tick": "40",
+    }}
+    npc["location_id"] = "remote"
+    assert "scene_npc_readback" not in project_player_state(world, "p")
+
+
 def work_shift_state():
     world = state()
     world["current_tick"] = 600

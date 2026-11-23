@@ -8,11 +8,11 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, StrictBool, StrictInt, model_validator
 from world_engine.domain.components import ExactDecimal, ResourceName
-from world_engine.rules.contracts import ConsumeIntent, RuleResolution
+from world_engine.rules.contracts import ConsumeIntent, ExploreIntent, RuleResolution
 
 from world_engine.domain.models import DomainEvent
 from world_engine.domain.npc_plan_review import NpcPlanningRejection
-from world_engine.domain.npc_plans import NpcPlan
+from world_engine.domain.npc_plans import NPC_EXPLORATION_TICKS, NpcPlan
 from world_engine.domain.relationship_promises import PromiseReviewChoice
 from world_engine.domain.travel_itinerary import TravelItinerary
 from world_engine.domain.travel_journey_events import TravelJourneyChangedEvent
@@ -86,7 +86,7 @@ class LongActionPlan(FrozenModel):
     kind: Literal["long_action"] = "long_action"
     actor_id: UUID
     target_tick: int = Field(ge=-(2**63), le=2**63 - 1)
-    activity: ActivityName | Literal["consume"]
+    activity: ActivityName | Literal["consume", "explore"]
     constraints: tuple[PlanConstraint, ...] = Field(default=(), max_length=64)
     stop_conditions: tuple[StopCondition, ...] = Field(default=(), max_length=256)
     route_id: UUID | None = None
@@ -99,6 +99,7 @@ class LongActionPlan(FrozenModel):
     work_schedule: RoutineWorkSchedule | None = Field(default=None, exclude_if=lambda value: value is None)
     started_tick: int | None = Field(default=None, ge=-(2**63), le=2**63 - 1)
     consumption: ConsumeIntent | None = Field(default=None, exclude_if=lambda value: value is None)
+    exploration: ExploreIntent | None = Field(default=None, exclude_if=lambda value: value is None)
     stationary_only: StrictBool = Field(default=False, exclude_if=lambda value: not value)
 
     @model_validator(mode="after")
@@ -113,6 +114,13 @@ class LongActionPlan(FrozenModel):
                 raise ValueError("consumption jobs require one exact bounded intent with no adaptive policy")
         elif self.consumption is not None:
             raise ValueError("consumption is only valid for an exact consumption job")
+        if self.activity == "explore":
+            if (self.exploration is None or self.started_tick is None
+                or self.target_tick - self.started_tick != NPC_EXPLORATION_TICKS
+                or self.constraints or self.stop_conditions):
+                raise ValueError("exploration requires one site and a fixed search interval")
+        elif self.exploration is not None:
+            raise ValueError("exploration is only valid for a search job")
         if self.activity == "travel" and (self.route_id is None) == (self.travel_itinerary is None):
             raise ValueError("travel actions require exactly one of route_id or travel_itinerary")
         if self.activity == "travel" and self.travel_itinerary is not None:
