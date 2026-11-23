@@ -777,7 +777,7 @@ class RulesActionDispatcher:
                 speed=request.profile.speed, depth=request.profile.depth, expected_state_version=version,
             )
             return consumption_queue_reply(request.request_id, job)
-        hit_world_boundary = resolution.outcome.code in {
+        hit_world_boundary = resolution.outcome.status == "rejected" and resolution.outcome.code in {
             "scheduled_event_due", "scheduled_boundary_required",
             "lifespan_expiry_pending", "lifespan_boundary_required",
             "background_deprivation_pending", "background_boundary_required",
