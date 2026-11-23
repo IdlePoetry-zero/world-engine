@@ -22,10 +22,12 @@ from world_engine.domain.models import TimeAdvancedEvent
 from world_engine.domain.needs import PASSIVE_NEED_RATES_PER_DAY, next_need_threshold_tick
 from world_engine.domain.work_shift import WorkShiftError, WorkShiftTerms, registered_work_shift_terms, select_wage_holder_account
 from world_engine.domain.work_shift_events import WorkShiftPaidEvent
+from world_engine.domain.npc_attendance import NpcAttendance, npc_attendance_is_valid, plan_npc_attendance_start
 from world_engine.domain.npc_attendance_events import (
     NpcAttendanceCancelledEvent, NpcAttendanceSettledEvent, NpcAttendanceStartedEvent, npc_attendance_event_id,
 )
 from world_engine.domain.npc_goal_completion import npc_goal_fulfillment_allows_continuation
+from world_engine.domain.npc_work_shift import plan_attended_work_shift
 from world_engine.domain.npc_plans import NpcTimedExecution
 from world_engine.domain.relationship_promises import PROMISE_TRUST_DEADLINE_HANDLER_VERSION
 from world_engine.domain.npc_commitments import MEETING_COMMITMENT_HANDLER, MEETING_COMMITMENT_VERSION
@@ -384,6 +386,15 @@ class SimulationEngine:
         vacancy_resolution = self.resolve_autonomous_vacancy(state, plan, context)
         if vacancy_resolution is not None:
             return vacancy_resolution
+        if context.work_job_id is not None and context.allow_npc_routine_mobility:
+            work = npc_work_transition(state, excluded_actor_ids=self._npc_routine_exclusions(plan, context))
+            if work is not None:
+                self._reject_unconsumed_decisions(context)
+                return self._resolve_npc_work(state, plan, context, work)
+        attendance = next((row for row in state.npc_attendance if row.work_job_id is not None
+                           and row.work_job_id == context.work_job_id), None)
+        if attendance is not None:
+            return self._advance_attended_work(state, plan, context, attendance)
         meeting_resolution = self.resolve_autonomous_meeting_attendance(state, plan, context)
         if meeting_resolution is not None:
             return meeting_resolution
@@ -424,6 +435,7 @@ class SimulationEngine:
         next_work_rest_duration: int | None = None
         between_work_shifts = False
         work_shift_due = False
+        split_work_shift = False
         if plan.activity == "work":
             work_details = self._routine_work_details(state, plan)
             if isinstance(work_details, str):
@@ -534,10 +546,9 @@ class SimulationEngine:
                 and state.current_tick == next_work_shift_tick
             )
             if next_work_shift_tick == state.current_tick and work_terms is not None:
-                # WorkShiftIntent is intentionally atomic: if a known world or
-                # life boundary falls strictly inside the registered shift, do
-                # not start it. The existing event/repository contract has no
-                # durable in-progress shift record with which to resume safely.
+                # Keep the ordinary atomic rule when its full interval is quiet.
+                # A leased shift can commit attendance and share the clock with
+                # independent world events inside the interval.
                 shift_end = state.current_tick + work_terms.duration_seconds
                 if shift_end > 2**63 - 1:
                     self._reject_unconsumed_decisions(context)
@@ -552,8 +563,12 @@ class SimulationEngine:
                 interior = self._next_external_boundary(
                     state, shift_end - 1, actor_id=plan.actor_id,
                     externally_controlled_actor_ids=context.externally_controlled_actor_ids,
+                    include_meeting_start=context.allow_autonomous_meeting_attendance,
                 )
-                if interior is not None and interior[0] > state.current_tick:
+                interior = self._with_npc_work_boundary(state, shift_end - 1, plan, context, interior)
+                if context.work_job_id is not None:
+                    interior = self._with_npc_routine_boundary(state, shift_end - 1, plan, context, interior)
+                if interior is not None and interior[0] > state.current_tick and context.work_job_id is None:
                     self._reject_unconsumed_decisions(context)
                     return self._empty(
                         state, context, outcome="stopped", reason="work_shift_boundary_required",
@@ -563,6 +578,7 @@ class SimulationEngine:
                             subject_id=interior[3], reference_id=interior[2],
                         ),
                     )
+                split_work_shift = interior is not None and interior[0] > state.current_tick
 
         journey = next((row for row in state.travel_journeys
                         if row.actor_id == plan.actor_id and row.status == "in_transit"), None)
@@ -661,6 +677,19 @@ class SimulationEngine:
                     ),
                 )
             activity = "work"
+            if split_work_shift:
+                blocked = any(row.assignment_id == plan.work_schedule.assignment_id and (
+                    row.work_job_id is None or row.worked_through_tick != row.starts_at_tick
+                ) for row in state.npc_attendance)
+                if blocked:
+                    self._reject_unconsumed_decisions(context)
+                    return self._empty(state, context, outcome="stopped", reason="work_slot_already_in_progress")
+                attendance = plan_npc_attendance_start(state, plan.work_schedule.assignment_id, work_job_id=context.work_job_id)
+                if attendance is None:
+                    self._reject_unconsumed_decisions(context)
+                    return self._empty(state, context, outcome="stopped", reason="work_shift_unavailable")
+                self._reject_unconsumed_decisions(context)
+                return self._resolve_npc_work(state, plan, context, NpcWorkTransition("started", attendance))
         elif proactive_rest_due and activity == "wait":
             activity = "rest"
         if activity == "eat" and "do_not_eat" in plan.constraints:
@@ -786,6 +815,7 @@ class SimulationEngine:
             include_meeting_start=context.allow_autonomous_meeting_attendance
             and activity in {"wait", "study", "rest"} and not one_shot,
         )
+        external = self._with_npc_work_boundary(state, external_horizon, plan, context, external)
         autonomous_vacancy_tick = None
         actor_care_tick = None
         if (plan.activity in {"study", "rest", "wait"} or between_work_shifts) and not one_shot:
@@ -1132,6 +1162,7 @@ class SimulationEngine:
                 state, to_tick, actor_id=plan.actor_id,
                 externally_controlled_actor_ids=context.externally_controlled_actor_ids,
             )
+            pending_at_completion = self._with_npc_work_boundary(state, to_tick, plan, context, pending_at_completion)
             vacancy_due_after_shift = False
             if context.allow_autonomous_vacancy:
                 from .autonomous_vacancy import next_vacancy_year_boundary
@@ -1936,6 +1967,45 @@ class SimulationEngine:
             return routine_tick, "npc_routine_boundary", None, None
         return external
 
+    def _with_npc_work_boundary(self, state, horizon, plan, context, external):
+        if context.work_job_id is None or not context.allow_npc_routine_mobility:
+            return external
+        limit = min(horizon, external[0]) if external is not None else horizon
+        tick = next_npc_work_tick(state, limit, excluded_actor_ids=self._npc_routine_exclusions(plan, context))
+        if tick is not None and (external is None or tick < external[0]):
+            return tick, "npc_work_boundary", None, None
+        return external
+
+    def _advance_attended_work(
+        self, state: WorldState, plan: LongActionPlan, context: SimulationContext, attendance: NpcAttendance,
+    ) -> SimulationResolution:
+        end = attendance.ends_at_tick
+        if state.current_tick == end:
+            self._reject_unconsumed_decisions(context)
+            payment = plan_attended_work_shift(state, attendance)
+            return self._resolve_npc_work(state, plan, context, NpcWorkTransition("settled", attendance, payment))
+        if not npc_attendance_is_valid(state, attendance):
+            self._reject_unconsumed_decisions(context)
+            return self._resolve_npc_work(state, plan, context, NpcWorkTransition("cancelled", attendance))
+        routine = self._resolve_npc_routine(state, plan, context)
+        if routine is not None:
+            return routine
+        meeting = self.resolve_autonomous_meeting_attendance(state, plan, context)
+        if meeting is not None:
+            return meeting
+        horizon = min(end, state.current_tick + context.max_step_ticks,
+                      state.current_tick + self.policy.max_macro_step_seconds)
+        boundary = self._next_external_boundary(
+            state, horizon, actor_id=plan.actor_id,
+            externally_controlled_actor_ids=context.externally_controlled_actor_ids,
+            include_meeting_start=context.allow_autonomous_meeting_attendance,
+        )
+        boundary = self._with_npc_work_boundary(state, horizon, plan, context, boundary)
+        boundary = self._with_npc_routine_boundary(state, horizon, plan, context, boundary)
+        tick, reason, reference, subject = boundary or (horizon, "work_attendance_boundary", None, plan.actor_id)
+        return self._advance_to_boundary(state, plan, context, tick, reason, reference, subject, "work",
+                                         work_job_id=attendance.work_job_id)
+
     def _resolve_npc_routine(
         self, state: WorldState, plan: SimulationPlan, context: SimulationContext, *,
         protected_interval: tuple[int, int] | None = None,
@@ -2003,7 +2073,7 @@ class SimulationEngine:
         )
 
     def _resolve_npc_work(
-        self, state: WorldState, plan: WorldAdvancePlan, context: SimulationContext, work: NpcWorkTransition,
+        self, state: WorldState, plan: SimulationPlan, context: SimulationContext, work: NpcWorkTransition,
     ) -> SimulationResolution:
         if context.command_actor_id is None:
             return self._empty(
@@ -2024,12 +2094,19 @@ class SimulationEngine:
             event = NpcAttendanceCancelledEvent(**fields, effective_tick=state.current_tick)
         else:
             event = NpcAttendanceSettledEvent(**fields, effective_tick=state.current_tick, payment=work.payment)
-        boundary = f"npc_work_{work.operation}"
+        boundary = f"npc_work_{work.operation}" if work.attendance.work_job_id is None else {
+            "started": "work_attendance_started", "cancelled": "work_shift_interrupted",
+            "settled": "work_shift_complete" if work.payment is not None else "work_shift_not_paid",
+        }[work.operation]
         resolution = RuleResolution(
-            events=[event], outcome=RuleOutcome(status="succeeded", code=boundary, message="NPC work interval updated."),
+            events=[event], outcome=RuleOutcome(status="succeeded", code=boundary, message="Work attendance updated."),
             elapsed_ticks=0, ruleset_version=context.ruleset_version,
         )
         self._validate_rule_batch(state, resolution)
+        if boundary in {"work_shift_interrupted", "work_shift_not_paid"}:
+            return self._resolved(state, context, resolution, outcome="stopped", boundary=boundary,
+                                  interruption=Interruption(kind="boundary", tick=state.current_tick,
+                                                            reason_code=boundary, subject_id=work.attendance.actor_id))
         return self._resolved(state, context, resolution, outcome="advanced", boundary=boundary,
                               interruption=None, continuation=plan)
 
@@ -3133,7 +3210,7 @@ class SimulationEngine:
         entity = state.entities.get(entity_id)
         return entity is None or entity.status in {"dead", "retired"}
 
-    def _advance_to_boundary(self, state, plan, context, tick, reason, reference, subject, activity):
+    def _advance_to_boundary(self, state, plan, context, tick, reason, reference, subject, activity, *, work_job_id=None):
         self._reject_unconsumed_decisions(context)
         duration = tick - state.current_tick
         if duration <= 0:
@@ -3181,6 +3258,8 @@ class SimulationEngine:
                 else self.rule_engine.evaluate(state, boundary_intent, boundary_context)
             )
         events = list(resolution.events)
+        if work_job_id is not None and events and isinstance(events[0], TimeAdvancedEvent):
+            events[0] = events[0].model_copy(update={"work_job_id": work_job_id})
         combined_outcome = resolution.outcome
         scheduled = next((item for item in state.scheduled_events if item.id == reference), None) if reference else None
         actual_tick = state.current_tick + resolution.elapsed_ticks
@@ -3269,7 +3348,7 @@ class SimulationEngine:
             "background_deprivation_boundary", "background_self_care_boundary", "travel_in_progress",
             "routine_work_shift_start", "routine_work_rest_start", "stop_condition_boundary",
             "itinerary_auto_care_threshold", "autonomous_vacancy_year_boundary",
-            "npc_meeting_start", "npc_routine_boundary",
+            "npc_meeting_start", "npc_routine_boundary", "npc_work_boundary", "work_attendance_boundary",
         }:
             result = self._resolved(
                 state, context, combined, outcome="advanced", boundary=reason,

@@ -15,6 +15,7 @@ from world_engine.api.app import create_app
 from world_engine.api.contracts import MessageRequest
 from world_engine.api.security import LocalSession
 from world_engine.application.actions import RulesActionDispatcher
+from world_engine.application.backups import BackupApplication
 from world_engine.application.conversation import ConversationApplication, ConversationStore
 from world_engine.application.operations import OperationsStore
 from world_engine.application.simulation_jobs import SimulationJobs
@@ -34,7 +35,11 @@ from world_engine.domain.components import (
     DailyRoutineComponent, DailyRoutineWindow, InventoryComponent, InventoryLot, LifeComponent, MarketComponent,
     MarketOffer, ProductionQuotaPolicy, ScheduledEventRecord,
 )
-from world_engine.domain.models import AccessScope, CalendarConfig, JobRecord, JobStatus, NewWorld, ResourceAccount, WorldEntity, WorldState
+from world_engine.domain.errors import AccessDenied, InvalidLease
+from world_engine.domain.models import (
+    AccessScope, CalendarConfig, CommandEnvelope, JobRecord, JobStatus, NewWorld, ResourceAccount, TimeAdvancedEvent,
+    WorldEntity, WorldState,
+)
 from world_engine.domain.occupations import OccupationSource, WorkAssignment, WorkPosting, occupation_assignment_id
 from world_engine.domain.work_shift import WorkShiftTerms
 from world_engine.runtime import build_application, local_identity
@@ -43,6 +48,7 @@ from world_engine.rules.contracts import ACTION_INTENT_ADAPTER, RuleContext
 from world_engine.rules.engine import RuleEngine
 from world_engine.simulation import LongActionPlan
 from world_engine.storage.database import Database
+from world_engine.storage.backup_import import WorldBackupImporter
 from world_engine.storage.repository import WorldRepository
 
 
@@ -854,9 +860,17 @@ def test_a_month_of_work_replays_equally_from_chat_and_long_action_panel(tmp_pat
     first_shift = 12_600
     shift_length = 3_600
     deadline = 30 * DAY
-    neighbor_id, quota_source_id = uuid4(), uuid4()
+    neighbor_id, quota_source_id, coworker, coworker_account = (uuid4() for _ in range(4))
+    state, coworker_assignment = _with_other_actor_assignment(state, actor_id=coworker)
     raw = state.model_dump(mode="json")
-    raw["resources"][str(EMPLOYER_ACCOUNT_ID)]["balance"] = "500"
+    raw["resources"][str(EMPLOYER_ACCOUNT_ID)]["balance"] = "900"
+    raw["metadata"]["work_shift_terms"][1]["duration_seconds"] = 1_200
+    raw["entities"][str(coworker)]["components"]["daily_routine"] = DailyRoutineComponent(windows=[DailyRoutineWindow(
+        window_id=uuid4(), start_second=first_shift + 900, duration_seconds=1_200, activity="work", place_id=WORKPLACE_ID,
+    )]).model_dump(mode="json")
+    raw["resources"][str(coworker_account)] = ResourceAccount(
+        resource_id="core.silver", balance="0", owner_id=coworker,
+    ).model_dump(mode="json")
     raw["entities"][str(neighbor_id)] = WorldEntity(
         id=neighbor_id, kind="person", status="active", location_id=WORKPLACE_ID,
         components={"life": LifeComponent(birth_tick=0, lifespan_ticks=first_shift + shift_length).model_dump(mode="json")},
@@ -904,7 +918,7 @@ def test_a_month_of_work_replays_equally_from_chat_and_long_action_panel(tmp_pat
                 lease = repository.claim_job("month-work-integration")
                 assert lease is not None and lease.job_id == job_id
                 resumed = False
-                for _ in range(100):
+                for _ in range(280):
                     jobs.advance(scope, lease)
                     job = repository.read_job(scope, job_id)
                     if job.status is JobStatus.SUCCEEDED:
@@ -926,13 +940,21 @@ def test_a_month_of_work_replays_equally_from_chat_and_long_action_panel(tmp_pat
                 assert resumed and job.payload["work_progress"]["shifts_paid"] == 30
                 assert final.state.current_tick == job.committed_through_tick == deadline
                 assert final.state.resources[WORKER_ACCOUNT_ID].balance == Decimal("380")
-                assert final.state.resources[EMPLOYER_ACCOUNT_ID].balance == Decimal("125")
+                assert final.state.resources[EMPLOYER_ACCOUNT_ID].balance == Decimal("150")
+                assert final.state.resources[coworker_account].balance == Decimal("375")
                 assert final.state.resources[STOCK_ACCOUNT_ID].balance == Decimal("100")
                 assert final.state.entities[neighbor_id].status == "dead"
                 assert final.state.scheduled_events[0].status == "completed"
-                events = repository.list_events(scope, world_id, branch_id, limit=250).events
-                assert [event.tick for event in events if event.type == "core.work_shift_paid.v1"] == [
+                page = repository.list_events(scope, world_id, branch_id, limit=500)
+                assert not page.has_more
+                events = page.events
+                paid = [event for event in events if event.type == "core.npc_attendance_settled.v1"
+                        and event.payload.get("payment")]
+                assert [event.tick for event in paid if event.payload["attendance"]["assignment_id"] == str(assignment.assignment_id)] == [
                     first_shift + shift_length + day * DAY for day in range(30)
+                ]
+                assert [event.tick for event in paid if event.payload["attendance"]["assignment_id"] == str(coworker_assignment.assignment_id)] == [
+                    first_shift + 2100 + day * DAY for day in range(30)
                 ]
                 assert [event.tick for event in events if event.type == "core.scheduled_event_completed.v1"] == [deadline]
                 assert repository.replay(scope, world_id, branch_id, from_genesis=True).state_hash == final.state_hash
@@ -968,6 +990,103 @@ def test_chat_and_long_action_panel_reject_work_from_away_without_a_savings_targ
             assert panel.status_code == 422
             assert panel.json()["error"]["code"] == "ROUTINE_WORK_ASSIGNMENT_UNAVAILABLE"
             assert not repository.list_jobs(scope, created.world.world_id, created.branch.branch_id)
+    finally:
+        database.dispose()
+
+
+def test_overlapping_work_settles_each_wage_at_its_end_across_a_player_choice(tmp_path):
+    state, player_assignment = _world()
+    npc, npc_account, leader, council = (uuid4() for _ in range(4))
+    state, npc_assignment = _with_other_actor_assignment(state, actor_id=npc)
+    raw = state.model_dump(mode="json")
+    raw["entities"][str(npc)]["components"]["daily_routine"] = DailyRoutineComponent(windows=[DailyRoutineWindow(
+        window_id=uuid4(), start_second=900, duration_seconds=1200, activity="work", place_id=WORKPLACE_ID,
+    )]).model_dump(mode="json")
+    raw["metadata"]["work_shift_terms"][1]["duration_seconds"] = 1200
+    raw["resources"][str(npc_account)] = ResourceAccount(resource_id="core.silver", owner_id=npc, balance="0").model_dump(mode="json")
+    raw["entities"][str(leader)] = WorldEntity(id=leader, kind="character", components={
+        "life": LifeComponent(birth_tick=0, lifespan_ticks=2700).model_dump(mode="json"),
+    }).model_dump(mode="json")
+    raw["entities"][str(council)] = WorldEntity(id=council, kind="organization", components={"governance": {
+        "leader_id": str(leader), "members": [str(ACTOR_ID), str(leader)], "succession_policy": "election",
+    }}).model_dump(mode="json")
+    state = WorldState.model_validate(raw)
+    client, database, repo, scope, created, _ = _work_routine_api(tmp_path, state, [])
+    world, branch = created.world.world_id, created.branch.branch_id
+    try:
+        with client:
+            job_id = UUID(client.post(f"/api/v1/worlds/{world}/long-actions", headers={"Idempotency-Key": "overlapping-work"}, json={
+                "branch_id": str(branch), "expected_state_version": "0", "duration_seconds": 3600, "activity": "work",
+                "work_schedule": {"assignment_id": str(player_assignment.assignment_id), "first_shift_tick": 0,
+                                  "repeat_every_days": 1},
+            }).raise_for_status().json()["job_id"])
+            jobs = SimulationJobs(repo)
+            lease = repo.claim_job("work-before-decision")
+            assert lease is not None
+            for _ in range(10):
+                jobs.advance(scope, lease)
+                if repo.read_job(scope, job_id).status is JobStatus.WAITING_INPUT:
+                    break
+            else:
+                pytest.fail("Expected a succession choice in the middle of the shift")
+            stopped = repo.read_world(scope, world, branch)
+            assert stopped.state.current_tick == 2700
+            attendance, = stopped.state.npc_attendance
+            assert (attendance.work_job_id, attendance.worked_through_tick) == (job_id, 2700)
+            assert stopped.state.resources[WORKER_ACCOUNT_ID].balance == Decimal("5")
+            assert stopped.state.resources[npc_account].balance == Decimal("12.50")
+            with pytest.raises(AccessDenied, match="active simulation worker lease"):
+                repo.commit_command(scope, world, branch, CommandEnvelope(
+                    actor_id=ACTOR_ID, expected_state_version=stopped.branch.state_version, idempotency_key="forged-work-clock",
+                    command_type="simulation.window",
+                ), [TimeAdvancedEvent(to_tick=3600, work_job_id=job_id)])
+            fork = repo.fork(scope, world, branch, stopped.last_seq, "Abandon the partial shift")
+            repo.commit_command(scope, world, fork.branch_id, CommandEnvelope(
+                actor_id=ACTOR_ID, expected_state_version=fork.state_version,
+                idempotency_key="clock-without-attendance", command_type="fixture.advance",
+            ), [TimeAdvancedEvent(to_tick=3600)])
+            skipped = repo.read_world(scope, world, fork.branch_id)
+            assert not skipped.state.npc_attendance and skipped.state.resources[WORKER_ACCOUNT_ID].balance == Decimal("5")
+            path = f"/api/v1/jobs/{job_id}/decision"
+            offered, = client.get(path).raise_for_status().json()["items"]
+            choice = {"request_id": offered["request_id"], "option_id": "leave_vacant"}
+            client.post(path, json=choice).raise_for_status()
+            restarted = SimulationJobs(repo)
+            stale_lease = lease
+            lease = repo.claim_job("work-after-decision")
+            assert lease is not None
+            with pytest.raises(InvalidLease):
+                restarted.advance(scope, stale_lease)
+            for _ in range(10):
+                restarted.advance(scope, lease)
+                job = repo.read_job(scope, job_id)
+                if job.status is JobStatus.SUCCEEDED:
+                    break
+                assert job.status is JobStatus.RUNNING, job.result
+            else:
+                pytest.fail("The shift did not complete after the decision")
+            final = repo.read_world(scope, world, branch)
+            assert final.state.current_tick == 3600 and not final.state.npc_attendance
+            assert job.payload["work_progress"]["shifts_paid"] == 1
+            assert final.state.resources[EMPLOYER_ACCOUNT_ID].balance == Decimal("75")
+            assert final.state.resources[WORKER_ACCOUNT_ID].balance == Decimal("17.50")
+            paid = [row for row in repo.list_events(scope, world, branch).events
+                    if row.type == "core.npc_attendance_settled.v1" and row.payload.get("payment")]
+            assert [(row.tick, row.payload["attendance"]["assignment_id"]) for row in paid] == [
+                (2100, str(npc_assignment.assignment_id)), (3600, str(player_assignment.assignment_id)),
+            ]
+            assert repo.replay(scope, world, branch, from_genesis=True).state_hash == final.state_hash
+            restored_db = Database(f"sqlite:///{(tmp_path / 'work-overlap-restored.db').as_posix()}")
+            restored_db.create_schema()
+            try:
+                backups = BackupApplication(repo)
+                restored = WorldRepository(restored_db)
+                with backups.validate_archive(backups.export_world(scope, world, format_version="2.0")) as backup:
+                    WorldBackupImporter(restored).import_verified_backup(scope, backup)
+                assert restored.replay(scope, world, branch, from_genesis=True).state_hash == final.state_hash
+                assert restored.replay(scope, world, fork.branch_id, from_genesis=True).state_hash == skipped.state_hash
+            finally:
+                restored_db.dispose()
     finally:
         database.dispose()
 

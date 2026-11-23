@@ -60,7 +60,7 @@ from .institutional_credit_extension_events import InstitutionalCreditExtensionC
 from .institutional_credit_extension_state import apply_credit_extension_event
 from .institutional_treasury_reserve import apply_reserve_mobilization
 from .institutional_treasury_reserve_events import InstitutionalTreasuryMobilizedEvent
-from .npc_work_shift import plan_npc_work_shift
+from .npc_work_shift import plan_attended_work_shift
 from .relationship_invitation_events import RelationInvitationChangedEvent, invitation_event_id
 from .private_gifts import PrivateGiftChangedEvent, apply_private_gift
 from .relationship_reflection_events import MeetingReflectionRecordedEvent
@@ -503,11 +503,16 @@ def apply_event(state: WorldState, raw_event: DomainEvent | dict[str, object]) -
         return apply_npc_plan_review_resolved(state, event)
     if isinstance(event, NpcAttendanceStartedEvent):
         record = event.attendance
-        if any(row.assignment_id == record.assignment_id for row in state.npc_attendance):
+        previous = next((row for row in state.npc_attendance if row.assignment_id == record.assignment_id), None)
+        if previous is not None and (
+            previous.work_job_id is None or record.work_job_id is None or previous.work_job_id == record.work_job_id
+            or previous.worked_through_tick != previous.starts_at_tick
+        ):
             raise InvalidEvent("The NPC assignment already has an open attendance interval.")
-        if record != plan_npc_attendance_start(state, record.assignment_id):
+        if record != plan_npc_attendance_start(state, record.assignment_id, work_job_id=record.work_job_id):
             raise InvalidEvent("NPC attendance must start at its exact registered work time and workplace.")
-        records = sorted([*state.npc_attendance, record], key=lambda row: str(row.assignment_id))
+        records = sorted([*(row for row in state.npc_attendance if row != previous), record],
+                         key=lambda row: str(row.assignment_id))
         return _validated_state(state, {"npc_attendance": records})
     if isinstance(event, NpcAttendanceCancelledEvent):
         record = event.attendance
@@ -523,9 +528,7 @@ def apply_event(state: WorldState, raw_event: DomainEvent | dict[str, object]) -
         if state.current_tick < record.ends_at_tick:
             raise InvalidEvent("NPC attendance can be settled only at or after its scheduled end.")
 
-        expected_payment = None
-        if state.current_tick == record.ends_at_tick and npc_attendance_is_valid(state, record):
-            expected_payment = plan_npc_work_shift(state, record.assignment_id)
+        expected_payment = plan_attended_work_shift(state, record)
         if event.payment != expected_payment:
             raise InvalidEvent("NPC attendance payment must exactly match its eligible completed work shift.")
 
@@ -1824,9 +1827,21 @@ def apply_event(state: WorldState, raw_event: DomainEvent | dict[str, object]) -
         if any(item.handler_id == STORY_NODE_HANDLER and item.status == "queued" and item.due_tick < event.to_tick
                for item in state.scheduled_events):
             raise InvalidEvent("World time cannot skip a queued story milestone.")
-        # The parsed event validates the range. A strictly higher tick preserves
-        # state invariants, including timestamp bounds on existing records.
-        return state.model_copy(update={"current_tick": event.to_tick})
+        updates = {"current_tick": event.to_tick}
+        if event.work_job_id is not None or any(row.work_job_id is not None for row in state.npc_attendance):
+            continuing = [row for row in state.npc_attendance
+                          if row.work_job_id is not None and row.work_job_id == event.work_job_id]
+            if event.work_job_id is not None and (
+                len(continuing) != 1 or not npc_attendance_is_valid(state, continuing[0])
+                or event.to_tick > continuing[0].ends_at_tick
+            ):
+                raise InvalidEvent("A work clock segment requires live attendance and its exact shift window.")
+            # An unrelated clock advance cannot count toward a paused shift.
+            updates["npc_attendance"] = [
+                row if row.work_job_id is None else row.model_copy(update={"worked_through_tick": event.to_tick})
+                for row in state.npc_attendance if row.work_job_id is None or row.work_job_id == event.work_job_id
+            ]
+        return state.model_copy(update=updates)
 
     raise InvalidEvent(f"No reducer is registered for event {event.type!r}.")
 

@@ -56,7 +56,8 @@ def npc_work_transition(
     if not isinstance(state, WorldState):
         return None
     now = state.current_tick
-    attendance_rows = sorted(state.npc_attendance, key=lambda row: str(row.assignment_id))
+    attendance_rows = sorted((row for row in state.npc_attendance if row.work_job_id is None),
+                             key=lambda row: str(row.assignment_id))
 
     # Close all elapsed windows first. A delayed host still clears the record,
     # but payment remains bound to the exact scheduled end tick.
@@ -111,7 +112,7 @@ def next_npc_work_tick(
     candidates = [
         row.ends_at_tick
         for row in state.npc_attendance
-        if now < row.ends_at_tick <= horizon
+        if row.work_job_id is None and now < row.ends_at_tick <= horizon
     ]
 
     excluded = _uuid_set(excluded_actor_ids) | occupied_npc_ids(state, now)

@@ -261,6 +261,7 @@ class SimulationJobs:
             allow_autonomous_vacancy=view.world.owner_id == scope.user_id,
             allow_autonomous_meeting_attendance=view.world.owner_id == scope.user_id,
             allow_npc_routine_mobility=view.world.owner_id == scope.user_id,
+            work_job_id=job.job_id if isinstance(plan, LongActionPlan) and plan.work_schedule is not None else None,
             decision_responses=(decision,) if decision is not None else (),
             causal_death_event_ids=causal_deaths,
             journey_resolution_receipts=journey_receipts,

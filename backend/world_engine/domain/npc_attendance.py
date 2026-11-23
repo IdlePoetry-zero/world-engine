@@ -45,23 +45,32 @@ class NpcAttendance(BaseModel):
     expected_posting_revision: StrictInt = Field(ge=1, le=_MAX_REVISION)
     starts_at_tick: Tick
     ends_at_tick: Tick
+    work_job_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
+    worked_through_tick: Tick | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def positive_bounded_interval(self) -> NpcAttendance:
         if self.ends_at_tick <= self.starts_at_tick:
             raise ValueError("NPC attendance must have a positive time interval")
+        if self.work_job_id is None and self.worked_through_tick is not None:
+            raise ValueError("Explicit shift progress requires a work job")
+        if self.work_job_id is not None and (
+            self.window_id != self.work_job_id or self.worked_through_tick is None
+            or not self.starts_at_tick <= self.worked_through_tick <= self.ends_at_tick
+        ):
+            raise ValueError("Explicit shift progress must belong to its job and interval")
         return self
 
 
-def plan_npc_attendance_start(state: WorldState, assignment_id: UUID) -> NpcAttendance | None:
-    """Plan attendance at the exact start of an eligible NPC's daily work shift."""
-    from .models import WorldState
-
+def plan_npc_attendance_start(
+    state: WorldState, assignment_id: UUID, *, work_job_id: UUID | None = None,
+) -> NpcAttendance | None:
+    """Plan a routine NPC shift or a shift authorized by the host's work job."""
     resolved = _resolve_assignment(state, assignment_id)
     if resolved is None:
         return None
-    assignment, actor, posting, terms, routine = resolved
-    if actor.id == state.player_id or not _active_assignment_at_workplace(assignment, actor, posting, state):
+    assignment, actor, posting, terms = resolved
+    if not _active_assignment_at_workplace(assignment, actor, posting, state):
         return None
 
     day_seconds = state.calendar.day_seconds
@@ -69,27 +78,29 @@ def plan_npc_attendance_start(state: WorldState, assignment_id: UUID) -> NpcAtte
     if start_tick > _MAX_TICK - terms.duration_seconds:
         return None
     end_tick = start_tick + terms.duration_seconds
-    if not _posting_covers_shift(posting, start_tick, end_tick):
+    if assignment.started_tick > start_tick or not _posting_covers_shift(posting, start_tick, end_tick):
         return None
 
-    window = next(
-        (
-            item for item in sorted(routine.windows, key=lambda value: str(value.window_id))
-            if _window_starts_shift(item, posting.location_id, terms, day_seconds, start_tick)
-        ),
-        None,
-    )
-    if window is None:
-        return None
+    window_id = work_job_id
+    if window_id is None:
+        routine = _autonomous_routine(state, actor)
+        if routine is None:
+            return None
+        window_id = next((item.window_id for item in sorted(routine.windows, key=lambda value: str(value.window_id))
+                          if _window_starts_shift(item, posting.location_id, terms, day_seconds, start_tick)), None)
+        if window_id is None:
+            return None
     return NpcAttendance(
         assignment_id=assignment.assignment_id,
         actor_id=assignment.actor_id,
         workplace_id=posting.location_id,
-        window_id=window.window_id,
+        window_id=window_id,
         expected_assignment_revision=assignment.revision,
         expected_posting_revision=posting.revision,
         starts_at_tick=start_tick,
         ends_at_tick=end_tick,
+        work_job_id=work_job_id,
+        worked_through_tick=start_tick if work_job_id is not None else None,
     )
 
 
@@ -113,10 +124,9 @@ def npc_attendance_is_valid(state: WorldState, attendance: NpcAttendance) -> boo
     resolved = _resolve_assignment(state, attendance.assignment_id)
     if resolved is None:
         return False
-    assignment, actor, posting, terms, routine = resolved
+    assignment, actor, posting, terms = resolved
     if (
-        actor.id == state.player_id
-        or assignment.actor_id != attendance.actor_id
+        assignment.actor_id != attendance.actor_id
         or assignment.revision != attendance.expected_assignment_revision
         or assignment.started_tick > attendance.starts_at_tick
         or posting.revision != attendance.expected_posting_revision
@@ -127,6 +137,11 @@ def npc_attendance_is_valid(state: WorldState, attendance: NpcAttendance) -> boo
     ):
         return False
 
+    if attendance.work_job_id is not None:
+        return attendance.worked_through_tick == state.current_tick
+    routine = _autonomous_routine(state, actor)
+    if routine is None:
+        return False
     day_seconds = state.calendar.day_seconds
     return any(
         window.window_id == attendance.window_id
@@ -155,13 +170,20 @@ def _resolve_assignment(state: WorldState, assignment_id: UUID):
     posting: WorkPosting = postings[0]
     try:
         terms: WorkShiftTerms | None = registered_work_shift_terms(state).get(posting.posting_id)
-        routine_raw = actors.components.get("daily_routine")
-        if terms is None or routine_raw is None:
+        if terms is None:
             return None
-        routine = DailyRoutineComponent.model_validate(routine_raw)
     except (WorkShiftError, ValueError, TypeError):
         return None
-    return assignment, actors, posting, terms, routine
+    return assignment, actors, posting, terms
+
+
+def _autonomous_routine(state: WorldState, actor) -> DailyRoutineComponent | None:
+    if actor.id == state.player_id:
+        return None
+    try:
+        return DailyRoutineComponent.model_validate(actor.components.get("daily_routine"))
+    except (ValueError, TypeError):
+        return None
 
 
 def _active_assignment_at_workplace(assignment, actor, posting, state: WorldState) -> bool:
@@ -169,7 +191,6 @@ def _active_assignment_at_workplace(assignment, actor, posting, state: WorldStat
         assignment.ended_tick is not None
         or assignment.employer_id != posting.employer_id
         or assignment.location_id != posting.location_id
-        or actor.id == state.player_id
         or actor.kind not in {"character", "person"}
         or actor.status != "active"
         or actor.location_id != posting.location_id

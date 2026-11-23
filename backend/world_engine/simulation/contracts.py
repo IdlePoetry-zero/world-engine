@@ -242,6 +242,7 @@ class SimulationContext(FrozenModel):
     allow_autonomous_vacancy: StrictBool = Field(default=False, exclude_if=lambda value: not value)
     allow_autonomous_meeting_attendance: StrictBool = Field(default=False, exclude_if=lambda value: not value)
     allow_npc_routine_mobility: StrictBool = Field(default=False, exclude_if=lambda value: not value)
+    work_job_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
     world_seed: str = Field(min_length=1, max_length=256)
     state_version: int = Field(ge=0)
     ruleset_version: str = Field(default="1.0.0", min_length=1, max_length=100)

@@ -38,7 +38,7 @@ from world_engine.domain.occupation_death_validation import derive_death_vacanci
 from world_engine.domain.occupation_legacy_vacancies import (
     OccupationLegacyVacanciesResolvedEvent, OccupationLegacyVacancyError, plan_legacy_occupation_vacancies,
 )
-from world_engine.domain.npc_attendance_events import NPC_ATTENDANCE_EVENTS, NpcAttendanceStartedEvent
+from world_engine.domain.npc_attendance_events import NPC_ATTENDANCE_EVENTS, NpcAttendanceSettledEvent, NpcAttendanceStartedEvent
 from world_engine.domain.npc_plan_review_events import NpcPlanReviewScheduledEvent, validate_authored_npc_review_scope
 from world_engine.domain.story_nodes import (
     StoryMilestoneResolvedEvent, ready_story_reaction, settle_story_reaction, story_reaction_event_id, validate_story_arrival_world,
@@ -145,6 +145,7 @@ from world_engine.domain.models import (
     NewWorld,
     WorldCreated,
     WorldRecord,
+    TimeAdvancedEvent,
     WorldState,
     WorldView,
     normalize_datetime,
@@ -2377,14 +2378,22 @@ class WorldRepository:
                     lease is None or leased_job.job_type != "simulation.world_advance"
                 ):
                     raise AccessDenied("All-character settlement requires a world advancement job.")
-                if any(isinstance(event, NPC_ATTENDANCE_EVENTS) for event in typed_events):
-                    if lease is None or leased_job.job_type != "simulation.world_advance" or command.command_type != "simulation.window":
-                        raise AccessDenied("NPC attendance recording requires a world-advance worker lease.")
+                attendance_events = [event for event in typed_events if isinstance(event, NPC_ATTENDANCE_EVENTS)]
+                work_clocks = [event for event in typed_events
+                               if isinstance(event, TimeAdvancedEvent) and event.work_job_id is not None]
+                if attendance_events or work_clocks:
+                    if (lease is None or leased_job.job_type not in {"simulation.world_advance", "simulation.long_action"}
+                        or command.command_type != "simulation.window"):
+                        raise AccessDenied("Attendance recording requires an active simulation worker lease.")
                     validate_npc_attendance_scope(
                         typed_events, world_id=world_id, branch_id=branch_id, command_id=command.command_id,
                         actor_id=command.actor_id, ruleset_version=world.ruleset_version,
                     )
-                    for event in typed_events:
+                    for event in attendance_events:
+                        if event.attendance.work_job_id is not None:
+                            continue
+                        if role != MembershipRole.OWNER or scope.user_id != world.owner_id:
+                            raise AccessDenied("Autonomous attendance requires the canonical world owner.")
                         if isinstance(event, NpcAttendanceStartedEvent):
                             self._require_uncontrolled_npc(session, scope, world, role, event.attendance.actor_id)
                 travel_events = [event for event in typed_events if isinstance(event, TravelJourneyChangedEvent)]
@@ -2586,6 +2595,27 @@ class WorldRepository:
                     self._require_uncontrolled_npc(session, scope, world, role, typed_events[0].actor_id)
                 validate_safe_conduct_travel_batch(state, typed_events)
                 paid = None
+                if work_clocks or any(event.attendance.work_job_id is not None for event in attendance_events):
+                    if leased_job.job_type != "simulation.long_action":
+                        raise AccessDenied("Explicit attendance requires a leased character work plan.")
+                    work_plan = LongActionPlan.model_validate(leased_job.payload_json["plan"])
+                    schedule = work_plan.work_schedule
+                    if schedule is None or work_plan.actor_id != command.actor_id:
+                        raise AccessDenied("Attendance must match the controlled character's authorized schedule.")
+                    if len(work_clocks) > 1 or any(clock.work_job_id != lease.job_id for clock in work_clocks):
+                        raise AccessDenied("A work clock must belong to its own leased job.")
+                    cadence = schedule.repeat_every_days * state.calendar.day_seconds
+                    for event in attendance_events:
+                        attendance = event.attendance
+                        if attendance.work_job_id is None:
+                            continue
+                        elapsed = attendance.starts_at_tick - schedule.first_shift_tick
+                        if (attendance.work_job_id != lease.job_id or attendance.actor_id != work_plan.actor_id
+                            or attendance.assignment_id != schedule.assignment_id or elapsed < 0 or elapsed % cadence
+                            or attendance.ends_at_tick > work_plan.target_tick):
+                            raise AccessDenied("Explicit attendance falls outside its leased job's actor or work interval.")
+                        if isinstance(event, NpcAttendanceSettledEvent):
+                            paid = event.payment
                 if lease is not None and command.command_type == "action.work_shift":
                     if leased_job.job_type != "simulation.long_action":
                         raise AccessDenied("A leased wage settlement requires a recurring work plan.")

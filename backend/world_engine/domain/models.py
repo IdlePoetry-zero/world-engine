@@ -840,7 +840,9 @@ class WorldState(ContractModel):
                 row = NpcAttendance.model_validate(raw.model_dump(mode="python"))
                 assignment = assignments_by_id.get(row.assignment_id)
                 if (assignment is None or (assignment.actor_id, assignment.location_id) != (row.actor_id, row.workplace_id)
-                    or row.actor_id == self.player_id or row.starts_at_tick > self.current_tick):
+                    or row.actor_id == self.player_id and row.work_job_id is None
+                    or row.starts_at_tick > self.current_tick
+                    or row.worked_through_tick is not None and row.worked_through_tick != self.current_tick):
                     raise ValueError("NPC attendance must refer to its assignment, worker and workplace at a started tick.")
                 attendance_ids.append(row.assignment_id)
             if attendance_ids != sorted(set(attendance_ids), key=str):
@@ -1057,6 +1059,7 @@ class TimeAdvancedEvent(ContractModel):
     type: Literal["core.time_advanced.v1"] = "core.time_advanced.v1"
     event_id: UUID = Field(default_factory=uuid4)
     to_tick: int = Field(ge=-(2**63), le=2**63 - 1)
+    work_job_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
     visibility: JsonObject = Field(default_factory=lambda: {"policy": "author_only"})
 
 

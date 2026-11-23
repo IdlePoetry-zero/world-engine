@@ -53,6 +53,10 @@ export function jobReasonLabel(reason: string): string {
     work_balance_target_reached: '余额目标已达成；重复工作已停止',
 
     work_shift_boundary_required: '已遇到班次中的重要结算边界；当前工作计划已暂停',
+    work_attendance_started: '本班已开始，工资将在班次完成后结算',
+    work_shift_interrupted: '本班中断，未发放本班工资',
+    work_shift_not_paid: '本班未能结薪，请核对任职状态和雇主余额',
+    work_slot_already_in_progress: '这个岗位已有未结算的班次',
 
     work_shift_start_missed: '错过了预定班次开始时间；工作计划已停止',
 

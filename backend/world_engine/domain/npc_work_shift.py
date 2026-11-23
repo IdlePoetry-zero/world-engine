@@ -11,6 +11,7 @@ from uuid import UUID
 
 from .components import DailyRoutineComponent
 from .models import WorldState
+from .npc_attendance import NpcAttendance, npc_attendance_is_valid
 from .work_shift import (
     PaidWorkShiftPlan,
     WorkShiftError,
@@ -22,6 +23,28 @@ from .work_shift import (
 
 
 _MIN_TICK = -(2**63)
+
+
+def plan_attended_work_shift(state: WorldState, attendance: NpcAttendance) -> PaidWorkShiftPlan | None:
+    """Plan payment only after the registered attendance reached its exact end."""
+    if state.current_tick != attendance.ends_at_tick or not npc_attendance_is_valid(state, attendance):
+        return None
+    if attendance.work_job_id is None:
+        return plan_npc_work_shift(state, attendance.assignment_id)
+    assignment = next(row for row in state.work_assignments if row.assignment_id == attendance.assignment_id)
+    terms = registered_work_shift_terms(state)[assignment.posting_id]
+    account_id = select_wage_holder_account(state, attendance.actor_id, terms.resource_id)
+    if account_id is None:
+        return None
+    try:
+        return plan_paid_work_shift(
+            state, terms=terms, actor_id=attendance.actor_id, assignment_id=attendance.assignment_id,
+            worker_account_id=account_id, shift_started_tick=attendance.starts_at_tick,
+            expected_assignment_revision=attendance.expected_assignment_revision,
+            expected_posting_revision=attendance.expected_posting_revision,
+        )
+    except WorkShiftError:
+        return None
 
 
 def plan_npc_work_shift(state: WorldState, assignment_id: UUID) -> PaidWorkShiftPlan | None:
