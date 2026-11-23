@@ -1,10 +1,19 @@
-from uuid import UUID, uuid4
+from types import SimpleNamespace
+from uuid import UUID, uuid4, uuid5
 
 from fastapi.testclient import TestClient
 import pytest
 
+from world_engine.agents.knowledge import build_agent_knowledge
+from world_engine.api.app import create_app
+from world_engine.api.security import LocalSession
+from world_engine.application.actions import RulesActionDispatcher
 from world_engine.application.backups import BackupApplication
+from world_engine.application.conversation import ConversationApplication, ConversationStore
+from world_engine.application.operations import OperationsStore
+from world_engine.application.world_packs import WorldPackManifest, write_world_pack
 from world_engine.application.simulation_jobs import SimulationJobs
+from world_engine.content.distant_station_story import _id as station_id
 from world_engine.content.distant_station_story import build_archive as build_station_archive
 from world_engine.content.gensokyo_reference import build_archive
 from world_engine.domain.components import ScheduledEventRecord
@@ -12,13 +21,18 @@ from world_engine.domain.challenges import ChallengeDefinition, settle_challenge
 from world_engine.domain.contests import ReplyContest
 from world_engine.domain.errors import InvalidEvent
 from world_engine.domain.gameplay_events import ScheduledEventCompletedEvent
-from world_engine.domain.models import AccessScope, JobStatus, MembershipRole, TimeAdvancedEvent, WorldEntity, WorldState
+from world_engine.domain.models import (
+    AccessScope, JobStatus, MembershipRole, StoryArrival, TimeAdvancedEvent, WorldEntity, WorldState,
+)
+from world_engine.domain.npc_plans import NpcPlan, NpcPlanStep
 from world_engine.domain.reducers import apply_event, ledger_postings
+from world_engine.simulation.contracts import DecisionResponse
 from world_engine.domain.story_nodes import (
     STORY_NODE_HANDLER, STORY_NODE_VERSION, StoryNode, StoryMilestoneResolvedEvent, settle_story_milestone,
 )
 from world_engine.runtime import build_application, local_identity
 from world_engine.rules import RuleContext, RuleEngine
+from world_engine.rules.contracts import ACTION_INTENT_ADAPTER
 from world_engine.rules.versions import LEGACY_RULESET_VERSION
 from world_engine.storage.backup_import import WorldBackupImporter
 from world_engine.storage.database import Database
@@ -233,12 +247,17 @@ def test_station_arrival_cascades_at_the_action_tick_and_moves_real_stock(tmp_pa
         assert assessed["passed"] is True
         contest, = state(main)["local_contests"]
         notice = _contest_http(client, repository, scope, world_id, main, {"operation": "invite", "definition_id": contest["definition_id"],
-            "recipient_id": contest["opponents"][0]["id"], "routine": "station.readout"})
+            "recipient_id": str(station_id("operator")), "routine": "station.readout"})
         _contest_http(client, repository, scope, world_id, main, {"operation": "ask_npc", "contest_id": notice["contest_id"]})
         result = _contest_http(client, repository, scope, world_id, main, {"operation": "settle", "contest_id": notice["contest_id"]})
         assert result["status"] == "settled" and result["winner_id"] == str(arrived.state.player_id)
-        pending_audit, = [row for row in arrived.state.scheduled_events if row.due_tick == 90]
-        assert pending_audit.status == "queued"
+        pending_audit, = [row for row in arrived.state.scheduled_events if row.id == station_id("check-reserve")]
+        assert (pending_audit.due_tick, pending_audit.status) == (90, "queued")
+        relief_id, liaison_id = station_id("actor:roving-technician"), station_id("actor:reserve-liaison")
+        assert liaison_id in arrived.state.entities and relief_id not in arrived.state.entities
+        assert not arrived.state.relations
+        assert str(liaison_id) in state(main)["entities"] and str(relief_id) not in state(main)["entities"]
+        assert "story_arrivals" not in state(main)
         assert "应急电路复查" not in str(state(main))
 
         _run_http_job(client, repository, jobs, scope, world_id, main, "world-advance", 120)
@@ -251,8 +270,15 @@ def test_station_arrival_cascades_at_the_action_tick_and_moves_real_stock(tmp_pa
         unprepared = repository.read_world(scope, world_id, other)
         delayed_state = repository.read_world(scope, world_id, delayed)
         assert [(row.outcome, row.resolved_tick) for row in settled.state.story_milestones][-1] == ("sheltered", 180)
-        assert [(row.outcome, row.resolved_tick) for row in unprepared.state.story_milestones] == [("pulse", 180)]
-        assert [(row.outcome, row.resolved_tick) for row in settled.state.story_milestones][-2] == ("reserve-tested", 90)
+        assert [(row.outcome, row.resolved_tick) for row in unprepared.state.story_milestones] == [
+            ("shift-ready", 90), ("pulse", 180),
+        ]
+        assert relief_id in unprepared.state.entities and liaison_id not in unprepared.state.entities
+        assert not unprepared.state.relations
+        assert ("reserve-tested", 90) in [(row.outcome, row.resolved_tick) for row in settled.state.story_milestones]
+        bond, = settled.state.relations
+        assert (bond.from_id, bond.to_id, bond.updated_tick) == (relief_id, liaison_id, 90)
+        assert len(bond.evidence_refs) == 1
         assert [(row.outcome, row.resolved_tick) for row in delayed_state.state.story_milestones][-2] == ("reserve-tested", 120)
         assert repository.replay(scope, world_id, main, from_genesis=True).state_hash == settled.state_hash
         backups = BackupApplication(repository)
@@ -301,9 +327,12 @@ def test_later_opening_has_a_traversable_mountain_and_private_estate_entrance(tm
         for name in ("博丽神社", "魔法森林", "妖怪之山"):
             travel(main, name)
         state = view(main)
-        assert any(row["name"] == "山径水尺员蒲一径" for row in state["entities"].values())
+        assert all(row["name"] != "山径水尺员蒲一径" for row in state["entities"].values())
         assert any(row["destination_name"] == "守矢神社" for row in state["travel_options"])
-        _run_http_job(client, repository, jobs, scope, world_id, main, "world-advance", 240)
+        clock = repository.read_world(scope, world_id, main).state.current_tick
+        _run_http_job(client, repository, jobs, scope, world_id, main, "world-advance", 900 - clock)
+        assert any(row["name"] == "山径水尺员蒲一径" for row in view(main)["entities"].values())
+        _run_http_job(client, repository, jobs, scope, world_id, main, "world-advance", 120)
         assert "你见证的水位" in view(main)["story_milestones"][-1]["summary"]
         travel(main, "守矢神社")
         arrived = repository.read_world(scope, world_id, main)
@@ -383,3 +412,224 @@ def test_each_discipline_uses_the_same_growth_and_challenge_contract(discipline)
         state = apply_event(state, event)
     qualified = settle_challenge(state, challenge, actor, uuid4())
     assert qualified.attempt.completed_tick == 60 and qualified.attempt.passed
+
+
+
+def test_staged_npc_is_targetable_only_after_arrival_and_dialogue_branches_the_story(tmp_path):
+    world_app = build_application(data_directory=tmp_path, run_simulation_worker=False).state.worlds
+    scope = local_identity(tmp_path)
+    repository = world_app.repository
+    jobs = SimulationJobs(repository)
+    liaison, relief = station_id("actor:reserve-liaison"), station_id("actor:roving-technician")
+
+    class DialogueModel:
+        calls = []
+
+        async def generate(self, scope, request):
+            role = request.role_task.value
+            context = request.messages[-1].content
+            self.calls.append((role, context))
+            responses = {
+                "intent": {"target_id": str(liaison), "clarification": ""},
+                "social_adjudication": {"utterance": "我负责核对备件领用，请先告诉我需要哪种件。"},
+                "gm_answer": {"answer": "当前见闻以在场人员为准。", "references": []},
+            }
+            return SimpleNamespace(normalized_output=responses[role])
+
+    model = DialogueModel()
+    conversation = ConversationApplication(world_app, model, ConversationStore(OperationsStore(tmp_path / "stage-chat.db")))
+    conversation.actions = RulesActionDispatcher(repository, model, RuleEngine(), ACTION_INTENT_ADAPTER, RuleContext)
+    origin = "http://127.0.0.1:8000"
+    app = create_app(world_app, LocalSession(str(scope.user_id), str(scope.tenant_id), frozenset({origin})),
+                     conversations=conversation)
+    with TestClient(app, base_url=origin) as client:
+        client.get("/api/v1/session").raise_for_status()
+        source = build_station_archive()
+        upload = {"Origin": origin, "Content-Type": "application/zip"}
+        preview = client.post("/api/v1/packs/import/preview", headers=upload, content=source).raise_for_status().json()
+
+        def import_opening(opening):
+            return client.post("/api/v1/packs/import", headers=upload | {
+                "Idempotency-Key": opening, "X-World-Pack-Sha256": preview["archive_sha256"], "X-Story-Opening": opening,
+            }, content=source).raise_for_status().json()
+
+        late = import_opening("shelter-shift")
+        late_path = f"/api/v1/worlds/{late['world_id']}"
+        late_scene = client.get(f"{late_path}/view").raise_for_status().json()["state"]
+        assert str(relief) in late_scene["entities"] and str(liaison) not in late_scene["entities"]
+        assert "story_milestones" not in late_scene
+
+        world = import_opening("arrival")
+        world_id, branch = map(UUID, (world["world_id"], world["active_branch_id"]))
+        path = f"/api/v1/worlds/{world_id}"
+
+        def message(mode, words, branch_id=branch):
+            view = repository.read_world(scope, world_id, branch_id)
+            payload = {
+                "world_id": str(world_id), "branch_id": str(branch_id), "request_id": str(uuid4()),
+                "session_id": str(uuid4()), "actor_id": str(view.state.player_id),
+                "expected_state_version": str(view.branch.state_version), "mode": mode, "text": words,
+            }
+            return client.post(f"{path}/messages", headers={"Origin": origin}, json=payload).raise_for_status().json()
+
+        before = repository.read_world(scope, world_id, branch)
+        gm = message("ask_gm", "眼下有哪些人在接驳台可以交谈？")
+        assert gm["kind"] == "query" and gm["world_effect"] is False
+        assert all(str(liaison) not in context and "备件员段禾" not in context for _, context in model.calls)
+        blocked = message("roleplay", "我向段禾打招呼。")
+        assert blocked["kind"] == "clarification" and blocked["world_effect"] is False
+        assert all(role != "social_adjudication" for role, _ in model.calls)
+        assert repository.read_world(scope, world_id, branch).state_hash == before.state_hash
+
+        route, = client.get(f"{path}/view").raise_for_status().json()["state"]["travel_options"]
+        _run_http_job(client, repository, jobs, scope, world_id, branch, "long-actions", 60,
+                      activity="travel", route_id=route["route_id"])
+        arrived = repository.read_world(scope, world_id, branch)
+        fork_id = UUID(client.post(f"{path}/branches", headers={"Idempotency-Key": "no-first-contact"}, json={
+            "branch_id": str(branch), "sequence": str(arrived.last_seq), "label": "No contact",
+        }).raise_for_status().json()["branch_id"])
+        reply = message("roleplay", "段禾你好，我是外勤员，请和我核对本次备件领用。")
+        assert reply["kind"] == "dialogue" and reply["world_effect"] is True
+        assert reply["references"] == [str(liaison)]
+        social, = [context for role, context in model.calls if role == "social_adjudication"]
+        assert "谨慎核对" in social and str(relief) not in social
+        after = repository.read_world(scope, world_id, branch)
+        assert after.state.current_tick == 60
+        assert after.state.story_milestones[-1].outcome == "contact-made"
+        assert {record.holder_id for record in after.state.knowledge} >= {arrived.state.player_id, liaison}
+        assert repository.read_world(scope, world_id, fork_id).state_hash == arrived.state_hash
+        assert repository.replay(scope, world_id, branch, from_genesis=True).state_hash == after.state_hash
+
+        liaison_goal, = after.state.goals
+        queued = next(row for row in after.state.scheduled_events if row.handler_id == "npc.goal_review")
+        assert queued.due_tick == 300 and queued.payload["actor_id"] == str(liaison)
+        job = client.post(f"{path}/world-advance", headers={"Idempotency-Key": "npc-alone"}, json={
+            "branch_id": str(branch), "expected_state_version": str(after.branch.state_version), "duration_seconds": 310,
+        }).raise_for_status().json()
+        job_id = UUID(job["job_id"])
+        lease = repository.claim_job("arrival-planner")
+        assert lease and lease.job_id == job_id
+        for _ in range(20):
+            window = jobs.advance(scope, lease)
+            if window.decision_requests:
+                break
+        request, = window.decision_requests
+        assert request.actor_id == liaison and request.at_tick == 300
+        snapshot = repository.read_world(scope, world_id, branch)
+        landing, shelter = station_id("landing"), station_id("shelter")
+        route_back = snapshot.state.entities[shelter].components["place"]["routes"][0]["route_id"]
+        plan = NpcPlan(
+            plan_id=uuid5(request.request_id, f"npc.plan.v1:{liaison}:{request.state_version}"),
+            actor_id=liaison, goal_ids=[liaison_goal.id], revision=1, status="ready",
+            created_tick=300, updated_tick=300, next_review_tick=300, current_step=0,
+            steps=[NpcPlanStep(capability_id="world.action.move.v1",
+                               arguments={"destination_id": str(landing), "route_id": str(route_back)})],
+            reason="Return to the landing pad for the registered stock check.",
+        )
+        jobs.advance(scope, lease, model_decision=DecisionResponse(
+            request_id=request.request_id, state_version=request.state_version, at_tick=300, source="policy",
+            option_id="plan", npc_planning_status="ready", npc_plan=plan, npc_plan_state_hash=snapshot.state_hash,
+        ))
+        for _ in range(16):
+            window = jobs.advance(scope, lease)
+            if repository.read_job(scope, job_id).status == JobStatus.SUCCEEDED:
+                break
+            if window.decision_requests:
+                reflection, = window.decision_requests
+                assert reflection.kind == "npc.reflection"
+                repository.persist_npc_reflection_result(
+                    scope, lease, request_id=reflection.request_id, source_event_id=reflection.causal_subject_id,
+                    outcome="unavailable", outlook=None, model_call_id=None,
+                )
+        final = repository.read_world(scope, world_id, branch)
+        assert repository.read_job(scope, job_id).status == JobStatus.SUCCEEDED
+        assert final.state.entities[liaison].location_id == landing
+        assert final.state.entities[final.state.player_id].location_id == shelter
+        assert final.state.goals[0].status == "succeeded"
+        assert final.state.story_milestones[-1].outcome == "liaison-returned"
+        assert final.state.story_milestones[-1].resolved_tick == 360
+        assert repository.replay(scope, world_id, branch, from_genesis=True).state_hash == final.state_hash
+
+
+def test_stage_cannot_be_bypassed_when_entry_place_is_closed():
+    place, trigger, entrant = uuid4(), uuid4(), uuid4()
+    actor = WorldEntity(id=entrant, kind="character", name="Surveyor", location_id=place)
+    schedule = ScheduledEventRecord(
+        id=trigger, due_tick=0, phase="observation", handler_id=STORY_NODE_HANDLER, handler_version=STORY_NODE_VERSION,
+        payload=StoryNode.model_validate({
+            "title": "Survey handover", "visibility": "author_only",
+            "fallback": {"key": "handover", "effect": "occurred", "summary": "The scheduled handover came due."},
+        }).model_dump(mode="json"),
+    )
+    state = WorldState(
+        entities={place: WorldEntity(id=place, kind="place", status="closed")},
+        scheduled_events=[schedule], story_arrivals=[StoryArrival(trigger_id=trigger, actor=actor)],
+    )
+    with pytest.raises(ValueError, match="only becomes a world entity"):
+        WorldState.model_validate(state.model_dump(mode="python") | {"entities": state.entities | {entrant: actor}})
+    legitimate = settle_story_milestone(state, schedule, uuid4())
+    assert not legitimate.milestone.arrival_actor_ids
+    assert entrant not in apply_event(state, legitimate).entities
+    forged = legitimate.model_copy(update={
+        "milestone": legitimate.milestone.model_copy(update={"arrival_actor_ids": (entrant,)}),
+    })
+    with pytest.raises(InvalidEvent, match="world-state conditions"):
+        apply_event(state, forged)
+
+
+def test_staged_population_appears_in_measured_waves_and_can_enter_npc_context(tmp_path):
+    world_app = build_application(data_directory=tmp_path, run_simulation_worker=False).state.worlds
+    scope = local_identity(tmp_path)
+    repository = world_app.repository
+    jobs = SimulationJobs(repository)
+    player, hall = uuid4(), uuid4()
+    arrivals, schedules = [], []
+    for wave in range(3):
+        trigger = uuid4()
+        actors = [
+            WorldEntity(id=uuid4(), kind="character", name=f"Researcher {wave + 1}-{number + 1}", location_id=hall,
+                        components={"public_role": "visiting researcher"})
+            for number in range(40)
+        ]
+        arrivals.extend(StoryArrival(trigger_id=trigger, actor=actor) for actor in actors)
+        schedules.append(ScheduledEventRecord(
+            id=trigger, due_tick=(wave + 1) * 60, phase="observation", handler_id=STORY_NODE_HANDLER,
+            handler_version=STORY_NODE_VERSION, payload=StoryNode.model_validate({
+                "title": f"Research cohort {wave + 1}", "visibility": "public",
+                "fallback": {"key": "landed", "effect": "occurred", "summary": "The shuttle arrived."},
+            }).model_dump(mode="json"),
+        ))
+    draft = WorldState(
+        player_id=player, entities={
+            player: WorldEntity(id=player, kind="character", name="Coordinator", location_id=hall),
+            hall: WorldEntity(id=hall, kind="place", name="Research hall"),
+        },
+        story_arrivals=arrivals, scheduled_events=schedules,
+    )
+    source = write_world_pack(manifest=WorldPackManifest(pack_id="author.staged-ensemble", version="1.0.0", title="Research hall"),
+                              template={"scenario": draft.model_dump(mode="json")})
+    origin = "http://127.0.0.1:8000"
+    app = create_app(world_app, LocalSession(str(scope.user_id), str(scope.tenant_id), frozenset({origin})))
+    with TestClient(app, base_url=origin) as client:
+        client.get("/api/v1/session").raise_for_status()
+        upload = {"Origin": origin, "Content-Type": "application/zip"}
+        preview = client.post("/api/v1/packs/import/preview", headers=upload, content=source).raise_for_status().json()
+        imported = client.post("/api/v1/packs/import", headers=upload | {
+            "Idempotency-Key": "researchers", "X-World-Pack-Sha256": preview["archive_sha256"],
+        }, content=source).raise_for_status().json()
+        world, branch = map(UUID, (imported["world_id"], imported["active_branch_id"]))
+        path = f"/api/v1/worlds/{world}/view"
+        for expected in (0, 40, 80, 120):
+            if expected:
+                _run_http_job(client, repository, jobs, scope, world, branch, "world-advance", 60)
+            projection = client.get(path).raise_for_status().json()["state"]
+            researchers = {UUID(ident) for ident, entity in projection["entities"].items()
+                           if entity["components"].get("public_role") == "visiting researcher" and entity.get("status") == "active"}
+            assert researchers == {entry.actor.id for entry in arrivals[:expected]}
+            assert "story_arrivals" not in projection
+        view = repository.read_world(scope, world, branch)
+        assert [len(receipt.arrival_actor_ids) for receipt in view.state.story_milestones] == [40, 40, 40]
+        for researcher in researchers:
+            knowledge = build_agent_knowledge(view.state, researcher)
+            assert player in {record.id for record in knowledge.visible_entities}
+        assert repository.replay(scope, world, branch, from_genesis=True).state_hash == view.state_hash

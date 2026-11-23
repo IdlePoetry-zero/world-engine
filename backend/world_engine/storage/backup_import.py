@@ -67,6 +67,7 @@ from world_engine.domain.models import (
     normalize_datetime,
     utc_now,
 )
+from world_engine.domain.story_nodes import validate_story_arrival_world
 from world_engine.domain.reducers import (
     apply_event,
     ledger_postings,
@@ -590,6 +591,7 @@ class WorldBackupImporter:
                 source_command_type="backup.restored_event_batch",
                 source_command_payload=_restored_command_payload(backup.archive_sha256, first, len(batch)),
             )
+            validate_story_arrival_world(typed_batch, first.world_id)
             validated_batch = validate_persisted_death_vacancies(
                 state, typed_batch, world_id=first.world_id, branch_id=branch.branch_id,
                 command_id=first.command_id, actor_id=first.actor_id, ruleset_version=first.ruleset_version,
@@ -1712,6 +1714,7 @@ def _preflight(
                         backup.archive_sha256, first, len(event_batch.events),
                     ),
                 )
+                validate_story_arrival_world(typed_batch, first.world_id)
                 validated_batch = validate_persisted_death_vacancies(
                     state, typed_batch, world_id=event_batch.events[0].world_id, branch_id=branch.branch_id,
                     command_id=event_batch.events[0].command_id, actor_id=event_batch.events[0].actor_id, ruleset_version=event_batch.events[0].ruleset_version,

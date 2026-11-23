@@ -41,7 +41,7 @@ from world_engine.domain.occupation_legacy_vacancies import (
 from world_engine.domain.npc_attendance_events import NPC_ATTENDANCE_EVENTS, NpcAttendanceStartedEvent
 from world_engine.domain.npc_plan_review_events import NpcPlanReviewScheduledEvent, validate_authored_npc_review_scope
 from world_engine.domain.story_nodes import (
-    StoryMilestoneResolvedEvent, ready_story_reaction, settle_story_reaction, story_reaction_event_id,
+    StoryMilestoneResolvedEvent, ready_story_reaction, settle_story_reaction, story_reaction_event_id, validate_story_arrival_world,
 )
 from world_engine.domain.challenges import CHALLENGE_COMMAND, ChallengeResolvedEvent
 from world_engine.domain.contests import CONTEST_COMMAND, ContestChangedEvent
@@ -2086,6 +2086,7 @@ class WorldRepository:
             lease is None or command.command_type != "simulation.window"
         ):
             raise AccessDenied("A supplied story milestone requires its simulation worker lease.")
+        validate_story_arrival_world(typed_events, world_id)
         event_ids = [event.event_id for event in typed_events]
         if len(set(event_ids)) != len(event_ids):
             raise InvalidEvent("Event IDs must be unique within a command.")
@@ -2834,7 +2835,9 @@ class WorldRepository:
                             reaction_event_id = story_reaction_event_id(command.command_id, reaction.reaction_id)
                             if len(committed_events) == MAX_EVENTS_PER_COMMAND or reaction_event_id in event_ids:
                                 raise InvalidEvent("Derived story reaction exceeds the batch limit or repeats an event ID.")
-                            committed_events.append(settle_story_reaction(next_state, reaction, reaction_event_id))
+                            committed_events.append(settle_story_reaction(
+                                next_state, reaction, reaction_event_id, world_id=world_id,
+                            ))
                             event_ids.append(reaction_event_id)
                     event_tick = (
                         itinerary_transit_projection_receipt.event_ticks[index]
@@ -5710,6 +5713,7 @@ class WorldRepository:
                     "visibility": row.visibility_json,
                     **read_event_payload(row, prefetched_sidecar=sidecar),
                 }) for row, sidecar in prefetched_batch]
+                validate_story_arrival_world(stored_events, world_id)
                 events = validate_persisted_death_vacancies(
                     state, stored_events, world_id=world_id, branch_id=branch.branch_id,
                     command_id=batch[0].command_id, actor_id=batch[0].actor_id,

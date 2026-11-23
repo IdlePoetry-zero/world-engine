@@ -7,12 +7,12 @@ from world_engine.application.world_packs import WorldPackManifest, write_world_
 from world_engine.domain.challenges import ChallengeDefinition
 from world_engine.domain.contests import ContestDefinition
 from world_engine.domain.components import PlaceComponent, PlaceRoute, ScheduledEventRecord
-from world_engine.domain.models import ResourceAccount, WorldEntity, WorldState
+from world_engine.domain.models import ResourceAccount, StoryArrival, WorldEntity, WorldState
 from world_engine.domain.story_nodes import STORY_NODE_HANDLER, STORY_NODE_VERSION, StoryFollowup, StoryNode, StoryReaction
 
 
 PACK_ID = "author.distant-station"
-PACK_VERSION = "1.2.0"
+PACK_VERSION = "1.3.0"
 PACK_TITLE = "远岬站·脉冲将至"
 _NAMESPACE = UUID("58995de2-b5a0-45cd-ab6e-b4e52aa46922")
 _RESOURCE = "station.power_cells"
@@ -27,6 +27,39 @@ def _opening(*, tick: int, at_shelter: bool) -> WorldState:
     stock, reserve = _id("main-stock"), _id("shelter-reserve")
     supply_reaction, report_reaction = _id("shelter-supply"), _id("supply-report")
     pulse = _id("stellar-pulse")
+    relief_post = _id("relief-staff-arrival")
+    relief = WorldEntity(id=_id("actor:roving-technician"), name="检修员乔以宁", kind="character", location_id=shelter,
+                         components={"public_role": "负责巡检应急线路的轮班检修员"})
+    liaison = WorldEntity(id=_id("actor:reserve-liaison"), name="备件员段禾", kind="character", location_id=shelter,
+                          components={"public_role": "随验收入场的备件员",
+                                      "personality": {"traits": ["谨慎核对"], "locked_fields": ["traits"]},
+                                      "capabilities": {"grants": ["world.travel"]},
+                                      "known_places": [str(shelter), str(landing)]})
+    relief_bond = {
+        "id": _id("bond:relief-and-liaison"), "from_id": relief.id, "to_id": liaison.id,
+        "dimensions": {"core.trust": "14"}, "label": "同班检修与备件交接",
+    }
+    arrivals = [StoryArrival.model_validate({
+        "trigger_id": supply_reaction, "outcome": "supplied", "actor": liaison,
+        "relations": [relief_bond],
+        "goals": [{"id": _id("goal:liaison-recheck"), "owner_id": liaison.id,
+                   "title": "回接驳台复核备件余量", "description": "轮班稳定后回接驳台核对备件是否齐放。",
+                   "auto_complete": True, "conditions": [
+                       {"kind": "reach_location", "subject_id": liaison.id, "target_id": landing},
+                   ]}],
+        "review_delay_ticks": 240,
+    })]
+    schedules = []
+    historical_staff = {relief.id: relief} if tick >= 90 else {}
+    if not historical_staff:
+        arrivals.append(StoryArrival(trigger_id=relief_post, actor=relief))
+        schedules.append(ScheduledEventRecord(
+            id=relief_post, due_tick=90, phase="observation", handler_id=STORY_NODE_HANDLER,
+            handler_version=STORY_NODE_VERSION, payload=StoryNode.model_validate({
+                "title": "避护区轮班交接", "visibility": "public", "participant_ids": [relief.id, operator],
+                "fallback": {"key": "shift-ready", "effect": "occurred", "summary": "轮班检修人员抵达避护区。"},
+            }).model_dump(mode="json"),
+        ))
 
     def site(ident, name, destination):
         route = PlaceRoute(route_id=_id(f"route:{ident}"), from_place_id=ident, to_place_id=destination, travel_ticks=60)
@@ -42,6 +75,7 @@ def _opening(*, tick: int, at_shelter: bool) -> WorldState:
     return WorldState(
         player_id=player, current_tick=tick,
         entities={
+            **historical_staff,
             landing: site(landing, "接驳台", shelter), shelter: site(shelter, "地下避护区", landing),
             operator: WorldEntity(id=operator, name="值守员伊莘", kind="character", location_id=shelter,
                                   components={"public_role": "避护区值守员", "skills": {
@@ -56,6 +90,7 @@ def _opening(*, tick: int, at_shelter: bool) -> WorldState:
             stock: ResourceAccount(owner_id=landing, resource_id=_RESOURCE, balance=Decimal("3")),
             reserve: ResourceAccount(owner_id=shelter, resource_id=_RESOURCE, balance=Decimal("0")),
         },
+        story_arrivals=arrivals,
         challenges=[ChallengeDefinition(challenge_id=instrumentation, venue_id=shelter, title="仪表读数校核",
             description="现场复核电表读数并登记资格。", skill_id="station.instrumentation", skill_label="仪器操作",
             pass_level="16", required_capability="station.reserve.accept")],
@@ -82,6 +117,21 @@ def _opening(*, tick: int, at_shelter: bool) -> WorldState:
             "when": [supply_confirmed, power_received],
             "node": {"title": "避护准备报告", "visibility": "public", "participant_ids": [operator],
                      "fallback": {"key": "ready", "effect": "occurred", "summary": "值守员确认应急电源已入账。"}},
+        }), StoryReaction.model_validate({
+            "reaction_id": _id("liaison-contact"),
+            "when": [{"kind": "world_condition", "owner_id": player, "condition": {
+                "kind": "relationship_dimension_minimum", "subject_id": player,
+                "target_id": liaison.id, "dimension": "familiarity", "threshold": "1",
+            }}],
+            "node": {"title": "领用交接沟通", "visibility": "public", "participant_ids": [player, liaison.id],
+                     "fallback": {"key": "contact-made", "effect": "occurred", "summary": "外勤与到岗的备件员建立了第一次工作联系。"}},
+        }), StoryReaction.model_validate({
+            "reaction_id": _id("liaison-return-to-landing"),
+            "when": [{"kind": "world_condition", "owner_id": liaison.id, "condition": {
+                "kind": "reach_location", "subject_id": liaison.id, "target_id": landing,
+            }}],
+            "node": {"title": "备件巡回复查", "visibility": "public", "participant_ids": [liaison.id],
+                     "fallback": {"key": "liaison-returned", "effect": "occurred", "summary": "备件员已返回接驳台，复查开始。"}},
         })],
         story_followups=[StoryFollowup.model_validate({
             "followup_id": _id("check-reserve"), "after_id": report_reaction, "after_outcome": "ready", "delay_ticks": 30,
@@ -90,7 +140,7 @@ def _opening(*, tick: int, at_shelter: bool) -> WorldState:
                          "key": "reserve-tested", "effect": "mitigated", "summary": "验收三十秒后的检查确认电池仍在避护区。",
                      }}], "fallback": {"key": "reserve-missing", "effect": "inapplicable", "summary": "复查时未找到足够的电池。"}},
         })],
-        scheduled_events=[ScheduledEventRecord(
+        scheduled_events=[*schedules, ScheduledEventRecord(
             id=pulse, due_tick=180, phase="observation", handler_id=STORY_NODE_HANDLER,
             handler_version=STORY_NODE_VERSION, payload=StoryNode.model_validate({
                 "title": "恒星脉冲抵达", "visibility": "public",
@@ -111,7 +161,7 @@ def build_archive() -> bytes:
             {"opening_id": "arrival", "title": "抵达接驳台", "position": "脉冲抵达前三分钟。",
              "known_history": ["远岬站的仪器已发出预警。"], "scenario": _opening(tick=0, at_shelter=False).model_dump(mode="json")},
             {"opening_id": "shelter-shift", "title": "进入避护区值班", "position": "脉冲抵达前一分钟。",
-             "known_history": ["预警已传达，备用电池仍在接驳台待验收。"],
+             "known_history": ["预警已传达，检修员乔以宁已经到岗，备用电池仍在接驳台待验收。"],
              "scenario": _opening(tick=120, at_shelter=True).model_dump(mode="json")},
         ]},
     )

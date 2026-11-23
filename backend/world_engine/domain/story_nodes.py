@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from decimal import Decimal, localcontext
 from graphlib import CycleError, TopologicalSorter
 from typing import TYPE_CHECKING, Annotated, Literal
@@ -18,7 +19,7 @@ from .promise_trust_state import PromiseTrustProjection
 from .world_books import WorldBookCitation
 
 if TYPE_CHECKING:
-    from .models import WorldState
+    from .models import StoryArrival, WorldState
 
 STORY_NODE_HANDLER = "story.milestone"
 STORY_NODE_VERSION = "1.0.0"
@@ -178,12 +179,14 @@ class StoryMilestone(_StoryModel):
     schedule_id: UUID
     resolved_tick: Tick
     outcome: _Key
+    arrival_actor_ids: tuple[UUID, ...] = Field(default=(), max_length=256, exclude_if=lambda ids: not ids)
 
 
 class StoryMilestoneResolvedEvent(_StoryModel):
     type: Literal[STORY_NODE_RESOLVED] = STORY_NODE_RESOLVED
     event_id: UUID = Field(default_factory=uuid4)
     milestone: StoryMilestone
+    arrival_world_id: UUID | None = Field(default=None, exclude_if=lambda ident: ident is None)
     transfer: StoryTransfer | None = Field(default=None, exclude_if=lambda value: value is None)
     visibility: JsonObject = Field(default_factory=lambda: {"policy": "author_only"})
 
@@ -265,21 +268,36 @@ def story_outcome(state: WorldState, node: StoryNode) -> StoryOutcome:
                  and transfer_is_affordable(state, variant.outcome.transfer)), node.fallback)
 
 
-def _resolved_story_event(state: WorldState, ident: UUID, node: StoryNode, event_id: UUID) -> StoryMilestoneResolvedEvent:
+def _arrival_matches(arrival: StoryArrival, ident: UUID, outcome: str) -> bool:
+    return arrival.trigger_id == ident and (arrival.outcome is None or arrival.outcome == outcome)
+
+
+def _resolved_story_event(
+    state: WorldState, ident: UUID, node: StoryNode, event_id: UUID, *, world_id: UUID | None,
+) -> StoryMilestoneResolvedEvent:
     outcome = story_outcome(state, node)
+    arrivals = [
+        arrival for arrival in state.story_arrivals
+        if _arrival_matches(arrival, ident, outcome.key)
+        and state.entities[arrival.actor.location_id].status == "active"
+    ]
+    requires_review = any(arrival.review_delay_ticks is not None for arrival in arrivals)
+    if requires_review and world_id is None:
+        raise InvalidEvent("A story arrival with an NPC review must identify its world.")
     return StoryMilestoneResolvedEvent(
-        event_id=event_id, transfer=outcome.transfer,
-        milestone=StoryMilestone(schedule_id=ident, resolved_tick=state.current_tick, outcome=outcome.key),
+        event_id=event_id, transfer=outcome.transfer, arrival_world_id=world_id if requires_review else None,
+        milestone=StoryMilestone(schedule_id=ident, resolved_tick=state.current_tick, outcome=outcome.key,
+                                 arrival_actor_ids=tuple(arrival.actor.id for arrival in arrivals)),
     )
 
 
 def settle_story_milestone(
-    state: WorldState, schedule: ScheduledEventRecord, event_id: UUID,
+    state: WorldState, schedule: ScheduledEventRecord, event_id: UUID, *, world_id: UUID | None = None,
 ) -> StoryMilestoneResolvedEvent:
     if (schedule.handler_id != STORY_NODE_HANDLER or schedule.status != "queued"
             or schedule.due_tick != state.current_tick):
         raise InvalidEvent("A story milestone must resolve when its registered schedule is due.")
-    return _resolved_story_event(state, schedule.id, read_story_node(schedule), event_id)
+    return _resolved_story_event(state, schedule.id, read_story_node(schedule), event_id, world_id=world_id)
 
 
 def ready_story_reaction(state: WorldState) -> StoryReaction | None:
@@ -293,8 +311,16 @@ def story_reaction_event_id(command_id: UUID, reaction_id: UUID) -> UUID:
     return uuid5(command_id, f"story.reaction:{reaction_id}")
 
 
-def settle_story_reaction(state: WorldState, reaction: StoryReaction, event_id: UUID) -> StoryMilestoneResolvedEvent:
-    return _resolved_story_event(state, reaction.reaction_id, reaction.node, event_id)
+def settle_story_reaction(
+    state: WorldState, reaction: StoryReaction, event_id: UUID, *, world_id: UUID | None = None,
+) -> StoryMilestoneResolvedEvent:
+    return _resolved_story_event(state, reaction.reaction_id, reaction.node, event_id, world_id=world_id)
+
+
+def validate_story_arrival_world(events: Iterable[object], world_id: UUID) -> None:
+    if any(isinstance(event, StoryMilestoneResolvedEvent)
+           and event.arrival_world_id is not None and event.arrival_world_id != world_id for event in events):
+        raise InvalidEvent("An arrival review must belong to the story event's world.")
 
 
 def story_followup_schedules(state: WorldState, milestone: StoryMilestone) -> list[ScheduledEventRecord]:
@@ -304,7 +330,8 @@ def story_followup_schedules(state: WorldState, milestone: StoryMilestone) -> li
 
 def validate_story_state(state: WorldState) -> None:
     schedules = {schedule.id: schedule for schedule in state.scheduled_events if schedule.handler_id == STORY_NODE_HANDLER}
-    if not schedules and not state.story_milestones and not state.story_reactions and not state.story_followups:
+    if (not schedules and not state.story_milestones and not state.story_reactions
+            and not state.story_followups and not state.story_arrivals):
         return
     reactions = {reaction.reaction_id: reaction for reaction in state.story_reactions}
     followups = {followup.followup_id: followup for followup in state.story_followups}
@@ -327,6 +354,56 @@ def validate_story_state(state: WorldState) -> None:
         if ((key in schedules and record.resolved_tick != schedules[key].due_tick) or record.resolved_tick > state.current_tick
                 or record.outcome not in allowed_outcomes[key]):
             raise ValueError("A story milestone receipt conflicts with its schedule.")
+    arrivals = {arrival.actor.id: arrival for arrival in state.story_arrivals}
+    if len(arrivals) != len(state.story_arrivals):
+        raise ValueError("A character must have a single story arrival.")
+    known_entities = {ident: arrival.actor for ident, arrival in arrivals.items()} | state.entities
+    for ident, arrival in arrivals.items():
+        if (arrival.trigger_id not in nodes or arrival.outcome is not None
+                and arrival.outcome not in allowed_outcomes[arrival.trigger_id]):
+            raise ValueError("An arrival must reference a registered story node and outcome.")
+        place = state.entities.get(arrival.actor.location_id)
+        if place is None or place.kind not in {"place", "location"}:
+            raise ValueError("A story entry place must already be registered.")
+        receipt = records.get(arrival.trigger_id)
+        admitted = receipt is not None and ident in receipt.arrival_actor_ids
+        if admitted != (ident in state.entities) or ident == state.player_id:
+            raise ValueError("A staged role only becomes a world entity through its own arrival receipt.")
+    for record in records.values():
+        if len(set(record.arrival_actor_ids)) != len(record.arrival_actor_ids) or any(
+            ident not in arrivals or not _arrival_matches(arrivals[ident], record.schedule_id, record.outcome)
+            for ident in record.arrival_actor_ids
+        ):
+            raise ValueError("An arrival receipt must match the registered story node and outcome.")
+    relation_ids = set()
+    goal_ids = set()
+    current_relations = {relation.id: relation for relation in state.relations} if arrivals else {}
+    current_goals = {goal.id: goal for goal in state.goals} if arrivals else {}
+    regular_entities = state.entities.keys() - arrivals.keys() if arrivals else set()
+    unborn_ids = {str(ident) for ident in arrivals if ident not in state.entities}
+    if unborn_ids and any(schedule.handler_id == "npc.goal_review" and str(schedule.payload.get("actor_id")) in unborn_ids
+                          for schedule in state.scheduled_events):
+        raise ValueError("A staged character's NPC review is registered only on arrival.")
+    for arrival in state.story_arrivals:
+        for relation in arrival.relations:
+            current = current_relations.get(relation.id)
+            if (relation.id in relation_ids or relation.from_id not in known_entities or relation.to_id not in known_entities
+                    or current is not None and (current.from_id, current.to_id) != (relation.from_id, relation.to_id)):
+                raise ValueError("An arrival relationship requires a distinct ID and two registered roles or entities.")
+            relation_ids.add(relation.id)
+        if not arrival.goals:
+            continue
+        goal_scope = regular_entities | {arrival.actor.id}
+        goal_scope.update(goal.id for goal in arrival.goals)
+        goal_scope.update(goal.id for goal in state.goals if goal.owner_id == arrival.actor.id)
+        for goal in arrival.goals:
+            current_goal = current_goals.get(goal.id)
+            if goal.id in goal_ids or (current_goal is not None and current_goal.owner_id != arrival.actor.id):
+                raise ValueError("An arrival goal ID must be reserved for its actor.")
+            if any(reference is not None and reference not in goal_scope for condition in goal.conditions
+                   for reference in (condition.subject_id, condition.target_id)):
+                raise ValueError("An arrival goal must reference an existing entity, its actor, or another goal for that actor.")
+            goal_ids.add(goal.id)
     dependencies = TopologicalSorter()
     challenge_ids = {challenge.challenge_id for challenge in state.challenges}
     contest_ids = {contest.definition_id for contest in state.contest_definitions}
@@ -345,7 +422,7 @@ def validate_story_state(state: WorldState) -> None:
             raise ValueError("A story follow-up schedule must match the committed parent milestone and delay.")
     for key, node in nodes.items():
         if len(set(node.participant_ids)) != len(node.participant_ids) or any(
-            entity not in state.entities for entity in node.participant_ids
+            entity not in known_entities for entity in node.participant_ids
         ):
             raise ValueError("Story participants must reference distinct existing entities.")
         gates = [gate for variant in node.variants for gate in variant.when]
@@ -359,7 +436,7 @@ def validate_story_state(state: WorldState) -> None:
             if isinstance(gate, StoryPromiseTrustGate):
                 endpoints = (gate.observer_id, gate.counterpart_id)
                 if endpoints[0] == endpoints[1] or any(
-                    endpoint not in state.entities or state.entities[endpoint].kind not in {"character", "person"}
+                    endpoint not in known_entities or known_entities[endpoint].kind not in {"character", "person"}
                     for endpoint in endpoints
                 ):
                     raise ValueError("Promise trust story gates require two different characters.")

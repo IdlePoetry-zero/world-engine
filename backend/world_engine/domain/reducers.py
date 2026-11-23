@@ -17,7 +17,7 @@ from .errors import InsufficientResources, InvalidEvent
 from .challenges import ChallengeResolvedEvent, challenge_note, settle_challenge
 from .contests import ContestChangedEvent, plan_contest
 from .story_nodes import (
-    STORY_NODE_HANDLER, StoryMilestone, StoryMilestoneResolvedEvent, ready_story_reaction,
+    STORY_NODE_HANDLER, StoryMilestoneResolvedEvent, ready_story_reaction,
     settle_story_milestone, settle_story_reaction, story_followup_schedules,
 )
 from .npc_plan_events import NpcPlanCreatedEvent, NpcPlanRevisedEvent
@@ -1381,24 +1381,21 @@ def apply_event(state: WorldState, raw_event: DomainEvent | dict[str, object]) -
         ident = event.milestone.schedule_id
         schedule = next((item for item in state.scheduled_events if item.id == ident), None)
         if schedule is not None:
-            expected = settle_story_milestone(state, schedule, event.event_id)
+            expected = settle_story_milestone(state, schedule, event.event_id, world_id=event.arrival_world_id)
         else:
             reaction = ready_story_reaction(state)
-            expected = (settle_story_reaction(state, reaction, event.event_id)
+            expected = (settle_story_reaction(state, reaction, event.event_id, world_id=event.arrival_world_id)
                         if reaction is not None and reaction.reaction_id == ident else None)
         if expected != event:
             raise InvalidEvent("The story outcome does not match the registered world-state conditions.")
         if event.transfer is not None:
             state = apply_event(state, ResourceTransferredEvent(event_id=event.event_id, **event.transfer.model_dump()))
         if schedule is None:
-            return _validated_state(state, {
-                "story_milestones": [*state.story_milestones, event.milestone],
-                "scheduled_events": [*state.scheduled_events, *story_followup_schedules(state, event.milestone)],
-            })
+            return _validated_state(state, _story_resolution_updates(state, event, state.scheduled_events))
         completion = ScheduledEventCompletedEvent(
             event_id=event.event_id, scheduled_event_id=schedule.id, expected_revision=schedule.revision,
         )
-        return _apply_scheduled_event_completion(state, completion, story_milestone=event.milestone)
+        return _apply_scheduled_event_completion(state, completion, story_event=event)
 
     if isinstance(event, EnvironmentalSourceAccountOpenedEvent):
         return apply_environmental_source_account_opened(state, event)
@@ -3160,9 +3157,55 @@ def _apply_renewable_resource_harvest(
     return _validated_state(state, {"entities": entities, "resources": resources})
 
 
+def _story_resolution_updates(
+    state: WorldState, event: StoryMilestoneResolvedEvent, scheduled_events: list[ScheduledEventRecord],
+) -> dict[str, object]:
+    milestone = event.milestone
+    schedules = [*scheduled_events, *story_followup_schedules(state, milestone)]
+    updates: dict[str, object] = {
+        "story_milestones": [*state.story_milestones, milestone], "scheduled_events": schedules,
+    }
+    if not milestone.arrival_actor_ids:
+        return updates
+    new_ids = set(milestone.arrival_actor_ids)
+    arrivals = [arrival for arrival in state.story_arrivals if arrival.actor.id in new_ids]
+    entities = state.entities | {arrival.actor.id: arrival.actor for arrival in arrivals}
+    relation_ids = {relation.id for relation in state.relations}
+    seeded_relations = [
+        relation.model_copy(update={"updated_tick": state.current_tick, "evidence_refs": [event.event_id]})
+        for arrival in state.story_arrivals
+        if arrival.actor.id in entities
+        for relation in arrival.relations
+        if relation.id not in relation_ids and relation.from_id in entities and relation.to_id in entities
+        and (relation.from_id in new_ids or relation.to_id in new_ids)
+    ]
+    goals = [
+        goal.model_copy(update={
+            "created_tick": state.current_tick, "updated_tick": state.current_tick,
+            "status": "abandoned" if goal.deadline is not None and goal.deadline < state.current_tick else "active",
+        })
+        for arrival in arrivals for goal in arrival.goals
+    ]
+    updates.update(entities=entities, relations=[*state.relations, *seeded_relations], goals=[*state.goals, *goals])
+    if event.arrival_world_id is not None:
+        from .npc_plan_review import build_npc_plan_review_schedule
+
+        staged = state.model_copy(update=updates)
+        for arrival in arrivals:
+            if arrival.review_delay_ticks is None:
+                continue
+            due_tick = state.current_tick + arrival.review_delay_ticks
+            if due_tick <= 2**63 - 1 and any(
+                goal.owner_id == arrival.actor.id and goal.status == "active"
+                and (goal.deadline is None or goal.deadline >= due_tick) for goal in goals
+            ):
+                schedules.append(build_npc_plan_review_schedule(staged, event.arrival_world_id, arrival.actor.id, due_tick))
+    return updates
+
+
 def _apply_scheduled_event_completion(
     state: WorldState, event: ScheduledEventCompletedEvent, *, npc_review_validated=False,
-    story_milestone: StoryMilestone | None = None,
+    story_event: StoryMilestoneResolvedEvent | None = None,
 ) -> WorldState:
     scheduled_events = list(state.scheduled_events)
     index = next((i for i, item in enumerate(scheduled_events) if item.id == event.scheduled_event_id), None)
@@ -3173,7 +3216,7 @@ def _apply_scheduled_event_completion(
         raise InvalidEvent("NPC plan reviews require their typed, validated review result.")
     if scheduled.handler_id == PRICE_REVIEW_HANDLER_ID:
         raise InvalidEvent("Market price reviews require the typed atomic review event.")
-    if scheduled.handler_id == STORY_NODE_HANDLER and story_milestone is None:
+    if scheduled.handler_id == STORY_NODE_HANDLER and story_event is None:
         raise InvalidEvent("Story milestones require their typed, validated outcome receipt.")
     if scheduled.revision != event.expected_revision:
         raise InvalidEvent("Scheduled completion expected_revision does not match stored state.")
@@ -3231,9 +3274,8 @@ def _apply_scheduled_event_completion(
         return state.model_copy(update={"scheduled_events": scheduled_events})
 
     scheduled_events[index] = replacement
-    if story_milestone is not None:
-        return _validated_state(state, {"scheduled_events": [*scheduled_events, *story_followup_schedules(state, story_milestone)],
-                                        "story_milestones": [*state.story_milestones, story_milestone]})
+    if story_event is not None:
+        return _validated_state(state, _story_resolution_updates(state, story_event, scheduled_events))
     return _validated_state(state, {"scheduled_events": scheduled_events})
 
 

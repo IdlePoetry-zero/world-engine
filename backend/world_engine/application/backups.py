@@ -60,6 +60,7 @@ from world_engine.domain.models import (
     WorldView,
     ContractModel,
 )
+from world_engine.domain.story_nodes import validate_story_arrival_world
 from world_engine.domain.reducers import apply_event, state_hash, state_json
 from world_engine.storage.npc_plan_replay import validate_archived_promise_batch
 
@@ -1577,6 +1578,7 @@ class BackupApplication:
                                 for item in pending
                             ]
                             try:
+                                validate_story_arrival_world(typed_batch, first.world_id)
                                 validated_batch = validate_persisted_death_vacancies(
                                     state, typed_batch, world_id=first.world_id, branch_id=row.branch_id,
                                     command_id=first.command_id, actor_id=first.actor_id, ruleset_version=first.ruleset_version,
@@ -2522,6 +2524,7 @@ def _validate_and_replay(
                     "type": event.type, "event_id": str(event.event_id), "visibility": event.visibility,
                     **event.payload,
                 }) for event in batch]
+                validate_story_arrival_world(typed_batch, batch[0].world_id)
                 validated_batch = validate_persisted_death_vacancies(
                     state, typed_batch, world_id=batch[0].world_id, branch_id=branch.branch_id,
                     command_id=batch[0].command_id, actor_id=batch[0].actor_id, ruleset_version=batch[0].ruleset_version,

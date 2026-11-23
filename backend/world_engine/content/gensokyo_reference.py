@@ -6,7 +6,7 @@ from world_engine.application.world_packs import WorldPackManifest, write_world_
 from world_engine.domain.challenges import ChallengeDefinition
 from world_engine.domain.contests import ContestDefinition
 from world_engine.domain.components import PlaceComponent, PlaceRoute, ScheduledEventRecord
-from world_engine.domain.models import ResourceAccount, WorldEntity, WorldState
+from world_engine.domain.models import ResourceAccount, StoryArrival, WorldEntity, WorldState
 from world_engine.domain.story_nodes import STORY_NODE_HANDLER, STORY_NODE_VERSION, StoryNode, StoryReaction
 from world_engine.domain.world_books import WorldBookCitation, WorldBookEntry, WorldBookProvenance
 
@@ -15,7 +15,7 @@ from .gensokyo_original_profiles import GEOGRAPHY, PROFILES, source_id, source_r
 
 PACK_ID = "author.gensokyo-reference"
 PACK_TITLE = "幻想乡原作资料与异变年代"
-PACK_VERSION = "0.5.0"
+PACK_VERSION = "0.6.0"
 _NAMESPACE = UUID("0d0063f6-45d8-4aaa-9873-135f3d9b5a5f")
 
 _WORKS = {
@@ -306,11 +306,19 @@ def _scenario(*, incident: str, description: str, document_limit: int, known_inc
             "fallback": {"key": "tentative", "effect": "occurred", "summary": "布告只公布初步情况，注明有待复核。"},
         })),
     ]
+    arrivals = []
     if incident == "mountain-shrine":
         mountain = _id("place:youkai-mountain")
         keeper = _id("actor:mountain-keeper")
-        places[keeper] = WorldEntity(id=keeper, name="山径水尺员蒲一径", kind="character", location_id=mountain,
-            components={"public_role": "给山路来客登记溪水水位的值事"})
+        entry = _id("mountain-shrine:keeper-arrival")
+        arrivals.append(StoryArrival(trigger_id=entry, actor=WorldEntity(
+            id=keeper, name="山径水尺员蒲一径", kind="character", location_id=mountain,
+            components={"public_role": "给山路来客登记溪水水位的值事"},
+        )))
+        node_definitions.append((entry, 900, StoryNode.model_validate({
+            "title": "水尺值事到岗", "visibility": "public", "participant_ids": [keeper],
+            "fallback": {"key": "entered", "effect": "occurred", "summary": "值水尺的蒲一径到了山路登记处。"},
+        })))
         node_definitions.append((_id("mountain-shrine:pass-notice"), 1020, StoryNode.model_validate({
             "title": "山路水位簿合页", "visibility": "public", "participant_ids": [keeper],
             "variants": [{"when": [{"kind": "world_condition", "owner_id": player,
@@ -319,7 +327,7 @@ def _scenario(*, incident: str, description: str, document_limit: int, known_inc
             "fallback": {"key": "unwitnessed", "effect": "occurred", "summary": "蒲一径先按值班记录封册，见证栏留空。"},
         })))
     return WorldState(
-        player_id=player, entities=places, world_book_entries=entries,
+        player_id=player, entities=places, world_book_entries=entries, story_arrivals=arrivals,
         resources={learner_stock: ResourceAccount(resource_id=materials, owner_id=player, balance=4),
                    station_stock: ResourceAccount(resource_id=materials, owner_id=station, balance=0)},
         challenges=[ChallengeDefinition.model_validate({

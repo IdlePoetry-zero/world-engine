@@ -253,6 +253,37 @@ class WorldEntity(ContractModel):
         return validate_components(entity_kind, value)  # type: ignore[return-value]
 
 
+class StoryArrival(ContractModel):
+    """Author-only role data kept outside the world entity registry until admission."""
+
+    trigger_id: UUID
+    outcome: Annotated[str, Field(pattern=r"^[a-z][a-z0-9_.-]{0,79}$")] | None = None
+    actor: WorldEntity
+    relations: tuple[RelationRecord, ...] = Field(default=(), max_length=24)
+    goals: tuple[GoalRecord, ...] = Field(default=(), max_length=8)
+    review_delay_ticks: Annotated[int, Field(strict=True, gt=0, le=2**63 - 1)] | None = None
+
+    @model_validator(mode="after")
+    def validate_arrival_profile(self) -> StoryArrival:
+        actor = self.actor
+        if (actor.kind not in {"character", "person"} or actor.status != "active"
+                or not actor.name or actor.location_id is None):
+            raise ValueError("A story arrival must define an active named character and an entry place.")
+        if actor.components.get("life", {}).get("population_origin") is not None:
+            raise ValueError("A story arrival cannot create population cohort provenance.")
+        if actor.components.get("health", {}).get("incapacitating_injury_id") is not None:
+            raise ValueError("A story arrival cannot seed an unrecorded combat injury.")
+        for relation in self.relations:
+            if actor.id not in {relation.from_id, relation.to_id} or relation.evidence_refs or relation.obligations:
+                raise ValueError("Arrival relationships must involve the arriving actor and may only seed dimensions.")
+        if self.review_delay_ticks is not None and not self.goals:
+            raise ValueError("An arrival review requires authored actor goals.")
+        if any(goal.owner_id != actor.id or goal.status != "active" or goal.evidence_refs or goal.progress
+               for goal in self.goals):
+            raise ValueError("An arrival goal must be new, active, and owned by the arriving actor.")
+        return self
+
+
 class WorldState(ContractModel):
     """A typed state envelope retaining the v1 world projection shape."""
 
@@ -266,6 +297,7 @@ class WorldState(ContractModel):
     story_reactions: list[StoryReaction] = Field(default_factory=list, max_length=128, exclude_if=lambda records: not records)
     story_followups: list[StoryFollowup] = Field(default_factory=list, max_length=128, exclude_if=lambda records: not records)
     story_milestones: list[StoryMilestone] = Field(default_factory=list, exclude_if=lambda records: not records)
+    story_arrivals: list[StoryArrival] = Field(default_factory=list, max_length=256, exclude_if=lambda records: not records)
     challenges: list[ChallengeDefinition] = Field(default_factory=list, max_length=256, exclude_if=lambda records: not records)
     challenge_attempts: list[ChallengeAttempt] = Field(default_factory=list, exclude_if=lambda records: not records)
     contest_definitions: list[ContestDefinition] = Field(default_factory=list, max_length=128, exclude_if=lambda records: not records)

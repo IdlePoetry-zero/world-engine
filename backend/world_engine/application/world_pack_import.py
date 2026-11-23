@@ -57,8 +57,21 @@ def _scenario_rule_errors(scenario: dict) -> tuple[AuthorFieldError, ...]:
         if not isinstance(entity, dict) or not isinstance(entity.get("kind"), str):
             continue
         index[entity_id] = entity
+    entities_to_check = [(entity_id, entity, f"scenario.entities.{entity_id}") for entity_id, entity in index.items()]
+    arrivals = scenario.get("story_arrivals", [])
+    if isinstance(arrivals, list):
+        for position, entry in enumerate(arrivals):
+            actor = entry.get("actor") if isinstance(entry, dict) else None
+            if not isinstance(actor, dict) or not isinstance(actor.get("kind"), str):
+                continue
+            try:
+                entity_id = UUID(actor.get("id", ""))
+            except (ValueError, TypeError, AttributeError):
+                continue
+            index[entity_id] = actor
+            entities_to_check.append((entity_id, actor, f"scenario.story_arrivals.{position}.actor"))
     issues = []
-    for entity_id, entity in index.items():
+    for entity_id, entity, path_prefix in entities_to_check:
         components = entity.get("components")
         if not isinstance(components, dict):
             continue
@@ -67,7 +80,7 @@ def _scenario_rule_errors(scenario: dict) -> tuple[AuthorFieldError, ...]:
                 continue
             issues.extend(author_component_rule_errors(
                 metadata, index, entity_id, entity["kind"], component, components[component],
-                path_prefix=f"scenario.entities.{entity_id}.components.{component}",
+                path_prefix=f"{path_prefix}.components.{component}",
             ))
             if len(issues) >= 32:
                 return tuple(issues[:32])

@@ -383,7 +383,9 @@ class RuleEngine:
         if any(by_id[dependency].status != "completed" for dependency in scheduled.dependencies):
             return self._rejected(context, "scheduled_dependencies_pending", "The scheduled event has unfinished dependencies.")
         if scheduled.handler_id == STORY_NODE_HANDLER:
-            event = settle_story_milestone(state, scheduled, self._event_id(context, f"story.milestone:{scheduled.id}"))
+            event = settle_story_milestone(
+                state, scheduled, self._event_id(context, f"story.milestone:{scheduled.id}"), world_id=context.world_id,
+            )
             return self._resolution(
                 state, context, status="succeeded", code="story_milestone_resolved",
                 message="A story milestone reached its scheduled boundary.", events=[event],
