@@ -20,10 +20,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--station-demo", action="store_true", help="Build the original science-fiction example.")
+    parser.add_argument("--character-cards", type=Path, help="Build using the author’s recovered character cards.")
     args = parser.parse_args()
     if args.station_demo:
         name = f"distant-station-{distant_station_story.PACK_VERSION}.zip"
         archive = distant_station_story.build_archive()
+    elif args.character_cards:
+        from world_engine.content.gensokyo_legacy_cast import CAST_VERSION, build_cast_archive
+
+        name = f"gensokyo-reference-{CAST_VERSION}.zip"
+        archive = build_cast_archive(args.character_cards)
     else:
         name = f"gensokyo-reference-{PACK_VERSION}.zip"
         archive = build_archive()
