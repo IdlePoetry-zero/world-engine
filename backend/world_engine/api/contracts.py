@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
 from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 from world_engine.adapters.models.contracts import Capability
-from world_engine.application.work_chat import WorkPurchaseTargetIntent
-from world_engine.domain.components import ExactDecimal
+from world_engine.application.work_chat import RoutineWorkScheduleRequest
 from world_engine.domain.contests import ContestAction
 from world_engine.domain.travel_itinerary import MAX_TRAVEL_ITINERARY_LEGS
 
@@ -104,20 +102,6 @@ class WorldAdvanceRequest(RequestModel):
     expected_state_version: Version
     duration_seconds: Annotated[int, Field(strict=True, gt=0, le=2**53 - 1)]
     profile: QualityProfile = Field(default_factory=QualityProfile)
-
-
-class RoutineWorkScheduleRequest(RequestModel):
-    assignment_id: UUID
-    first_shift_tick: StrictInt = Field(ge=-(2**63), le=2**63 - 1)
-    repeat_every_days: StrictInt = Field(gt=0, le=2**31 - 1)
-    balance_target: ExactDecimal | None = Field(default=None, ge=Decimal("0"))
-    purchase_target: WorkPurchaseTargetIntent | None = None
-
-    @model_validator(mode="after")
-    def one_savings_goal(self) -> RoutineWorkScheduleRequest:
-        if self.balance_target is not None and self.purchase_target is not None:
-            raise ValueError("Choose one savings goal.")
-        return self
 
 
 class LongActionRequest(WorldAdvanceRequest):

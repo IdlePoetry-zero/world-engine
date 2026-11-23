@@ -17,6 +17,7 @@ from world_engine.api.security import LocalSession
 from world_engine.application.actions import RulesActionDispatcher
 from world_engine.application.conversation import ConversationApplication, ConversationStore
 from world_engine.application.operations import OperationsStore
+from world_engine.application.simulation_jobs import SimulationJobs
 from world_engine.application.study_chat import MAX_SAFE_INTEGER
 from world_engine.application.work_chat import (
     FollowWorkRoutineIntent,
@@ -30,7 +31,8 @@ from world_engine.application.work_chat import (
     work_queue_reply,
 )
 from world_engine.domain.components import (
-    DailyRoutineComponent, DailyRoutineWindow, InventoryComponent, InventoryLot, MarketComponent, MarketOffer,
+    DailyRoutineComponent, DailyRoutineWindow, InventoryComponent, InventoryLot, LifeComponent, MarketComponent,
+    MarketOffer, ProductionQuotaPolicy, ScheduledEventRecord,
 )
 from world_engine.domain.models import AccessScope, CalendarConfig, JobRecord, JobStatus, NewWorld, ResourceAccount, WorldEntity, WorldState
 from world_engine.domain.occupations import OccupationSource, WorkAssignment, WorkPosting, occupation_assignment_id
@@ -843,6 +845,130 @@ def test_saved_work_routine_message_reuses_unique_schedule_and_does_not_advance_
         assert models.calls == [RoleTask.INTENT, RoleTask.INTENT]
     finally:
         client.close()
+        database.dispose()
+
+
+def test_a_month_of_work_replays_equally_from_chat_and_long_action_panel(tmp_path):
+    state, assignment = _world_with_market()
+    state = _with_work_routine(state)
+    first_shift = 12_600
+    shift_length = 3_600
+    deadline = 30 * DAY
+    neighbor_id, quota_source_id = uuid4(), uuid4()
+    raw = state.model_dump(mode="json")
+    raw["resources"][str(EMPLOYER_ACCOUNT_ID)]["balance"] = "500"
+    raw["entities"][str(neighbor_id)] = WorldEntity(
+        id=neighbor_id, kind="person", status="active", location_id=WORKPLACE_ID,
+        components={"life": LifeComponent(birth_tick=0, lifespan_ticks=first_shift + shift_length).model_dump(mode="json")},
+    ).model_dump(mode="json")
+    raw["entities"][str(WORKPLACE_ID)]["components"]["production"] = {"quotas": [ProductionQuotaPolicy(
+        quota_id="quota.monthly", resource_id="core.grain", source_account_id=quota_source_id,
+        period_ticks=deadline, per_period="1", maximum_renewal="1", base_credit_limit="1",
+        issued_total="1", last_issued_period=0,
+    ).model_dump(mode="json")]}
+    raw["resources"][str(quota_source_id)] = ResourceAccount(
+        resource_id="core.grain", balance="0", owner_id=WORKPLACE_ID,
+        account_type="production_source", credit_limit="2",
+    ).model_dump(mode="json")
+    raw["scheduled_events"] = [ScheduledEventRecord(
+        id=uuid4(), due_tick=deadline, phase="environment", handler_id="production.quota_renewal",
+        handler_version="1.0.0", payload={"producer_id": str(WORKPLACE_ID), "quota_id": "quota.monthly"},
+    ).model_dump(mode="json")]
+    state = WorldState.model_validate(raw)
+    client, database, repository, scope, chat_world, models = _work_routine_api(tmp_path, state, [_follow_action()])
+    with client:
+        try:
+            panel_world = repository.create_world(scope, NewWorld(title="Panel work routine", state=state))
+            message_id = uuid4()
+            chat = _post_message(client, chat_world, request_id=message_id, text="照常上班一个月攒钱。")
+            chat.raise_for_status()
+            assert chat.json()["world_effect"] is False
+            panel_body = {
+                "branch_id": str(panel_world.branch.branch_id), "expected_state_version": "0",
+                "duration_seconds": deadline, "activity": "work", "work_schedule": {
+                    "assignment_id": str(assignment.assignment_id), "first_shift_tick": first_shift,
+                    "repeat_every_days": 1,
+                },
+            }
+            panel_path = f"/api/v1/worlds/{panel_world.world.world_id}/long-actions"
+            headers = {"Idempotency-Key": "month-of-work"}
+            panel = client.post(panel_path, json=panel_body, headers=headers)
+            panel.raise_for_status()
+            chat_id, panel_id = UUID(chat.json()["job_id"]), UUID(panel.json()["job_id"])
+            assert repository.read_job(scope, chat_id).payload == repository.read_job(scope, panel_id).payload
+
+            for created, job_id in [(chat_world, chat_id), (panel_world, panel_id)]:
+                world_id, branch_id = created.world.world_id, created.branch.branch_id
+                assert repository.read_world(scope, world_id, branch_id).state.current_tick == 0
+                jobs = SimulationJobs(repository)
+                lease = repository.claim_job("month-work-integration")
+                assert lease is not None and lease.job_id == job_id
+                resumed = False
+                for _ in range(100):
+                    jobs.advance(scope, lease)
+                    job = repository.read_job(scope, job_id)
+                    if job.status is JobStatus.SUCCEEDED:
+                        break
+                    assert job.status is JobStatus.RUNNING, job.result
+                    if not resumed and job.payload.get("work_progress", {}).get("shifts_paid") == 1:
+                        paused = repository.control_job(scope, job_id, "pause")
+                        assert paused.status is JobStatus.PAUSED
+                        assert paused.committed_through_tick == first_shift + shift_length
+                        repository.control_job(scope, job_id, "resume")
+                        lease = repository.claim_job("month-work-resumed")
+                        assert lease is not None and lease.job_id == job_id
+                        jobs = SimulationJobs(repository)
+                        resumed = True
+                else:
+                    pytest.fail("Month-long work did not finish within the expected number of windows")
+
+                final = repository.read_world(scope, world_id, branch_id)
+                assert resumed and job.payload["work_progress"]["shifts_paid"] == 30
+                assert final.state.current_tick == job.committed_through_tick == deadline
+                assert final.state.resources[WORKER_ACCOUNT_ID].balance == Decimal("380")
+                assert final.state.resources[EMPLOYER_ACCOUNT_ID].balance == Decimal("125")
+                assert final.state.resources[STOCK_ACCOUNT_ID].balance == Decimal("100")
+                assert final.state.entities[neighbor_id].status == "dead"
+                assert final.state.scheduled_events[0].status == "completed"
+                events = repository.list_events(scope, world_id, branch_id, limit=250).events
+                assert [event.tick for event in events if event.type == "core.work_shift_paid.v1"] == [
+                    first_shift + shift_length + day * DAY for day in range(30)
+                ]
+                assert [event.tick for event in events if event.type == "core.scheduled_event_completed.v1"] == [deadline]
+                assert repository.replay(scope, world_id, branch_id, from_genesis=True).state_hash == final.state_hash
+
+            assert _post_message(client, chat_world, request_id=message_id, text="照常上班一个月攒钱。").json() == chat.json()
+            retry = client.post(panel_path, json=panel_body, headers=headers)
+            retry.raise_for_status()
+            assert retry.json()["job_id"] == str(panel_id)
+            assert models.calls == [RoleTask.INTENT]
+        finally:
+            database.dispose()
+
+
+def test_chat_and_long_action_panel_reject_work_from_away_without_a_savings_target(tmp_path):
+    state, assignment = _world()
+    raw = state.model_dump(mode="json")
+    raw["entities"][str(ORIGIN_ID)] = WorldEntity(id=ORIGIN_ID, kind="place").model_dump(mode="json")
+    raw["entities"][str(ACTOR_ID)]["location_id"] = str(ORIGIN_ID)
+    state = WorldState.model_validate(raw)
+    proposed = {"action": _action(assignment.assignment_id).model_dump(mode="json"), "clarification": ""}
+    client, database, repository, scope, created, _ = _work_routine_api(tmp_path, state, [proposed])
+    try:
+        with client:
+            chat = _post_message(client, created, request_id=uuid4(), text="从现在起每天去这个岗位上一班，做一天。")
+            chat.raise_for_status()
+            assert chat.json()["kind"] == "clarification"
+            panel = client.post(f"/api/v1/worlds/{created.world.world_id}/long-actions", json={
+                "branch_id": str(created.branch.branch_id), "expected_state_version": "0",
+                "duration_seconds": DAY, "activity": "work", "work_schedule": {
+                    "assignment_id": str(assignment.assignment_id), "first_shift_tick": 0, "repeat_every_days": 1,
+                },
+            }, headers={"Idempotency-Key": "work-from-away"})
+            assert panel.status_code == 422
+            assert panel.json()["error"]["code"] == "ROUTINE_WORK_ASSIGNMENT_UNAVAILABLE"
+            assert not repository.list_jobs(scope, created.world.world_id, created.branch.branch_id)
+    finally:
         database.dispose()
 
 

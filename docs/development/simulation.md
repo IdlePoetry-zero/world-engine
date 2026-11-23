@@ -65,3 +65,15 @@ The Nine Bridges Vale test uses a registered day-long road whose travel interval
 Leased travel saves a departure with the route, endpoints, departure tick and planned arrival tick. A pending journey remains in the branch event stream, with a single scheduled resolution, and the traveller has no local position while in transit. Subsequent windows settle ordinary background activities and scheduled events before the exact arrival or hazard tick. Recovery and forks retain the committed departure and schedule. A paused job may resume the same journey. Cancelling a job stops that job's advancement and the journey stays on the branch. An unavailable destination pauses its resolution for later handling. The atomic movement representation remains available for ordinary movement and replay of existing saves.
 
 The separation between a traveller's waiting process and other processes that may wake or interrupt it follows SimPy's discrete-event process model. [SimPy process interaction](https://simpy.readthedocs.io/en/latest/topical_guides/process_interaction.html)
+
+## 聊天与面板的持续工作验收
+
+聊天可以沿用当前角色已保存的工作时段，也可以按玩家明确指定的首班和间隔安排。长行动面板填写同一岗位、首班、间隔和时限后，使用相同的工作计划校验及持久化作业。两个入口都查验当前工作地点、任职与岗位有效期，拒绝重叠班次，并只从可见的挂牌与存档里解析储蓄目标。排队时，世界时间、工资和库存保持原值。
+
+在 Windows 的项目 Python 3.13 环境运行以下检查。用例经过聊天和长行动 HTTP 入口、隔离 SQLite 作业、暂停与重新领取租约，以及从创建快照开始的事件回放。聊天意图使用结构化测试输出，避免将此检查误记为真实模型验收。
+
+```powershell
+.\.runtime\venv313\Scripts\python.exe -m pytest -q tests/api/test_work_chat_contract.py -k 'a_month_of_work or reject_work_from_away'
+```
+
+两条路径都结算 30 笔工资，首班结束同时处理 NPC 寿终，窗口截止同时处理生产排程。暂停后由新工作器续跑。结薪日期、余额、商品库存、排程状态和回放哈希均有断言，同一请求重试可取回原作业。普通动作与模拟的衔接及真实模型的自然语言验收仍需单独验证。

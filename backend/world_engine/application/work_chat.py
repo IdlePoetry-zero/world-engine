@@ -34,15 +34,12 @@ class WorkPurchaseTargetIntent(WorkIntentModel):
     quantity: ExactDecimal = Field(gt=Decimal("0"))
 
 
-class QueueWorkIntent(WorkIntentModel):
-    """Explicit request to queue repeated shifts from an active assignment."""
+class RoutineWorkScheduleRequest(WorkIntentModel):
+    """Recurring shift selections before resolving world-owned data."""
 
-    kind: Literal["queue_work"]
     assignment_id: UUID
     first_shift_tick: Annotated[StrictInt, Field(ge=_MIN_TICK, le=_MAX_TICK)]
     repeat_every_days: Annotated[StrictInt, Field(gt=0, le=2**31 - 1)]
-    amount: Annotated[StrictInt, Field(gt=0, le=MAX_SAFE_INTEGER)]
-    unit: Literal["second", "hour", "day", "month", "year"]
     balance_target: ExactDecimal | None = Field(
         default=None, ge=Decimal("0"), exclude_if=lambda value: value is None,
     )
@@ -51,10 +48,18 @@ class QueueWorkIntent(WorkIntentModel):
     )
 
     @model_validator(mode="after")
-    def one_savings_target(self) -> QueueWorkIntent:
+    def one_savings_target(self) -> RoutineWorkScheduleRequest:
         if self.balance_target is not None and self.purchase_target is not None:
             raise ValueError("a recurring work plan may have only one savings target")
         return self
+
+
+class QueueWorkIntent(RoutineWorkScheduleRequest):
+    """Explicit request to queue repeated shifts from an active assignment."""
+
+    kind: Literal["queue_work"]
+    amount: Annotated[StrictInt, Field(gt=0, le=MAX_SAFE_INTEGER)]
+    unit: Literal["second", "hour", "day", "month", "year"]
 
 
 class FollowWorkRoutineIntent(WorkIntentModel):
@@ -141,11 +146,7 @@ def build_work_chat_plan(
     *,
     visible_market_offers: Sequence[Mapping[str, object]] = (),
 ) -> LongActionPlan:
-    """Validate an explicit schedule and build an immutable recurring work plan.
-
-    The function reads only trusted world state. It does not advance time,
-    reserve funds, change an assignment, or emit events.
-    """
+    """Convert the player's time units and build a validated recurring work plan."""
 
     if not isinstance(state, WorldState):
         raise ValueError("A validated world state is required to plan work.")
@@ -154,6 +155,21 @@ def build_work_chat_plan(
         action = QueueWorkIntent.model_validate(action.model_dump(mode="python"))
     except (AttributeError, TypeError, ValueError) as error:
         raise ValueError("The recurring work request is invalid.") from error
+    duration = _work_duration_seconds(action.amount, action.unit, state.calendar)
+    return build_routine_work_plan(
+        state, actor_id, action, duration, visible_market_offers=visible_market_offers,
+    )
+
+
+def build_routine_work_plan(
+    state: WorldState,
+    actor_id: UUID,
+    selection: RoutineWorkScheduleRequest,
+    duration_seconds: int,
+    *,
+    visible_market_offers: Sequence[Mapping[str, object]] = (),
+) -> LongActionPlan:
+    """Resolve the same schedule, workplace and savings rules for both entry points."""
 
     actor = state.entities.get(actor_id)
     if actor is None or actor.kind not in {"character", "person"} or actor.status != "active":
@@ -161,7 +177,7 @@ def build_work_chat_plan(
 
     assignments = [
         row for row in state.work_assignments
-        if row.assignment_id == action.assignment_id
+        if row.assignment_id == selection.assignment_id
         and row.actor_id == actor_id
         and row.ended_tick is None
     ]
@@ -170,8 +186,10 @@ def build_work_chat_plan(
     assignment = WorkAssignment.model_validate(assignments[0].model_dump(mode="python"))
     if actor.location_id != assignment.location_id:
         raise ValueError("The character must be at the assigned workplace to queue paid shifts.")
-    if action.first_shift_tick < state.current_tick or action.first_shift_tick < assignment.started_tick:
-        raise ValueError("The first paid shift cannot precede the current tick or active assignment.")
+    if selection.first_shift_tick < max(state.current_tick, assignment.started_tick):
+        raise WorkShiftError(
+            "first_shift_outside_window", "The first paid shift cannot precede the current tick or active assignment.",
+        )
 
     postings = [row for row in state.work_postings if row.posting_id == assignment.posting_id]
     if len(postings) != 1:
@@ -195,39 +213,35 @@ def build_work_chat_plan(
     if terms is None:
         raise WorkShiftError("terms_unregistered", "The assigned posting has no registered paid-shift terms.")
 
-    purchase_target = None
-    if action.purchase_target is not None:
-        purchase_target = build_work_purchase_target(
-            state,
-            actor_id,
-            assignment,
-            terms,
-            action.purchase_target,
-            visible_market_offers,
-        )
-
-    duration = _work_duration_seconds(action.amount, action.unit, state.calendar)
-    if state.current_tick > _MAX_TICK - duration:
+    if state.current_tick > _MAX_TICK - duration_seconds:
         raise ValueError("The work plan exceeds the supported world clock.")
-    target_tick = state.current_tick + duration
-    if action.first_shift_tick > _MAX_TICK - terms.duration_seconds:
-        raise ValueError("The first work shift exceeds the supported world clock.")
-    shift_end = action.first_shift_tick + terms.duration_seconds
+    target_tick = state.current_tick + duration_seconds
+    shift_end = selection.first_shift_tick + terms.duration_seconds
     if shift_end > target_tick:
-        raise ValueError("The first complete paid shift must fit within the requested duration.")
-    if action.first_shift_tick < posting.valid_from_tick or (
+        raise WorkShiftError(
+            "first_shift_outside_window", "The first complete paid shift must fit within the requested duration.",
+        )
+    if selection.first_shift_tick < posting.valid_from_tick or (
         posting.valid_until_tick is not None and shift_end > posting.valid_until_tick
     ):
         raise ValueError("The first complete shift falls outside the posting validity window.")
 
-    cadence_ticks = action.repeat_every_days * state.calendar.day_seconds
+    cadence_ticks = selection.repeat_every_days * state.calendar.day_seconds
     if cadence_ticks > _MAX_TICK or cadence_ticks < terms.duration_seconds:
         raise ValueError("The repeat interval must safely fit one registered paid shift.")
+    purchase_target = None
+    if selection.purchase_target is not None:
+        try:
+            purchase_target = build_work_purchase_target(
+                state, actor_id, assignment, terms, selection.purchase_target, visible_market_offers,
+            )
+        except ValueError as error:
+            raise WorkShiftError("purchase_target_unavailable", str(error)) from error
     schedule = RoutineWorkSchedule(
         assignment_id=assignment.assignment_id,
-        first_shift_tick=action.first_shift_tick,
-        repeat_every_days=action.repeat_every_days,
-        balance_target=action.balance_target,
+        first_shift_tick=selection.first_shift_tick,
+        repeat_every_days=selection.repeat_every_days,
+        balance_target=selection.balance_target,
         purchase_target=purchase_target,
     )
     return LongActionPlan(

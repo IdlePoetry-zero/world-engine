@@ -23,7 +23,7 @@ from fastapi.staticfiles import StaticFiles
 
 from world_engine.application.visibility import project_event, project_player_state
 from world_engine.application.long_action_readback import current_job_reason_code, work_purchase_affordability
-from world_engine.application.work_chat import build_work_purchase_target
+from world_engine.application.work_chat import RoutineWorkScheduleRequest, build_routine_work_plan
 from world_engine.application.worlds import WorldApplication
 from world_engine.application.world_pack_import import WorldPackApplication
 from world_engine.application.ruleset_migrations import (
@@ -51,7 +51,7 @@ from world_engine.domain.errors import AccessDenied, Conflict, DomainError, Insu
 from world_engine.domain.components import NeedsComponent, PlaceComponent, SkillsComponent
 from world_engine.domain.models import MembershipRole
 from world_engine.domain.models import AccessScope
-from world_engine.domain.work_shift import WorkShiftError, registered_work_shift_terms
+from world_engine.domain.work_shift import WorkShiftError
 from world_engine.domain.travel_itinerary import (
     plan_travel_itinerary, revalidate_travel_itinerary_leg, travel_itinerary_journey_id,
 )
@@ -60,7 +60,7 @@ from world_engine.rules.engine import route_access_reason
 
 from .contracts import (
     BranchRequest, ChallengeRequest, ContestRequest, ContinueAfterDeathRequest, CreateWorldRequest, JobControlRequest, JobDecisionRequest,
-    LongActionRequest, MediaJobRequest, RoutineWorkScheduleRequest, WorldAdvanceRequest,
+    LongActionRequest, MediaJobRequest, WorldAdvanceRequest,
 )
 from world_engine.application.simulation_jobs import SimulationJobs
 from world_engine.application.study_chat import study_safety_stop
@@ -607,51 +607,41 @@ def create_app(
                     "ITINERARY_FIRST_LEG_UNAVAILABLE", "首段路线当前不可用，请检查路线和出发地。",
                     status_code=422,
                 )
-        work_schedule = None
-        if body.work_schedule is not None:
-            schedule = body.work_schedule
-            assignment = next((row for row in view.state.work_assignments
-                               if row.assignment_id == schedule.assignment_id
-                               and row.actor_id == actor and row.ended_tick is None), None)
-            try:
-                terms = registered_work_shift_terms(view.state).get(assignment.posting_id) if assignment else None
-            except WorkShiftError:
-                terms = None
-            if terms is None:
-                raise ApplicationFailure(
-                    "ROUTINE_WORK_ASSIGNMENT_UNAVAILABLE", "请选择本人尚未结束且已登记班次的任职。",
-                    status_code=422,
-                )
-            if not start <= schedule.first_shift_tick <= target - terms.duration_seconds:
-                raise ApplicationFailure(
-                    "ROUTINE_WORK_FIRST_SHIFT_OUTSIDE_WINDOW", "首班不能早于当前时刻，并须在计划截止前完成。",
-                    status_code=422,
-                )
-            purchase_target = None
+        schedule = body.work_schedule
+        if schedule is not None:
+            visible_market_offers = ()
             if schedule.purchase_target is not None:
                 visible_market_offers = project_player_state(view.state.model_dump(mode="json"), str(actor))[
                     "market_offers"
                 ]["offers"]
-                try:
-                    purchase_target = build_work_purchase_target(
-                        view.state, actor, assignment, terms, schedule.purchase_target, visible_market_offers,
-                    )
-                except ValueError as error:
+            try:
+                plan = build_routine_work_plan(
+                    view.state, actor, schedule, body.duration_seconds, visible_market_offers=visible_market_offers,
+                )
+            except ValueError as error:
+                reason = error.code if isinstance(error, WorkShiftError) else None
+                if reason == "purchase_target_unavailable":
                     raise ApplicationFailure(
                         "ROUTINE_WORK_PURCHASE_TARGET_UNAVAILABLE",
                         "请选择工作地点公开在售、可用同一工资币种购买的商品及数量。",
                         status_code=422,
                     ) from error
-            work_schedule = RoutineWorkSchedule(
-                assignment_id=schedule.assignment_id, first_shift_tick=schedule.first_shift_tick,
-                repeat_every_days=schedule.repeat_every_days, balance_target=schedule.balance_target,
-                purchase_target=purchase_target,
+                if reason == "first_shift_outside_window":
+                    raise ApplicationFailure(
+                        "ROUTINE_WORK_FIRST_SHIFT_OUTSIDE_WINDOW", "首班不能早于当前时刻，并须在计划截止前完成。",
+                        status_code=422,
+                    ) from error
+                raise ApplicationFailure(
+                    "ROUTINE_WORK_ASSIGNMENT_UNAVAILABLE", "请核对本人任职、工作地点、岗位有效期和重复间隔。",
+                    status_code=422,
+                ) from error
+        else:
+            plan = LongActionPlan(
+                actor_id=actor, started_tick=start, target_tick=target, activity=body.activity, route_id=body.route_id,
+                skill_id=body.skill_id, travel_itinerary=itinerary,
+                stop_conditions=study_safety_stop(actor, body.study_stop_safety_at_or_below),
+                itinerary_auto_care=body.itinerary_auto_care,
             )
-        plan = LongActionPlan(actor_id=actor, started_tick=start,
-                              target_tick=target, activity=body.activity, route_id=body.route_id,
-                              skill_id=body.skill_id, work_schedule=work_schedule, travel_itinerary=itinerary,
-                              stop_conditions=study_safety_stop(actor, body.study_stop_safety_at_or_below),
-                              itinerary_auto_care=body.itinerary_auto_care)
         job = SimulationJobs(worlds.repository).enqueue(
             access, world_id, body.branch_id, plan, idempotency_key=key,
             speed=body.profile.speed, depth=body.profile.depth, expected_state_version=version,
