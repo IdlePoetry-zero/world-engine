@@ -53,6 +53,7 @@ from .occupation_events import OccupationAppointedEvent, OccupationResignedEvent
 from .occupation_death_vacancies import OccupationDeathVacanciesResolvedEvent
 from .occupation_legacy_vacancies import OccupationLegacyVacanciesResolvedEvent
 from .npc_attendance import NpcAttendance
+from .npc_commitments import validate_meeting_commitment_schedules
 from .npc_plans import NpcPlan
 from .npc_plan_events import NpcPlanCreatedEvent, NpcPlanRevisedEvent
 from .npc_plan_review_events import NpcPlanReviewResolvedEvent, NpcPlanReviewScheduledEvent
@@ -646,6 +647,10 @@ class WorldState(ContractModel):
                     raise ValueError("Relationship invitations require distinct IDs and committed times.")
                 if any(record.attended_tick > self.current_tick for record in invitation.meeting_attendance):
                     raise ValueError("Relationship meeting attendance cannot be recorded in the future.")
+                if invitation.meeting is not None and invitation.meeting.venue_id is not None:
+                    venue = self.entities.get(invitation.meeting.venue_id)
+                    if venue is None or venue.kind not in {"place", "location"}:
+                        raise ValueError("A timed invitation venue must be a registered place.")
                 if any(actor not in self.entities or self.entities[actor].kind not in {"character", "person"} for actor in pair):
                     raise ValueError("A relationship invitation must refer to known characters.")
                 if relationship_invitation_blocks_pair_at_tick(invitation, self.current_tick):
@@ -654,6 +659,7 @@ class WorldState(ContractModel):
                     live_pairs.add(pair)
                 seen_invitation_ids.add(invitation.invitation_id)
         validate_npc_meeting_attendance_decisions_state(self)
+        validate_meeting_commitment_schedules(self)
         validate_institutional_credit_state(self)
         if self.private_gifts:
             gift_ids: set[UUID] = set()

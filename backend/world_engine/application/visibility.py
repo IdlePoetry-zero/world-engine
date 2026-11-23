@@ -410,7 +410,7 @@ def project_player_state(state: dict[str, Any], actor_id: str) -> dict[str, Any]
         ][-12:],
         "own_relationship_invitations": [
             public for value in state.get("relationship_invitations", [])
-            if (public := _invitation_for_actor(value, actor_id)) is not None
+            if (public := _invitation_for_actor(value, actor_id, entities=entities)) is not None
         ],
         "own_meeting_reflections": [
             own for value in state.get("relationship_reflections", [])
@@ -846,14 +846,21 @@ def _combat_truce_for_actor(raw: object, actor_id: str) -> dict[str, Any] | None
     })
 
 
-def _invitation_for_actor(raw: object, actor_id: str) -> dict[str, Any] | None:
+def _invitation_for_actor(
+    raw: object, actor_id: str, *, entities: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     try:
         invitation = RelationshipInvitation.model_validate(raw)
     except ValueError:
         return None
     if actor_id not in {str(invitation.proposer_id), str(invitation.invitee_id)}:
         return None
-    return invitation.model_dump(mode="json")
+    projected = invitation.model_dump(mode="json")
+    if entities is not None and invitation.meeting is not None and invitation.meeting.venue_id is not None:
+        venue = entities.get(str(invitation.meeting.venue_id), {})
+        if venue.get("name"):
+            projected["meeting_venue_name"] = venue["name"]
+    return projected
 
 
 def _meeting_reflection_for_actor(raw: object, actor_id: str) -> dict[str, Any] | None:

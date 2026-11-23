@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
 from .components import LifeComponent
 from .errors import InvalidEvent
+from .investigation import entity_visible_to_actor
 from .npc_attendance import npc_attendance_is_valid
 
 if TYPE_CHECKING:
@@ -37,6 +38,7 @@ class InvitationMeeting(BaseModel):
 
     start_tick: Tick
     end_tick: Tick
+    venue_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def valid_interval(self) -> InvitationMeeting:
@@ -154,6 +156,11 @@ def propose_relationship_invitation(
     ):
         raise InvalidEvent("This pair already has a pending or accepted invitation.")
     _require_active_adult_pair(state, proposer_id, invitee_id)
+    if parsed_meeting is not None and parsed_meeting.venue_id is not None:
+        venue = state.entities.get(parsed_meeting.venue_id)
+        if (venue is None or venue.kind not in {"place", "location"} or venue.status != "active"
+                or not all(entity_visible_to_actor(state, actor_id, venue.id) for actor_id in (proposer_id, invitee_id))):
+            raise InvitationMeetingUnavailable()
     return RelationshipInvitation(
         invitation_id=invitation_id,
         proposer_id=proposer_id,
@@ -263,6 +270,11 @@ def attend_relationship_meeting(
     if not parsed.meeting.start_tick <= state.current_tick < parsed.meeting.end_tick:
         raise InvitationMeetingUnavailable()
     _require_active_adult_pair(state, parsed.proposer_id, parsed.invitee_id)
+    venue_id = parsed.meeting.venue_id
+    if venue_id is not None and (
+        state.entities[venue_id].status != "active" or state.entities[actor_id].location_id != venue_id
+    ):
+        raise InvitationMeetingUnavailable()
     if check_work_calendar is True and _has_ongoing_work_attendance(
         state, {parsed.proposer_id, parsed.invitee_id},
     ):
@@ -331,6 +343,10 @@ def invitation_meeting_available(
         return True
     if candidate.meeting.start_tick <= state.current_tick:
         return False
+    if candidate.meeting.venue_id is not None:
+        venue = state.entities.get(candidate.meeting.venue_id)
+        if venue is None or venue.kind not in {"place", "location"} or venue.status != "active":
+            return False
 
     parsed = _validated_records(records, current_tick=state.current_tick)
     candidate_people = {candidate.proposer_id, candidate.invitee_id}

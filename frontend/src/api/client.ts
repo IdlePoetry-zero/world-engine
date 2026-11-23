@@ -198,7 +198,8 @@ export type OwnRelationshipInvitation = {
   proposed_tick: string | number
   updated_tick: string | number
   revision: string | number
-  meeting?: { start_tick: string | number; end_tick: string | number } | null
+  meeting?: { start_tick: string | number; end_tick: string | number; venue_id?: string } | null
+  meeting_venue_name?: string
   meeting_attendance?: { actor_id: string; attended_tick: string | number }[] | null
 }
 export type OwnMeetingReflection = {

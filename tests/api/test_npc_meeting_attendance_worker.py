@@ -6,7 +6,7 @@ import json
 from io import BytesIO
 from decimal import Decimal
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import uuid4, uuid5
 
 import pytest
 
@@ -29,6 +29,8 @@ from world_engine.domain.models import (
     WorldEntity,
     WorldState,
 )
+from world_engine.domain.npc_plans import NpcPlan, NpcPlanStep
+from world_engine.domain.npc_commitments import MEETING_COMMITMENT_HANDLER
 from world_engine.domain.npc_attendance_events import NpcAttendanceSettledEvent, NpcAttendanceStartedEvent
 from world_engine.domain.npc_meeting_attendance import NpcMeetingAttendanceDecisionRecordedEvent
 from world_engine.domain.occupation_events import OccupationSource
@@ -38,7 +40,7 @@ from world_engine.domain.relationship_invitations import InvitationMeeting
 from world_engine.domain.work_shift import WorkShiftTerms
 from world_engine.rules import RuleContext, RuleEngine
 from world_engine.runtime import _invoke_worker_model_decision
-from world_engine.simulation.contracts import WorldAdvancePlan
+from world_engine.simulation.contracts import DecisionResponse, WorldAdvancePlan
 from world_engine.storage.backup_import import WorldBackupImporter
 from world_engine.storage.database import Database
 from world_engine.storage.repository import WorldRepository
@@ -519,3 +521,124 @@ async def test_active_registered_npc_shift_settles_before_open_meeting_decision(
         assert model_calls == [(RoleTask.NPC_DECISION, 200)]
     finally:
         database.dispose()
+
+
+
+@pytest.mark.asyncio
+async def test_npc_meeting_commitment_prepares_journeys_and_expires_only_the_unfulfilled_goal(tmp_path):
+    db = Database(f"sqlite:///{(tmp_path / 'meeting-commitments.db').as_posix()}")
+    db.create_schema()
+    restored_db = Database(f"sqlite:///{(tmp_path / 'meeting-commitments-restored.db').as_posix()}")
+    restored_db.create_schema()
+    scope = AccessScope(tenant_id=uuid4(), user_id=uuid4())
+    player, robin, alex, village, venue, route = (uuid4() for _ in range(6))
+    people = {ident: _character(ident, name, village) for ident, name in ((player, "Observer"), (robin, "Robin"), (alex, "Alex"))}
+    for ident in (robin, alex):
+        character = people[ident]
+        people[ident] = character.model_copy(update={"components": character.components | {
+            "known_places": [str(village), str(venue)], "capabilities": {"grants": ["world.travel"]},
+        }})
+    state = WorldState(
+        player_id=player,
+        calendar={"day_seconds": DAY_SECONDS, "year_days": YEAR_DAYS},
+        entities=people | {
+            village: WorldEntity(id=village, kind="place", name="Workshop", components={"place": {
+                "place_type": "settlement", "routes": [{"route_id": route, "from_place_id": village, "to_place_id": venue, "travel_ticks": 60}],
+            }}),
+            venue: WorldEntity(id=venue, kind="place", name="Gardens", components={"place": {"place_type": "site"}}),
+        },
+    )
+    try:
+        repository = WorldRepository(db)
+        draft = NewWorld(title="Booked meeting", state=state)
+        repository.create_world(scope, draft)
+        world, branch = draft.world_id, draft.branch_id
+        _, proposal = _commit_invitation_action(repository, scope, world, branch, robin, "propose_relationship_invitation", {
+            "target_id": str(alex), "meeting": {"start_tick": 300, "end_tick": 400, "venue_id": str(venue)},
+        }, key="propose-venue")
+        invitation_id = proposal.resulting_invitation.invitation_id
+        assert not repository.read_world(scope, world, branch).state.goals
+        _commit_invitation_action(repository, scope, world, branch, alex, "resolve_relationship_invitation", {
+            "invitation_id": str(invitation_id), "operation": "accept",
+        }, key="accept-venue")
+        agreed = repository.read_world(scope, world, branch)
+        assert {goal.owner_id for goal in agreed.state.goals} == {alex, robin}
+        assert {row.due_tick for row in agreed.state.scheduled_events if row.handler_id == "npc.goal_review"} == {2}
+        expiry, = [row for row in agreed.state.scheduled_events if row.handler_id == MEETING_COMMITMENT_HANDLER]
+        assert expiry.due_tick == 400
+        fork = repository.fork(scope, world, branch, agreed.last_seq, "Keep accepted proposals").branch_id
+
+        class AttendanceModel:
+            async def generate(self, identity, request):
+                context = json.loads(request.messages[-1].content)["meeting"]
+                assert context["meeting_interval"]["venue_name"] == "Gardens"
+                actor_name = context["actor"]["name"]
+                assert actor_name in {"Robin", "Alex"}
+                return SimpleNamespace(normalized_output={"option_id": "attend" if actor_name == "Robin" else "defer"},
+                                       call_trace=SimpleNamespace(request_id=f"choice-{actor_name}"))
+
+        jobs = SimulationJobs(repository)
+        job = jobs.enqueue_world_advance(scope, world, branch, WorldAdvancePlan(started_tick=0, target_tick=401),
+            idempotency_key="meeting-commitment", speed="balanced", depth="standard",
+            expected_state_version=agreed.branch.state_version)
+        lease = repository.claim_job("meeting-preparer")
+        assert lease and lease.job_id == job.job_id
+        review_ticks = {}
+        for _ in range(65):
+            if repository.read_job(scope, job.job_id).status == "succeeded":
+                break
+            outcome = jobs.advance(scope, lease)
+            if not outcome.decision_requests:
+                continue
+            request, = outcome.decision_requests
+            current = repository.read_world(scope, world, branch)
+            if request.kind == "npc.plan_review":
+                actor_id = request.actor_id
+                assert actor_id in {robin, alex}
+                review_ticks.setdefault(actor_id, []).append(request.at_tick)
+                is_already_there = current.state.entities[actor_id].location_id == venue
+                plan = None
+                if not is_already_there:
+                    goal, = [goal for goal in current.state.goals if goal.owner_id == actor_id]
+                    plan = NpcPlan(
+                        plan_id=uuid5(request.request_id, f"npc.plan.v1:{actor_id}:{request.state_version}"),
+                        actor_id=actor_id, goal_ids=[goal.id], revision=1, status="ready", current_step=0,
+                        created_tick=request.at_tick, updated_tick=request.at_tick, next_review_tick=request.at_tick,
+                        steps=[NpcPlanStep(capability_id="world.action.move.v1",
+                                           arguments={"destination_id": str(venue), "route_id": str(route)})],
+                        reason="Walk to the agreed venue before the appointed time.",
+                    )
+                answer = DecisionResponse(
+                    request_id=request.request_id, state_version=request.state_version, at_tick=request.at_tick,
+                    source="policy", option_id="plan", npc_planning_status="ready" if plan is not None else "defer",
+                    npc_plan=plan, npc_plan_state_hash=current.state_hash,
+                )
+                jobs.advance(scope, lease, model_decision=answer)
+            else:
+                assert request.kind == "npc.meeting_attendance" and request.at_tick == 300
+                answer = await _invoke_worker_model_decision(
+                    AttendanceModel(), repository, scope, lease, repository.read_job(scope, job.job_id), request,
+                )
+                jobs.advance(scope, lease, model_decision=answer)
+
+        assert repository.read_job(scope, job.job_id).status == "succeeded"
+        final = repository.read_world(scope, world, branch)
+        assert final.state.entities[player].location_id == village
+        assert {trip.actor_id for trip in final.state.travel_journeys if trip.arrival_tick == 62} == {robin, alex}
+        assert {actor: ticks[0] for actor, ticks in review_ticks.items()} == {robin: 2, alex: 2}
+        assert {(goal.owner_id, goal.status, goal.updated_tick) for goal in final.state.goals} == {
+            (robin, "succeeded", 300), (alex, "failed", 400),
+        }
+        invitation, = final.state.relationship_invitations
+        assert invitation.status == "accepted" and [row.actor_id for row in invitation.meeting_attendance] == [robin]
+        assert repository.read_world(scope, world, fork).state_hash == agreed.state_hash
+        assert repository.replay(scope, world, branch, from_genesis=True).state_hash == final.state_hash
+
+        backup = BackupApplication(repository)
+        restored = WorldRepository(restored_db)
+        with backup.validate_archive_file_streaming(BytesIO(backup.export_world(scope, world))) as verified:
+            WorldBackupImporter(restored).import_verified_backup(scope, verified)
+        assert restored.replay(scope, world, branch, from_genesis=True).state_hash == final.state_hash
+    finally:
+        restored_db.dispose()
+        db.dispose()

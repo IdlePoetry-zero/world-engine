@@ -103,10 +103,7 @@ def validate_relationship_invitation_batch(
         expected_type = _PROPOSE_COMMAND
         expected_payload = {"kind": "propose_relationship_invitation", "target_id": str(invitation.invitee_id)}
         if invitation.meeting is not None:
-            expected_payload["meeting"] = {
-                "start_tick": invitation.meeting.start_tick,
-                "end_tick": invitation.meeting.end_tick,
-            }
+            expected_payload["meeting"] = invitation.meeting.model_dump(mode="json")
     elif event.operation == "attend":
         expected_type = _ATTEND_COMMAND
         expected_payload = {

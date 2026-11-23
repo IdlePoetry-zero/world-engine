@@ -156,6 +156,7 @@ def project_npc_meeting_attendance_context(
             "end_tick": meeting.end_tick,
             "start_inclusive": True,
             "end_exclusive": True,
+            **({"venue_name": location.name} if meeting.venue_id is not None and location.name else {}),
         },
         "current_tick": state.current_tick,
         "co_location_fact": {

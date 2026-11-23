@@ -20,6 +20,7 @@ from .story_nodes import (
     STORY_NODE_HANDLER, StoryMilestoneResolvedEvent, ready_story_reaction,
     settle_story_milestone, settle_story_reaction, story_followup_schedules,
 )
+from .npc_commitments import MEETING_COMMITMENT_HANDLER, expire_npc_meeting_commitment, update_npc_meeting_commitment
 from .npc_plan_events import NpcPlanCreatedEvent, NpcPlanRevisedEvent
 from .npc_plans import apply_npc_plan_created, apply_npc_plan_revised, occupied_npc_ids
 from .npc_plan_review_events import (
@@ -286,7 +287,8 @@ def apply_event(state: WorldState, raw_event: DomainEvent | dict[str, object]) -
             raise InvalidEvent(str(exc)) from exc
         return _validated_state(state, {"work_assignments": assignments})
     if isinstance(event, RelationInvitationChangedEvent):
-        return _validated_state(state, {"relationship_invitations": apply_relationship_invitation(state, event)})
+        updated = _validated_state(state, {"relationship_invitations": apply_relationship_invitation(state, event)})
+        return update_npc_meeting_commitment(updated, event)
     if isinstance(event, InstitutionalCreditChangedEvent):
         try:
             patches = apply_institutional_credit_event(state, event)
@@ -3276,6 +3278,9 @@ def _apply_scheduled_event_completion(
     scheduled_events[index] = replacement
     if story_event is not None:
         return _validated_state(state, _story_resolution_updates(state, story_event, scheduled_events))
+    if scheduled.handler_id == MEETING_COMMITMENT_HANDLER:
+        goals = expire_npc_meeting_commitment(state, scheduled, event.event_id)
+        return _validated_state(state, {"scheduled_events": scheduled_events, "goals": goals})
     return _validated_state(state, {"scheduled_events": scheduled_events})
 
 

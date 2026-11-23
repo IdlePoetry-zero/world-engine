@@ -30,6 +30,7 @@ from world_engine.domain.institutional_credit import InstitutionalCreditError
 from world_engine.domain.institutional_credit_state import CREDIT_MATURITY_HANDLER, plan_institutional_credit_maturity_event
 from world_engine.domain.promise_trust_settlement import build_trusted_promise_settlement
 from world_engine.domain.story_nodes import STORY_NODE_HANDLER, settle_story_milestone
+from world_engine.domain.npc_commitments import MEETING_COMMITMENT_HANDLER, MEETING_COMMITMENT_VERSION
 from world_engine.domain.shipment_relief import plan_shipment_relief
 from world_engine.domain.shipment_relief_events import (
     ShipmentReliefDistributedEvent,
@@ -389,6 +390,15 @@ class RuleEngine:
             return self._resolution(
                 state, context, status="succeeded", code="story_milestone_resolved",
                 message="A story milestone reached its scheduled boundary.", events=[event],
+            )
+        if (scheduled.handler_id, scheduled.handler_version) == (MEETING_COMMITMENT_HANDLER, MEETING_COMMITMENT_VERSION):
+            event = ScheduledEventCompletedEvent(
+                event_id=self._event_id(context, f"scheduled.completed:{scheduled.id}"),
+                scheduled_event_id=scheduled.id, expected_revision=scheduled.revision,
+            )
+            return self._resolution(
+                state, context, status="succeeded", code="meeting_commitment_window_closed",
+                message="The agreed meeting window ended.", events=[event],
             )
         if scheduled.handler_id == "population.year_advance":
             return self._resolve_population_year(state, scheduled, context)

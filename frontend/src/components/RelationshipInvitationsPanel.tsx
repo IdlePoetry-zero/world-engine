@@ -104,6 +104,7 @@ export function RelationshipInvitationsPanel({
             <div><dt>提出 tick</dt><dd>{formatTick(invitation.proposed_tick)}</dd></div>
             <div><dt>更新 tick</dt><dd>{formatTick(invitation.updated_tick)}</dd></div>
             {invitation.meeting && <>
+              {invitation.meeting_venue_name && <div><dt>会面地点</dt><dd>{invitation.meeting_venue_name}</dd></div>}
               <div><dt>开始世界秒</dt><dd><bdi>{formatTick(invitation.meeting.start_tick)}</bdi></dd></div>
               <div><dt>结束世界秒</dt><dd><bdi>{formatTick(invitation.meeting.end_tick)}</bdi></dd></div>
             </>}

@@ -28,6 +28,7 @@ from world_engine.domain.npc_attendance_events import (
 from world_engine.domain.npc_goal_completion import npc_goal_fulfillment_allows_continuation
 from world_engine.domain.npc_plans import NpcTimedExecution
 from world_engine.domain.relationship_promises import PROMISE_TRUST_DEADLINE_HANDLER_VERSION
+from world_engine.domain.npc_commitments import MEETING_COMMITMENT_HANDLER, MEETING_COMMITMENT_VERSION
 from world_engine.domain.travel_journeys import (
     TRAVEL_RESOLUTION_HANDLER_ID, TRAVEL_RESOLUTION_HANDLER_VERSION, active_travel_journey, travel_resolution_schedule_id,
 )
@@ -2936,6 +2937,7 @@ class SimulationEngine:
             or (scheduled.handler_id == PRICE_REVIEW_HANDLER_ID and scheduled.handler_version == PRICE_REVIEW_HANDLER_VERSION)
             or (scheduled.handler_id == CREDIT_MATURITY_HANDLER and scheduled.handler_version == CREDIT_MATURITY_HANDLER_VERSION)
             or (scheduled.handler_id == STORY_NODE_HANDLER and scheduled.handler_version == STORY_NODE_VERSION)
+            or (scheduled.handler_id, scheduled.handler_version) == (MEETING_COMMITMENT_HANDLER, MEETING_COMMITMENT_VERSION)
         )
 
     @staticmethod

@@ -406,10 +406,7 @@ def _action_command(
                 "target_id": str(invitation.invitee_id),
             }
             if invitation.meeting is not None:
-                payload["meeting"] = {
-                    "start_tick": invitation.meeting.start_tick,
-                    "end_tick": invitation.meeting.end_tick,
-                }
+                payload["meeting"] = invitation.meeting.model_dump(mode="json")
             return "action.propose_relationship_invitation", payload
         if event.operation == "attend":
             return "action.attend_relationship_meeting", {
