@@ -82,6 +82,11 @@ class SimulationJobs:
             plan.activity == "work" or plan.travel_itinerary is not None
         ):
             payload["submitted_by"] = str(scope.user_id)
+        if isinstance(plan, LongActionPlan) and plan.activity == "work":
+            if existing is None:
+                payload["work_calendar"] = view.state.calendar.model_dump(mode="json")
+            elif "work_calendar" in existing.payload:
+                payload["work_calendar"] = existing.payload["work_calendar"]
         if isinstance(plan, LongActionPlan) and plan.activity == "study":
             # A preexisting unstamped job must retain the payload used for its idempotency hash.
             if existing is None or "submitted_by" in existing.payload:

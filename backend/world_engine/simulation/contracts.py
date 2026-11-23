@@ -99,9 +99,13 @@ class LongActionPlan(FrozenModel):
     work_schedule: RoutineWorkSchedule | None = Field(default=None, exclude_if=lambda value: value is None)
     started_tick: int | None = Field(default=None, ge=-(2**63), le=2**63 - 1)
     consumption: ConsumeIntent | None = Field(default=None, exclude_if=lambda value: value is None)
+    stationary_only: StrictBool = Field(default=False, exclude_if=lambda value: not value)
 
     @model_validator(mode="after")
     def action_has_parameters(self) -> LongActionPlan:
+        if self.stationary_only and (self.activity not in {"wait", "rest"} or self.started_tick is None
+                                    or self.target_tick - self.started_tick < (60 if self.activity == "rest" else 1)):
+            raise ValueError("An explicit stationary action requires a fixed wait or rest interval.")
         if self.activity == "consume":
             if (self.consumption is None or self.started_tick is None
                 or self.target_tick - self.started_tick != self.consumption.duration_ticks

@@ -8,7 +8,7 @@ import './JourneyRoute.css'
 import type { Notice } from '../App'
 
 import { errorMessage, FOREGROUND_STATUS_POLL_INTERVAL_MS, jobReasonLabel } from '../utils'
-import { formatTick, formatWorldDuration, isValidCalendarLength } from '../worldTime'
+import { formatTick, formatWorldDuration, formatWorldRelativeTick, isValidCalendarLength } from '../worldTime'
 
 
 
@@ -1767,36 +1767,6 @@ function safeIntegerText(value: string): number | null {
   if (!/^-?(?:0|[1-9]\d*)$/.test(normalized)) return null
   const parsed = Number(normalized)
   return Number.isSafeInteger(parsed) ? parsed : null
-}
-
-function formatWorldRelativeTick(tick: bigint | null, daySeconds: number, yearDays: number): string {
-  if (tick === null) return '无法精确读取世界时间'
-  if (!isValidCalendarLength(daySeconds)) return `世界 tick ${formatTick(tick)}`
-
-  const dayLength = BigInt(daySeconds)
-  let dayIndex = tick / dayLength
-  let secondOfDay = tick % dayLength
-  if (secondOfDay < 0n) {
-    secondOfDay += dayLength
-    dayIndex -= 1n
-  }
-  const hours = String(secondOfDay / 3_600n).padStart(2, '0')
-  const minutes = String((secondOfDay % 3_600n) / 60n).padStart(2, '0')
-  const seconds = String(secondOfDay % 60n).padStart(2, '0')
-  const clock = `${hours}:${minutes}:${seconds}`
-
-  if (isValidCalendarLength(yearDays)) {
-    const yearLength = BigInt(yearDays)
-    let yearIndex = dayIndex / yearLength
-    let dayOfYear = dayIndex % yearLength
-    if (dayOfYear < 0n) {
-      dayOfYear += yearLength
-      yearIndex -= 1n
-    }
-    return `世界历第 ${formatTick(yearIndex + 1n)} 年第 ${formatTick(dayOfYear + 1n)} 日 ${clock}（tick ${formatTick(tick)}）`
-  }
-
-  return `世界第 ${formatTick(dayIndex + 1n)} 日 ${clock}（tick ${formatTick(tick)}）`
 }
 
 function formatSafeWorldDuration(seconds: number, daySeconds: number, yearDays: number): string {

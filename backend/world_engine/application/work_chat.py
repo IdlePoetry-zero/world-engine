@@ -122,11 +122,15 @@ def work_queue_reply(request_id: UUID, job: JobRecord) -> dict:
             "达到所选商品的当前市场报价金额时提前结束；后续按当前报价重新核算，排队不会替你购买。"
         )
         references.append(str(purchase_target.listing_id))
+    timing = f"时限为 {duration:,} 秒，首班世界时刻为 {schedule.first_shift_tick}"
+    if (calendar_data := job.payload.get("work_calendar")) is not None:
+        calendar = CalendarConfig.model_validate(calendar_data)
+        timing = _work_calendar_summary(duration, schedule.first_shift_tick, calendar)
     return {
         "message_id": str(request_id),
         "kind": "action",
         "content": (
-            f"反复出勤作业已排队，时限为 {duration:,} 秒，首班世界时刻为 {schedule.first_shift_tick}，"
+            f"反复出勤作业已排队，{timing}，"
             f"此后每 {schedule.repeat_every_days} 个世界日重复一次。"
             "月份单位按 30 个世界日折算。"
             f"{target_note}本次排队没有推进世界时间。"
@@ -137,6 +141,20 @@ def work_queue_reply(request_id: UUID, job: JobRecord) -> dict:
         "elapsed_ticks": "0",
         "references": references,
     }
+
+
+def _work_calendar_summary(duration: int, first_shift: int, calendar: CalendarConfig) -> str:
+    parts = []
+    for unit, length in (("个世界日", calendar.day_seconds), ("小时", 3600), ("分钟", 60), ("秒", 1)):
+        amount, duration = divmod(duration, length)
+        if amount:
+            parts.append(f"{amount:,} {unit}")
+    day_index, seconds = divmod(first_shift, calendar.day_seconds)
+    year, day = divmod(day_index, calendar.year_days)
+    hour, seconds = divmod(seconds, 3600)
+    minute, second = divmod(seconds, 60)
+    shift_time = f"{hour:02}:{minute:02}" + (f":{second:02}" if second else "")
+    return f"时限为 {' '.join(parts)}，首班为世界历第 {year + 1} 年第 {day + 1} 日 {shift_time}"
 
 
 def build_work_chat_plan(

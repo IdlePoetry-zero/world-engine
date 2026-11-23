@@ -633,6 +633,8 @@ class SimulationEngine:
         # normal world and survival boundaries.
         if plan.depart_immediately:
             return self._depart_travel_journey(state, plan, context)
+        if plan.stationary_only:
+            return self._advance_stationary_action(state, plan, context, journey)
 
         food_resource = self._food_resource(state)
         water_resource = self._water_resource(state)
@@ -2006,6 +2008,27 @@ class SimulationEngine:
         return self._advance_to_boundary(state, plan, context, tick, reason, reference, subject, "work",
                                          work_job_id=attendance.work_job_id)
 
+    def _advance_stationary_action(self, state, plan, context, journey):
+        routine = self._resolve_npc_routine(state, plan, context)
+        if routine is not None:
+            return routine
+        horizon = min(plan.target_tick, state.current_tick + context.max_step_ticks,
+                      state.current_tick + self.policy.max_macro_step_seconds, state.current_tick + 30 * state.calendar.day_seconds)
+        boundary = self._next_external_boundary(
+            state, horizon, actor_id=plan.actor_id, externally_controlled_actor_ids=context.externally_controlled_actor_ids,
+            include_meeting_start=context.allow_autonomous_meeting_attendance,
+            deferred_travel_schedule_id=travel_resolution_schedule_id(journey.journey_id) if journey else None,
+        )
+        if context.allow_autonomous_vacancy:
+            from .autonomous_vacancy import next_vacancy_year_boundary
+
+            year_tick = next_vacancy_year_boundary(state, horizon)
+            if year_tick is not None and (boundary is None or year_tick < boundary[0]):
+                boundary = (year_tick, "autonomous_vacancy_year_boundary", None, None)
+        boundary = self._with_npc_routine_boundary(state, horizon, plan, context, boundary)
+        tick, reason, reference, subject = boundary or (horizon, "stationary_action_window", None, plan.actor_id)
+        return self._advance_to_boundary(state, plan, context, tick, reason, reference, subject, plan.activity)
+
     def _resolve_npc_routine(
         self, state: WorldState, plan: SimulationPlan, context: SimulationContext, *,
         protected_interval: tuple[int, int] | None = None,
@@ -3244,7 +3267,11 @@ class SimulationEngine:
             state, plan, context, activity=activity, reason=reason,
             reference=reference, subject=subject,
         )
-        if capture_transit_projection:
+        if plan.stationary_only and activity == "rest" and plan.started_tick is not None:
+            resolution = self.rule_engine.evaluate_rest_window(
+                state, started_tick=plan.started_tick, duration=duration, context=boundary_context, choices=background_choices,
+            )
+        elif capture_transit_projection:
             with self.rule_engine._capture_validated_projection():
                 resolution = (
                     world_action(state, boundary_intent, boundary_context, background_choices)
@@ -3349,6 +3376,7 @@ class SimulationEngine:
             "routine_work_shift_start", "routine_work_rest_start", "stop_condition_boundary",
             "itinerary_auto_care_threshold", "autonomous_vacancy_year_boundary",
             "npc_meeting_start", "npc_routine_boundary", "npc_work_boundary", "work_attendance_boundary",
+            "stationary_action_window",
         }:
             result = self._resolved(
                 state, context, combined, outcome="advanced", boundary=reason,

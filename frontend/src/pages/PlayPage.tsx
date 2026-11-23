@@ -17,7 +17,7 @@ import { SafeConductPanel } from '../components/SafeConductPanel'
 import { ShipmentReliefPanel } from '../components/ShipmentReliefPanel'
 import type { Notice, Page } from '../App'
 import { errorMessage, FOREGROUND_STATUS_POLL_INTERVAL_MS, jobReasonLabel } from '../utils'
-import { formatWorldDuration } from '../worldTime'
+import { formatWorldDuration, formatWorldRelativeTick } from '../worldTime'
 
 const CombatTrucePanel = lazy(() => import('../components/CombatTrucePanel').then((module) => ({ default: module.CombatTrucePanel })))
 const CultivationBreakthroughPanel = lazy(() => import('../components/CultivationBreakthroughPanel').then((module) => ({ default: module.CultivationBreakthroughPanel })))
@@ -369,6 +369,9 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
   const onInputKey = (event: KeyboardEvent<HTMLTextAreaElement>) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() } }
 
   if (!world) return <PageEmpty eyebrow="进入世界" title="先选择一个世界。" body="从世界库打开现有存档，或创建一个新的世界。当前没有可展示的虚构进度。" action={<button className="button button-primary" onClick={onSelectWorld}>前往世界库 <Icon name="arrow-right" size={16} /></button>} />
+  const clock = view?.branch.current_tick ?? world.current_tick
+  const clockTick = /^-?\d+$/.test(clock) ? BigInt(clock) : null
+  const calendar = view?.state.calendar
   return <section className="play-page scene-play page-enter">
     <div className="play-topline">
       <h1>{world.title}</h1>
@@ -382,7 +385,9 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
     <div className="play-statusbar">
       <span className="statusbar-dot" /><span>本地世界</span><span className="status-divider" />
       <span>{branchId ? '分支 ' + branchId.slice(0, 8) : '分支待创建'}</span>
-      <span className="status-divider" /><span>{view?.branch.current_tick ?? world.current_tick} tick</span>
+      <span className="status-divider" /><span title={clockTick === null ? undefined : `${clock} 世界秒`}>
+        {formatWorldRelativeTick(clockTick, calendar?.day_seconds ?? 0, calendar?.year_days ?? 0)}
+      </span>
       {view?.world.world_mode === 'story' && <span className="status-version">有主线世界</span>}
       <span className="statusbar-spacer" /><span className="status-version">版本 {view?.world.state_version ?? world.state_version}</span>
     </div>
@@ -455,7 +460,7 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
                   {message.elapsedTicks === '0' && <small className="message-no-time">时间未推进</small>}
                   {message.elapsedTicks && /^[1-9]\d*$/.test(message.elapsedTicks) && (
                     <small title={`${message.elapsedTicks} 世界秒`}>
-                      已推进 {formatWorldDuration(BigInt(message.elapsedTicks), view?.state.calendar?.day_seconds ?? 0, view?.state.calendar?.year_days ?? 0)}
+                      已推进 {formatWorldDuration(BigInt(message.elapsedTicks), calendar?.day_seconds ?? 0, calendar?.year_days ?? 0)}
                     </small>
                   )}
                   {message.delivery === 'pending' && <small>等待确认</small>}

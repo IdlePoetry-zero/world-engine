@@ -62,6 +62,7 @@ from .accusation_repair_decisions import (
 )
 from .conversation import ConversationApplication, PUBLIC_ACCUSATION_CORRECTION_FEEDBACK, RELATIONSHIP_DISCLOSURE_FEEDBACK
 from .consumption_chat import consumption_message_key, consumption_queue_reply
+from .stationary_chat import stationary_message_key, stationary_queue_reply
 from .errors import ApplicationFailure, InvalidDialogueReply
 from .evidence_destruction_chat import evidence_destruction_matches
 from .institutional_credit_chat import credit_action_matches_context, reserve_mobilization_matches_context
@@ -776,15 +777,28 @@ class RulesActionDispatcher:
                 speed=request.profile.speed, depth=request.profile.depth, expected_state_version=version,
             )
             return consumption_queue_reply(request.request_id, job)
-        if action.kind == "move" and resolution.outcome.code in {
+        hit_world_boundary = resolution.outcome.code in {
             "scheduled_event_due", "scheduled_boundary_required",
             "lifespan_expiry_pending", "lifespan_boundary_required",
             "background_deprivation_pending", "background_boundary_required",
             "npc_action_due", "npc_action_boundary",
-        }:
+        }
+        if action.kind == "move" and hit_world_boundary:
             return enqueue_travel_for_move(
                 scope, view, request, action, self.simulation_jobs, self.engine,
             )
+        if action.kind in {"wait", "idle", "rest"} and (
+            hit_world_boundary or resolution.elapsed_ticks > view.state.calendar.day_seconds
+        ):
+            start = view.state.current_tick
+            job = self.simulation_jobs.enqueue(
+                scope, request.world_id, request.branch_id,
+                LongActionPlan(actor_id=request.actor_id, activity="rest" if action.kind == "rest" else "wait",
+                               started_tick=start, target_tick=start + action.duration_ticks, stationary_only=True),
+                idempotency_key=stationary_message_key(scope, request.request_id),
+                speed=request.profile.speed, depth=request.profile.depth, expected_state_version=version,
+            )
+            return stationary_queue_reply(request.request_id, job)
         # Raw details and events can contain facts outside the player's view.
         status = resolution.outcome.status
         feedback = {

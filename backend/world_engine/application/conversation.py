@@ -39,6 +39,7 @@ from .relationship_decisions import (
 )
 from .combat_truce_context import TRUCE_FEEDBACK, combat_truce_options
 from .consumption_chat import consumption_message_key, consumption_queue_reply
+from .stationary_chat import stationary_message_key, stationary_queue_reply
 from .cultivation_breakthrough_context import cultivation_breakthrough_feedback, cultivation_breakthrough_options
 from .gm_action_context import build_gm_action_context
 from .safe_conduct_context import safe_conduct_response_feedback
@@ -359,6 +360,11 @@ class ConversationApplication:
                 plan = consumption_job.payload.get("plan")
                 if isinstance(plan, dict) and plan.get("actor_id") == str(actor_id) and plan.get("activity") == "consume":
                     return {"status": "succeeded", "result": consumption_queue_reply(request_id, consumption_job)}
+            stationary_job = repository.find_job_by_key(scope, world_id, branch_id, stationary_message_key(scope, request_id))
+            if stationary_job is not None and stationary_job.job_type == "simulation.long_action":
+                plan = stationary_job.payload.get("plan")
+                if isinstance(plan, dict) and plan.get("actor_id") == str(actor_id) and plan.get("stationary_only") is True:
+                    return {"status": "succeeded", "result": stationary_queue_reply(request_id, stationary_job)}
             return None
         for event in committed.events:
             if (event.type == "core.private_gift_changed.v1"

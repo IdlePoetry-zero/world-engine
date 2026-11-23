@@ -823,7 +823,7 @@ def test_saved_work_routine_message_reuses_unique_schedule_and_does_not_advance_
         assert result["kind"] == "action"
         assert result["world_effect"] is False
         assert result["elapsed_ticks"] == "0"
-        assert "首班世界时刻为 12600" in result["content"]
+        assert "时限为 30 个世界日，首班为世界历第 1 年第 1 日 03:30" in result["content"]
         assert "每 1 个世界日重复一次" in result["content"]
         assert "工资账户余额 65" in result["content"]
 

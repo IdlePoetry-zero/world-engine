@@ -18,7 +18,7 @@ from world_engine.application.travel_chat import (
     travel_queue_reply,
 )
 from world_engine.application.worlds import WorldApplication
-from world_engine.domain.components import GoalRecord, NeedsComponent, PlaceComponent, PlaceRoute
+from world_engine.domain.components import GoalRecord, HealthComponent, NeedsComponent, PlaceComponent, PlaceRoute
 from world_engine.domain.models import (
     AccessScope,
     CommandEnvelope,
@@ -61,6 +61,7 @@ def _create_world(
     water_stock: str | None = None,
     water_value: int = 10,
     npc_training: bool = False,
+    injured: bool = False,
 ):
     actor_id, origin_id, destination_id = _id(1), _id(2), _id(3)
     routes = [
@@ -143,6 +144,10 @@ def _create_world(
         )
         resources[_id(9)] = ResourceAccount(resource_id="core.water", balance="0", account_type="consumption_sink")
 
+    if injured:
+        actor = actor.model_copy(update={"components": actor.components | {
+            "health": HealthComponent(current=5, maximum=10).model_dump(mode="json"),
+        }})
     state = WorldState(
         current_tick=0,
         player_id=actor_id,
@@ -278,6 +283,70 @@ def _request(created, actor_id, *, request_id=None):
         mode="action",
         text="现在沿路线前往目的地。",
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("activity", ["wait", "rest", "idle"])
+async def test_stationary_chat_preserves_intent_and_elapsed_recovery_across_short_boundary(tmp_path, monkeypatch, activity):
+    database, repo, scope, created, ids = _create_world(tmp_path, promise_boundary=True, water_stock="2", injured=True)
+    try:
+        actor, world, branch = ids["actor"], created.world.world_id, created.branch.branch_id
+        calls = []
+
+        class Models:
+            async def generate(self, scope, request):
+                calls.append(request.role_task)
+                return SimpleNamespace(normalized_output={
+                    "action": {"kind": activity, "duration_ticks": 7200}, "clarification": "",
+                })
+
+        models = Models()
+        actions = RulesActionDispatcher(repo, models, RuleEngine(), ACTION_INTENT_ADAPTER, RuleContext)
+        chat = ConversationApplication(WorldApplication(repo, None), models,
+                                       ConversationStore(OperationsStore(tmp_path / "ops.db")), actions=actions)
+        message = _request(created, actor).model_copy(update={"text": "现在休息两小时。" if activity == "rest" else "原地等两个小时。"})
+
+        def interrupted_finish(*args, **kwargs):
+            raise SimulatedProcessLoss("Lost the acknowledgment after the job committed")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(chat.store, "finish", interrupted_finish)
+            with pytest.raises(SimulatedProcessLoss):
+                await chat.send(scope, message)
+        assert chat.store.recover_inflight() == 1
+        reply = await chat.send(scope, message)
+        assert calls == [RoleTask.INTENT] and reply["elapsed_ticks"] == "0"
+        job_id = UUID(reply["job_id"])
+        assert repo.read_job(scope, job_id).payload["plan"]["stationary_only"] is True
+        initial = repo.read_world(scope, world, branch)
+        due, = initial.state.scheduled_events
+        lease = repo.claim_job("stationary-window")
+        assert lease and lease.job_id == job_id
+        jobs = SimulationJobs(repo)
+        assert jobs.advance(scope, lease).next_tick == due.due_tick < 60
+        interrupted = repo.read_world(scope, world, branch)
+        assert interrupted.state.entities[actor].components["health"]["current"] == 5
+        repo.control_job(scope, job_id, "pause")
+        repo.control_job(scope, job_id, "resume")
+        lease = repo.claim_job("stationary-window-restored")
+        assert lease and lease.job_id == job_id
+        for _ in range(12):
+            jobs.advance(scope, lease)
+            job = repo.read_job(scope, job_id)
+            if job.status is JobStatus.SUCCEEDED:
+                break
+            assert job.status is JobStatus.RUNNING, job.result
+        else:
+            pytest.fail("The requested station time did not finish")
+        final = repo.read_world(scope, world, branch)
+        assert final.state.current_tick == 7200 and final.state.entities[actor].location_id == ids["origin"]
+        assert final.state.relationship_promises[0].status == "breached"
+        assert final.state.resources[_id(8)].balance == 2
+        assert final.state.entities[actor].components["health"]["current"] == (6 if activity == "rest" else 5)
+        assert await chat.send(scope, message) == reply
+        assert repo.replay(scope, world, branch, from_genesis=True).state_hash == final.state_hash
+    finally:
+        database.dispose()
 
 
 @pytest.mark.asyncio

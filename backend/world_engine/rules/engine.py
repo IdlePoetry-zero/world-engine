@@ -1022,7 +1022,7 @@ class RuleEngine:
 
     def _stationary_action(
         self, state: WorldState, actor: WorldEntity, action: ConsumeIntent | RestIntent | WaitIntent,
-        context: RuleContext,
+        context: RuleContext, *, rest_start_tick: int | None = None,
     ) -> RuleResolution:
         delay = None
         journey = None if context.travelling_window or actor.location_id is not None else active_travel_journey(state, actor.id)
@@ -1047,8 +1047,8 @@ class RuleEngine:
             state = apply_event(state, delay)
         if isinstance(action, ConsumeIntent):
             result = self._consume(state, actor, action, context)
-        elif isinstance(action, RestIntent):
-            result = self._rest(state, actor, action, context)
+        elif isinstance(action, RestIntent) or rest_start_tick is not None:
+            result = self._rest(state, actor, action.duration_ticks, context, rest_start_tick=rest_start_tick)
         else:
             result = self._wait(state, actor, action, context)
         if delay is not None and result.elapsed_ticks:
@@ -1440,6 +1440,21 @@ class RuleEngine:
         except Exception as exc:
             return self._rejected(context, "background_choices_invalid", str(exc))
         return self.evaluate(state, intent, background_context)
+
+    def evaluate_rest_window(
+        self, state: WorldState, *, started_tick: int, duration: int, context: RuleContext,
+        choices: Iterable[BackgroundAgentChoice],
+    ) -> RuleResolution:
+        """Apply a host-authorized slice of one explicit, continuous rest interval."""
+        actor = state.entities.get(context.actor_id)
+        if (actor is None or actor.kind not in {"person", "character"} or actor.status != "active"
+            or actor.id in occupied_npc_ids(state, state.current_tick)):
+            return self._rejected(context, "rest_actor_unavailable", "The character cannot rest at this boundary.")
+        if context.simulation_command_id is None or started_tick > state.current_tick or duration < 1:
+            return self._rejected(context, "rest_window_invalid", "The rest slice must belong to a running simulation.")
+        background_context = self._context_with_background_choices(context, choices, include_actor=False)
+        return self._stationary_action(state, actor, WaitIntent(duration_ticks=duration), background_context,
+                                       rest_start_tick=started_tick)
 
     def resolve_background_window(
         self,
@@ -4818,18 +4833,23 @@ class RuleEngine:
             )],
         )
 
-    def _rest(self, state: WorldState, actor: WorldEntity, intent: RestIntent, context: RuleContext) -> RuleResolution:
-        issue = self._duration_issue(state, actor, intent.duration_ticks)
+    def _rest(
+        self, state: WorldState, actor: WorldEntity, duration: int, context: RuleContext, *, rest_start_tick: int | None = None,
+    ) -> RuleResolution:
+        issue = self._duration_issue(state, actor, duration)
         if issue is not None:
             return self._rejected(context, *issue)
         component_event, deprivation = self._time_need_effects(
-            state, actor, intent.duration_ticks, context, rest_delta=-1
+            state, actor, duration, context, rest_delta=-1
         )
         events: list[DomainEvent] = [item for item in (component_event,) if item is not None]
         health = self._health(actor)
         health_restored = False
         if health is not None and health.current < health.maximum:
-            amount = min(1_000_000, health.maximum - health.current, intent.duration_ticks // (2 * _HOUR_SECONDS))
+            elapsed = 0 if rest_start_tick is None else state.current_tick - rest_start_tick
+            recovery_period = 2 * _HOUR_SECONDS
+            periods = (elapsed + duration) // recovery_period - elapsed // recovery_period
+            amount = min(1_000_000, health.maximum - health.current, periods)
             if amount > 0:
                 events.append(
                     HealthRestoredEvent(
@@ -4847,7 +4867,7 @@ class RuleEngine:
                     update={"expected_health_revision": deprivation.expected_health_revision + 1}
                 )
             events.append(deprivation)
-        life_event = self._lifespan_event(state, actor, intent.duration_ticks, context, events)
+        life_event = self._lifespan_event(state, actor, duration, context, events)
         if life_event is not None:
             events.append(life_event)
         status, code, message = "succeeded", "rested", "The character rested and recovered some rest need."
@@ -4857,7 +4877,7 @@ class RuleEngine:
             status, code, message = "partial", "survival_pressure", "The character rested while hunger or thirst caused injury."
         return self._resolution(
             state, context, status=status, code=code, message=message,
-            details={"duration_seconds": intent.duration_ticks}, elapsed_ticks=intent.duration_ticks, events=events,
+            details={"duration_seconds": duration}, elapsed_ticks=duration, events=events,
         )
 
     def _wait(self, state: WorldState, actor: WorldEntity, intent: WaitIntent, context: RuleContext) -> RuleResolution:

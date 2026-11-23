@@ -68,6 +68,12 @@ Leased travel saves a departure with the route, endpoints, departure tick and pl
 
 对话回执显示已经提交的推进时长。它与长行动面板共用格式，按世界包的日长和年长显示时间，原始值以精确整数保留。
 
+### 对话中的等待和休息
+
+玩家明确等待或休息时，若期间有世界边界，或时长超过一个世界日，聊天会创建一个固定时窗作业。原请求在整个时窗继续生效。独立事件可以打断并结算，角色不会因此改做其他活动或代为消耗补给。跨分段的休息仍从最初的实际休息时刻累计，每满两小时才按规则恢复生命值。验收覆盖不到一分钟的首段、掉线后恢复同一作业、授权时长上限以及库存和创世回放。
+
+试玩顶部显示世界历日期，对话确认「照常上班一个月」时也用世界日和班次时刻。需要排查顺序时，可查看界面悬停显示的世界秒。
+
 The separation between a traveller's waiting process and other processes that may wake or interrupt it follows SimPy's discrete-event process model. [SimPy process interaction](https://simpy.readthedocs.io/en/latest/topical_guides/process_interaction.html)
 
 ## 聊天与面板的持续工作验收
