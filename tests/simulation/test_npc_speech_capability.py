@@ -152,6 +152,40 @@ def test_preflight_only_accepts_known_same_scene_targets_and_keeps_player_contro
     assert far.proposed_events == ()
 
 
+def test_reciprocal_speech_requires_an_unanswered_memory_held_by_the_replying_actor():
+    place = WorldEntity(id=uuid4(), kind="place", name="Meeting room")
+    first, second, bystander = [
+        WorldEntity(id=uuid4(), kind="character", name=name, location_id=place.id)
+        for name in ("First", "Second", "Bystander")
+    ]
+    state = WorldState(entities={entity.id: entity for entity in (place, first, second, bystander)})
+    greeting = preflight_npc_plan_step(state, first.id, _step({
+        "target_ids": [str(second.id)], "utterance": "Can we discuss the delivery?",
+    }), _context(first.id))
+    memory, = greeting.proposed_events
+    heard = apply_event(state, memory)
+    arguments = {
+        "target_ids": [str(first.id)], "utterance": "Yes, let's discuss it.",
+        "reply_to_memory_id": str(memory.record.id),
+    }
+    stolen = preflight_npc_plan_step(heard, bystander.id, _step(arguments), _context(bystander.id))
+    assert stolen.resolution.outcome.code == "speech_reply_unavailable"
+    assert not stolen.proposed_events
+
+    reply = preflight_npc_plan_step(heard, second.id, _step(arguments), _context(second.id))
+    assert reply.status == "instant"
+    exchanged = heard
+    for event in reply.proposed_events:
+        exchanged = apply_event(exchanged, event)
+    assert len(exchanged.relations) == 2
+    assert all(row.dimensions == {"familiarity": 1} for row in exchanged.relations)
+    assert all(row.evidence_refs == [reply.proposed_events[0].event_id] for row in exchanged.relations)
+
+    repeated = preflight_npc_plan_step(exchanged, second.id, _step(arguments), _context(second.id))
+    assert repeated.resolution.outcome.code == "speech_reply_unavailable"
+    assert not repeated.proposed_events
+
+
 class FakeModels:
     def __init__(self, output: object):
         self.output = output

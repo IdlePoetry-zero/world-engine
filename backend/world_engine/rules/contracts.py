@@ -63,11 +63,17 @@ class SpeakIntent(IntentModel):
         json_schema_extra={"uniqueItems": True},
     )
     utterance: str = Field(min_length=1, max_length=1200)
+    reply_to_memory_id: UUID | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+        description="A known private utterance from the named recipient. A first reciprocal reply increases familiarity.",
+    )
 
     @model_validator(mode="after")
     def recipients_are_unique(self) -> SpeakIntent:
         if len(self.target_ids) != len(set(self.target_ids)):
             raise ValueError("speech recipients must be unique")
+        if self.reply_to_memory_id is not None and len(self.target_ids) != 1:
+            raise ValueError("a private reply must name only the original speaker")
         return self
 
 

@@ -896,12 +896,20 @@ class KnowledgeRecord(ComponentModel):
     relationship_disclosure: RelationshipDisclosureReceipt | None = Field(
         default=None, exclude_if=lambda value: value is None,
     )
+    speech_reply_to: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
     visibility: VisibilityScope = Field(default_factory=VisibilityScope)
 
     @model_validator(mode="after")
     def has_knowledge_owner(self) -> KnowledgeRecord:
         if self.owner_id is None and self.holder_id is None:
             raise ValueError("knowledge requires an owner_id or holder_id")
+        if self.speech_reply_to is not None and (
+            self.kind != "memory" or self.owner_id is None or self.holder_id is None
+            or self.owner_id == self.holder_id or self.subject_id != self.owner_id or self.speech_reply_to == self.id
+            or self.visibility.policy != "subject_ids"
+            or set(self.visibility.subject_ids) != {self.owner_id, self.holder_id}
+        ):
+            raise ValueError("a speech reply must be a pair-private memory")
         if self.disclosure_policy == "if_asked" and (
             self.holder_id is None
             or self.kind not in {"belief", "claim", "rumor"}

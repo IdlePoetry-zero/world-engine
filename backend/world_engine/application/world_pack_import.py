@@ -12,6 +12,11 @@ from pydantic import ValidationError
 from world_engine import __version__
 from world_engine.domain.errors import Conflict, InvalidEvent, NotFound
 from world_engine.domain.models import AccessScope, NewWorld, WorldState
+from world_engine.domain.npc_plan_review import (
+    NPC_PLAN_REVIEW_HANDLER_ID,
+    npc_plan_review_schedule_id,
+    validate_npc_plan_review_schedule,
+)
 from world_engine.domain.story_nodes import STORY_OPENING_METADATA
 from world_engine.rules.versions import LEGACY_RULESET_VERSION, SUPPORTED_RULESET_VERSIONS
 
@@ -22,6 +27,30 @@ from .worlds import WorldApplication
 
 
 _IMPORT_NAMESPACE = UUID("388591b1-a102-472c-b181-e31ba09cb888")
+
+
+def _bind_npc_review_schedules(state: WorldState, world_id: UUID) -> WorldState:
+    """Give portable NPC review schedules their IDs in the new world's namespace."""
+    bound_ids = {}
+    try:
+        for schedule in state.scheduled_events:
+            if schedule.handler_id == NPC_PLAN_REVIEW_HANDLER_ID:
+                actor_id = UUID(str(schedule.payload.get("actor_id")))
+                bound_id = npc_plan_review_schedule_id(world_id, actor_id)
+                validate_npc_plan_review_schedule(state, schedule.model_copy(update={"id": bound_id}), world_id)
+                bound_ids[schedule.id] = bound_id
+        if not bound_ids:
+            return state
+        schedules = [
+            schedule.model_copy(update={
+                "id": bound_ids.get(schedule.id, schedule.id),
+                "dependencies": [bound_ids.get(dependency, dependency) for dependency in schedule.dependencies],
+            })
+            for schedule in state.scheduled_events
+        ]
+        return WorldState.model_validate(state.model_dump(mode="python") | {"scheduled_events": schedules})
+    except (InvalidEvent, ValueError) as exc:
+        raise InvalidEvent("世界包中的 NPC 计划排程无法在新存档中登记。") from exc
 
 
 @dataclass(frozen=True)
@@ -224,7 +253,10 @@ class WorldPackApplication:
         if opening_id is None:
             metadata.pop(STORY_OPENING_METADATA, None)
         metadata["world_pack_archive_sha256"] = digest
-        state = draft.state.model_copy(update={"metadata": metadata})
+        try:
+            state = _bind_npc_review_schedules(draft.state, world_id).model_copy(update={"metadata": metadata})
+        except InvalidEvent as exc:
+            raise ApplicationFailure("WORLD_PACK_INCOMPATIBLE", str(exc), status_code=422) from exc
         world = draft.model_copy(update={
             "state": state, "world_id": world_id, "branch_id": uuid5(world_id, "main"),
         })

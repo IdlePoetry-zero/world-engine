@@ -5704,6 +5704,8 @@ def route_access_reason(
         return "destination_unavailable", "The route destination is not a registered place."
     if destination.status in {"dead", "retired"}:
         return "destination_unavailable", "The route destination is retired."
+    if destination.status == "closed":
+        return "destination_unavailable", "The route destination is closed."
     if destination.components.get("hidden") is True and destination.id not in _observed_entities(state, actor.id):
         return "destination_unseen", "The character has not discovered that destination."
     world_travel = state.metadata.get("travel")

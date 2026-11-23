@@ -71,6 +71,7 @@ from world_engine.rules.contracts import (
     RuleContext,
 )
 from world_engine.rules.engine import RuleEngine, route_access_reason
+from world_engine.rules.speech import private_reply_available
 from world_engine.simulation.npc_capabilities import (
     NpcCapability,
     NpcCapabilityPreflight,
@@ -674,6 +675,13 @@ def _decision_context(
         "local_work_postings": projection.get("local_work_postings", [])[:32],
         "calendar": projection.get("calendar", {}),
     }
+    visible_relations = [
+        {key: row[key] for key in ("to_id", "dimensions", "label") if key in row}
+        for row in projection.get("relations", [])
+        if row.get("from_id") == self_id and row.get("to_id") in bounded_entities
+    ][:24]
+    if visible_relations:
+        safe_view["own_local_relationships"] = visible_relations
     allowed_goal_ids = {goal.id for goal in goals}
     prerequisite_ids = {
         condition.target_id for goal in goals for condition in goal.conditions[:8]
@@ -695,6 +703,25 @@ def _decision_context(
         )
         if getattr(record.visibility, "policy", None) != "author_only"
     ][-64:]
+    private_replies = []
+    answered = {item.speech_reply_to for item in state.knowledge if item.speech_reply_to is not None}
+    known_record_ids = {row["id"] for row in known_records}
+    for record in reversed(knowledge.known_records):
+        if str(record.id) not in known_record_ids or record.holder_id != actor.id:
+            continue
+        person = state.entities.get(record.owner_id)
+        if (
+            person is None or person.status != "active" or actor.location_id is None or person.location_id != actor.location_id
+            or not private_reply_available(
+                record, speaker_id=actor.id, recipient_id=person.id, tick=state.current_tick, answered=answered,
+            )
+            or not entity_visible_to_actor(state, actor.id, person.id)
+            or not entity_visible_to_actor(state, person.id, actor.id)
+        ):
+            continue
+        private_replies.append({"memory_id": str(record.id), "speaker_id": str(person.id)})
+        if len(private_replies) == 12:
+            break
     commitments = _own_known_commitments(state, actor.id, knowledge.known_relations)
     known_places = sorted(_known_places(state, actor, knowledge), key=str)[:128]
     local_routes = _known_local_routes(state, actor)
@@ -719,6 +746,8 @@ def _decision_context(
     }
     if personality.locked_fields:
         context["fixed_personality"] = personality.model_dump(mode="json", include=set(personality.locked_fields))
+    if private_replies:
+        context["private_reply_options"] = private_replies
     # Candidate goals already include their direct goal_completed conditions
     # and the current status/tick of those prerequisites. Deeper edges are
     # explanatory only; they never extend allowed_goal_ids.
@@ -1358,6 +1387,12 @@ def _model_request(
         system_content += (
             "取舍须符合 fixed_personality 中给出的人格倾向、特质和价值观。"
             "角色仍根据自己的目标和已知资料选择。不要转述内部档案、分数或锁定机制，也不要据此添加事实。"
+        )
+    if "private_reply_options" in context:
+        system_content += (
+            "private_reply_options 列出在场人物曾对你说过、仍未正式答复的私话，原话可按 memory_id 查 known_records。"
+            "如果人物愿意回应其中与你的目标相关的一句，可用 world.action.speak.v1，"
+            "将 speaker_id 作为唯一 target_ids，另填 reply_to_memory_id。回应不代表同意任何条件。"
         )
     if "goal_prerequisite_edges" in context:
         system_content += (

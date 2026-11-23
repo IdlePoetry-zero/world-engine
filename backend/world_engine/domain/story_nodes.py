@@ -121,11 +121,17 @@ class StoryTransfer(_StoryModel):
         return self
 
 
+class StoryCapabilityAward(_StoryModel):
+    actor_id: UUID
+    capability: ResourceName
+
+
 class StoryOutcome(_StoryModel):
     key: _Key
     effect: _Effect
     summary: _Summary
     transfer: StoryTransfer | None = Field(default=None, exclude_if=lambda value: value is None)
+    awards: tuple[StoryCapabilityAward, ...] = Field(default=(), max_length=8, exclude_if=lambda rows: not rows)
 
 
 class StoryVariant(_StoryModel):
@@ -133,11 +139,21 @@ class StoryVariant(_StoryModel):
     when: tuple[StoryGate, ...] = Field(min_length=1, max_length=12)
 
 
+class StoryEnrollment(_StoryModel):
+    organization_id: UUID
+    actor_id: UUID
+    leader: StrictBool = False
+
+
 class StoryNode(_StoryModel):
     title: Annotated[str, StringConstraints(min_length=1, max_length=160)]
     visibility: Literal["public", "author_only"]
     references: tuple[WorldBookCitation, ...] = Field(default=(), max_length=4)
     participant_ids: tuple[UUID, ...] = Field(default=(), max_length=24)
+    opens_place_ids: tuple[UUID, ...] = Field(default=(), max_length=32, exclude_if=lambda ids: not ids)
+    opens_organization_ids: tuple[UUID, ...] = Field(default=(), max_length=16, exclude_if=lambda ids: not ids)
+    reveals_entry_ids: tuple[UUID, ...] = Field(default=(), max_length=64, exclude_if=lambda ids: not ids)
+    enrollments: tuple[StoryEnrollment, ...] = Field(default=(), max_length=32, exclude_if=lambda rows: not rows)
     prevention_possible: StrictBool = False
     variants: tuple[StoryVariant, ...] = Field(default=(), max_length=8)
     fallback: StoryOutcome
@@ -147,11 +163,23 @@ class StoryNode(_StoryModel):
         outcomes = [self.fallback, *(variant.outcome for variant in self.variants)]
         if len({outcome.key for outcome in outcomes}) != len(outcomes):
             raise ValueError("Story outcome keys must be unique within a milestone.")
+        for identifiers in (self.opens_place_ids, self.opens_organization_ids, self.reveals_entry_ids):
+            if len(set(identifiers)) != len(identifiers):
+                raise ValueError("A story milestone must reference distinct places, organizations, and entries.")
+        if len({(row.organization_id, row.actor_id) for row in self.enrollments}) != len(self.enrollments):
+            raise ValueError("Story enrollments must be distinct.")
+        leaders = [row.organization_id for row in self.enrollments if row.leader]
+        if len(set(leaders)) != len(leaders):
+            raise ValueError("A single story milestone cannot appoint multiple leaders for one organization.")
         if self.fallback.effect not in {"occurred", "inapplicable"} or self.fallback.transfer is not None:
             raise ValueError("Intervention outcomes require explicit conditions.")
         if not self.prevention_possible and any(variant.outcome.effect in {"prevented", "inapplicable"}
                                                 for variant in self.variants):
             raise ValueError("An immutable milestone cannot be stopped by an intervention variant.")
+        for outcome in outcomes:
+            if (len({(award.actor_id, award.capability) for award in outcome.awards}) != len(outcome.awards)
+                    or outcome.awards and outcome.effect not in {"occurred", "mitigated"}):
+                raise ValueError("Capability awards require distinct recipients and a successful story outcome.")
         return self
 
 
@@ -210,6 +238,9 @@ class StoryMilestone(_StoryModel):
     resolved_tick: Tick
     outcome: _Key
     arrival_actor_ids: tuple[UUID, ...] = Field(default=(), max_length=256, exclude_if=lambda ids: not ids)
+    opened_place_ids: tuple[UUID, ...] = Field(default=(), max_length=32, exclude_if=lambda ids: not ids)
+    opened_organization_ids: tuple[UUID, ...] = Field(default=(), max_length=16, exclude_if=lambda ids: not ids)
+    revealed_entry_ids: tuple[UUID, ...] = Field(default=(), max_length=64, exclude_if=lambda ids: not ids)
     settlement_event_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
@@ -219,6 +250,10 @@ class StoryMilestoneResolvedEvent(_StoryModel):
     milestone: StoryMilestone
     arrival_world_id: UUID | None = Field(default=None, exclude_if=lambda ident: ident is None)
     transfer: StoryTransfer | None = Field(default=None, exclude_if=lambda value: value is None)
+    capability_awards: tuple[StoryCapabilityAward, ...] = Field(default=(), max_length=8, exclude_if=lambda rows: not rows)
+    organization_enrollments: tuple[StoryEnrollment, ...] = Field(
+        default=(), max_length=32, exclude_if=lambda rows: not rows,
+    )
     trigger_event_ids: tuple[UUID, ...] = Field(default=(), max_length=25, exclude_if=lambda ids: not ids)
     delivered_knowledge: tuple[KnowledgeRecord, ...] = Field(default=(), max_length=8, exclude_if=lambda rows: not rows)
     visibility: JsonObject = Field(default_factory=lambda: {"policy": "author_only"})
@@ -333,11 +368,30 @@ def _resolved_story_event(
     activation_gates: tuple[StoryGate, ...] = (),
 ) -> StoryMilestoneResolvedEvent:
     outcome = story_outcome(state, node)
+    activates = outcome.effect in {"occurred", "mitigated"}
+    opened_places = node.opens_place_ids if activates else ()
+    awards = tuple(
+        award for award in outcome.awards
+        if (actor := state.entities.get(award.actor_id)) is not None and actor.status == "active"
+        and award.capability not in actor.components.get("capabilities", {}).get("grants", ())
+        and award.capability not in actor.components.get("capabilities", {}).get("restrictions", ())
+    )
     arrivals = [
         arrival for arrival in state.story_arrivals
         if _arrival_matches(arrival, ident, outcome.key)
-        and state.entities[arrival.actor.location_id].status == "active"
+        and (state.entities[arrival.actor.location_id].status == "active" or arrival.actor.location_id in opened_places)
     ]
+    arrived_ids = {arrival.actor.id for arrival in arrivals}
+    enrollments = tuple(
+        row for row in node.enrollments
+        if activates
+        and ((actor := state.entities.get(row.actor_id)) is not None and actor.status == "active"
+             or row.actor_id in arrived_ids)
+        and ((organization := state.entities[row.organization_id]).status == "active"
+             or row.organization_id in node.opens_organization_ids)
+        and (str(row.actor_id) not in organization.components.get("governance", {}).get("members", ())
+             or row.leader and not organization.components.get("governance", {}).get("leader_id"))
+    )
     requires_review = any(arrival.review_delay_ticks is not None for arrival in arrivals)
     if requires_review and world_id is None:
         raise InvalidEvent("A story arrival with an NPC review must identify its world.")
@@ -367,10 +421,15 @@ def _resolved_story_event(
                 raise InvalidEvent("A dispatch must cite its committed source outcome.")
             knowledge = _dispatch_knowledge(state, followup, parent, event_id)
     return StoryMilestoneResolvedEvent(
-        event_id=event_id, transfer=outcome.transfer, arrival_world_id=world_id if requires_review else None,
+        event_id=event_id, transfer=outcome.transfer, capability_awards=awards,
+        organization_enrollments=enrollments,
+        arrival_world_id=world_id if requires_review else None,
         trigger_event_ids=trigger_event_ids, delivered_knowledge=knowledge,
         milestone=StoryMilestone(schedule_id=ident, resolved_tick=state.current_tick, outcome=outcome.key,
                                  arrival_actor_ids=tuple(arrival.actor.id for arrival in arrivals),
+                                 opened_place_ids=opened_places,
+                                 opened_organization_ids=node.opens_organization_ids if activates else (),
+                                 revealed_entry_ids=node.reveals_entry_ids if activates else (),
                                  settlement_event_id=event_id if trace else None),
     )
 
@@ -446,6 +505,39 @@ def validate_story_state(state: WorldState) -> None:
         if ((key in schedules and record.resolved_tick != schedules[key].due_tick) or record.resolved_tick > state.current_tick
                 or record.outcome not in allowed_outcomes[key]):
             raise ValueError("A story milestone receipt conflicts with its schedule.")
+    reserved_entities = set()
+    reserved_entries = set()
+    entries = {entry.entry_id: entry for entry in state.world_book_entries}
+    for key, node in nodes.items():
+        released_entities = (*node.opens_place_ids, *node.opens_organization_ids)
+        if reserved_entities.intersection(released_entities) or reserved_entries.intersection(node.reveals_entry_ids):
+            raise ValueError("A place, organization, or reference entry can only have one registered story opening.")
+        reserved_entities.update(released_entities)
+        reserved_entries.update(node.reveals_entry_ids)
+        receipt = records.get(key)
+        outcome = next((item for item in (node.fallback, *(variant.outcome for variant in node.variants))
+                        if receipt is not None and item.key == receipt.outcome), None)
+        activates = outcome is not None and outcome.effect in {"occurred", "mitigated"}
+        if receipt is not None and (
+            receipt.opened_place_ids != (node.opens_place_ids if activates else ())
+            or receipt.opened_organization_ids != (node.opens_organization_ids if activates else ())
+            or receipt.revealed_entry_ids != (node.reveals_entry_ids if activates else ())
+        ):
+            raise ValueError("A story opening receipt must match its registered story outcome.")
+        for identifiers, kinds in (
+            (node.opens_place_ids, {"place", "location"}),
+            (node.opens_organization_ids, {"organization", "polity", "faction", "company", "government"}),
+        ):
+            for ident in identifiers:
+                entity = state.entities.get(ident)
+                if entity is None or entity.kind not in kinds:
+                    raise ValueError("A story opening must reference a registered place or organization of the expected type.")
+                if not activates and (entity.status != "closed" or entity.components.get("hidden") is not True):
+                    raise ValueError("A staged place or organization must be closed and hidden until its story opening.")
+        for entry_id in node.reveals_entry_ids:
+            entry = entries.get(entry_id)
+            if entry is None or entry.visibility != ("public" if activates else "author_only"):
+                raise ValueError("A staged reference must stay private until its story opening.")
     arrivals = {arrival.actor.id: arrival for arrival in state.story_arrivals}
     if len(arrivals) != len(state.story_arrivals):
         raise ValueError("A character must have a single story arrival.")
@@ -469,6 +561,7 @@ def validate_story_state(state: WorldState) -> None:
             raise ValueError("An arrival receipt must match the registered story node and outcome.")
     relation_ids = set()
     goal_ids = set()
+    arrival_knowledge_ids = set()
     current_relations = {relation.id: relation for relation in state.relations} if arrivals else {}
     current_goals = {goal.id: goal for goal in state.goals} if arrivals else {}
     regular_entities = state.entities.keys() - arrivals.keys() if arrivals else set()
@@ -476,6 +569,20 @@ def validate_story_state(state: WorldState) -> None:
     if unborn_ids and any(schedule.handler_id == "npc.goal_review" and str(schedule.payload.get("actor_id")) in unborn_ids
                           for schedule in state.scheduled_events):
         raise ValueError("A staged character's NPC review is registered only on arrival.")
+    for arrival in state.story_arrivals:
+        expected_knowledge = {record.id for record in arrival.knowledge}
+        if len(expected_knowledge) != len(arrival.knowledge) or arrival_knowledge_ids & expected_knowledge:
+            raise ValueError("Arrival knowledge must have distinct reserved IDs.")
+        arrival_knowledge_ids.update(expected_knowledge)
+        for record in arrival.knowledge:
+            if record.subject_id is not None and record.subject_id not in known_entities:
+                raise ValueError("An arrival knowledge subject must be a registered entity.")
+    for record in state.knowledge:
+        if record.id in arrival_knowledge_ids:
+            arrival = arrivals.get(record.holder_id)
+            if (arrival is None or arrival.actor.id not in state.entities or record.source_event_id is None
+                    or not any(item.id == record.id for item in arrival.knowledge)):
+                raise ValueError("Arrival knowledge can only be created for an admitted actor.")
     for arrival in state.story_arrivals:
         for relation in arrival.relations:
             current = current_relations.get(relation.id)
@@ -528,6 +635,14 @@ def validate_story_state(state: WorldState) -> None:
             entity not in known_entities for entity in node.participant_ids
         ):
             raise ValueError("Story participants must reference distinct existing entities.")
+        if any((recipient := known_entities.get(award.actor_id)) is None or recipient.kind not in {"character", "person"}
+               for outcome in (node.fallback, *(variant.outcome for variant in node.variants)) for award in outcome.awards):
+            raise ValueError("A story capability award must reference a registered character.")
+        if any((organization := state.entities.get(row.organization_id)) is None
+               or "governance" not in organization.components
+               or (member := known_entities.get(row.actor_id)) is None or member.kind not in {"character", "person"}
+               for row in node.enrollments):
+            raise ValueError("A story enrollment must reference a governed organization and a registered character.")
         gates = [gate for variant in node.variants for gate in variant.when]
         if key in reactions:
             gates.extend(reactions[key].when)

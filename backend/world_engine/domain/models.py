@@ -262,6 +262,7 @@ class StoryArrival(ContractModel):
     actor: WorldEntity
     relations: tuple[RelationRecord, ...] = Field(default=(), max_length=24)
     goals: tuple[GoalRecord, ...] = Field(default=(), max_length=8)
+    knowledge: tuple[KnowledgeRecord, ...] = Field(default=(), max_length=16, exclude_if=lambda records: not records)
     review_delay_ticks: Annotated[int, Field(strict=True, gt=0, le=2**63 - 1)] | None = None
 
     @model_validator(mode="after")
@@ -277,6 +278,15 @@ class StoryArrival(ContractModel):
         for relation in self.relations:
             if actor.id not in {relation.from_id, relation.to_id} or relation.evidence_refs or relation.obligations:
                 raise ValueError("Arrival relationships must involve the arriving actor and may only seed dimensions.")
+        for record in self.knowledge:
+            if (record.holder_id != actor.id or record.owner_id is not None
+                    or record.subject_id not in {None, actor.id}
+                    or record.visibility.policy != "private" or record.visibility.subject_ids != [actor.id]
+                    or record.source_event_id is not None or record.source_refs
+                    or record.disclosure_policy != "never" or record.disclosure is not None
+                    or record.relationship_disclosure is not None or record.assessment is not None
+                    or not record.provenance or any(source.kind != "pack" for source in record.provenance)):
+                raise ValueError("Arrival knowledge must be a private, source-backed record held by the arriving actor.")
         if self.review_delay_ticks is not None and not self.goals:
             raise ValueError("An arrival review requires authored actor goals.")
         if any(goal.owner_id != actor.id or goal.status != "active" or goal.evidence_refs or goal.progress
@@ -470,6 +480,7 @@ class WorldState(ContractModel):
                 raise ValueError(f"relation {relation.id} has a future updated_tick")
         knowledge_ids: set[UUID] = set()
         knowledge_by_id: dict[UUID, KnowledgeRecord] = {}
+        replied_speech_ids: set[UUID] = set()
         relationship_disclosure_keys: set[tuple[UUID, int, UUID, UUID]] = set()
         for record in self.knowledge:
             if record.id in knowledge_ids:
@@ -481,6 +492,16 @@ class WorldState(ContractModel):
                     raise ValueError(f"knowledge {record.id} references a missing entity")
             if record.received_tick > self.current_tick:
                 raise ValueError(f"knowledge {record.id} has a future received_tick")
+            if record.speech_reply_to is not None:
+                parent = knowledge_by_id.get(record.speech_reply_to)
+                if (parent is None or parent.kind != "memory" or parent.owner_id != record.holder_id
+                        or parent.holder_id != record.owner_id or parent.subject_id != parent.owner_id
+                        or parent.received_tick > record.received_tick
+                        or parent.visibility.policy != "subject_ids"
+                        or set(parent.visibility.subject_ids) != {record.owner_id, record.holder_id}
+                        or parent.id in replied_speech_ids):
+                    raise ValueError("a private speech reply must refer to an unanswered earlier utterance by its recipient")
+                replied_speech_ids.add(parent.id)
             receipt = record.relationship_disclosure
             if receipt is not None:
                 key = (

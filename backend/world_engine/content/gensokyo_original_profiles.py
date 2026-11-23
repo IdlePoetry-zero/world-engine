@@ -21,7 +21,10 @@ def source_register() -> dict[str, dict[str, str]]:
     return {source_id(number): {
         "work": f"ZUN《{title}》正式版附带文档",
         "url": "https://omake.thwiki.cc/translate/" + quote(f"{title}_{stem}.ja.txt"),
-        "official_work_page": f"https://touhou-project.news/titles/th{number:02}/",
+        "official_work_page": (
+            "https://store.steampowered.com/app/3671710/?l=japanese" if number == 20
+            else f"https://touhou-project.news/titles/th{number:02}/"
+        ),
         "host": "第三方留存的日文原文",
     } for number, (title, stem) in WORKS.items()}
 

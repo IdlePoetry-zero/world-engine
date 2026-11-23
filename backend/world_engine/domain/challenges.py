@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StringConstraints
 from .components import CapabilitiesComponent, ExactDecimal, KnowledgeRecord, ResourceName, SkillsComponent, Tick, VisibilityScope
 from .errors import InvalidEvent
 from .json_types import JsonObject
-from .story_nodes import StoryTransfer, transfer_is_affordable
+from .story_nodes import STORY_NODE_HANDLER, StoryTransfer, transfer_is_affordable
 
 if TYPE_CHECKING:
     from .models import WorldState
@@ -46,6 +46,8 @@ class ChallengeDefinition(_ChallengeModel):
         default=None, exclude_if=lambda value: value is None,
     )
     required_note_from: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
+    opens_after_story_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
+    closes_after_story_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class ChallengeAttempt(_ChallengeModel):
@@ -66,7 +68,11 @@ class ChallengeResolvedEvent(_ChallengeModel):
 def _available_at_venue(state: WorldState, actor_id: UUID, definition: ChallengeDefinition) -> bool:
     actor = state.entities.get(actor_id)
     venue = state.entities.get(definition.venue_id)
-    return (actor is not None and actor.kind in {"person", "character"} and actor.status == "active"
+    story_bounds = {item for item in (definition.opens_after_story_id, definition.closes_after_story_id) if item is not None}
+    settled = {row.schedule_id for row in state.story_milestones if row.schedule_id in story_bounds} if story_bounds else set()
+    return ((definition.opens_after_story_id is None or definition.opens_after_story_id in settled)
+            and definition.closes_after_story_id not in settled
+            and actor is not None and actor.kind in {"person", "character"} and actor.status == "active"
             and actor.location_id == definition.venue_id and venue is not None and venue.status == "active"
             and venue.components.get("hidden") is not True)
 
@@ -157,7 +163,13 @@ def validate_challenge_state(state: WorldState) -> None:
     if len(definitions) != len(state.challenges):
         raise ValueError("Challenge identifiers must be unique.")
     prerequisites = TopologicalSorter()
+    story_nodes = {row.id for row in state.scheduled_events if row.handler_id == STORY_NODE_HANDLER}
+    story_nodes.update(row.reaction_id for row in state.story_reactions)
+    story_nodes.update(row.followup_id for row in state.story_followups)
     for row in state.challenges:
+        timing = [item for item in (row.opens_after_story_id, row.closes_after_story_id) if item is not None]
+        if len(set(timing)) != len(timing) or not set(timing).issubset(story_nodes):
+            raise ValueError("Challenge story bounds must reference distinct registered milestones.")
         venue = state.entities.get(row.venue_id)
         if venue is None or venue.kind not in {"place", "location"}:
             raise ValueError("A challenge venue must be a registered place.")

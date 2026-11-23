@@ -3184,11 +3184,48 @@ def _story_resolution_updates(
     }
     if event.delivered_knowledge:
         updates["knowledge"] = [*state.knowledge, *event.delivered_knowledge]
+    entities = state.entities
+    opened_entities = (*milestone.opened_place_ids, *milestone.opened_organization_ids)
+    if opened_entities:
+        entities = dict(entities)
+        for entity_id in opened_entities:
+            entity = entities[entity_id]
+            components = {key: value for key, value in entity.components.items() if key != "hidden"}
+            entities[entity_id] = entity.model_copy(update={"status": "active", "components": components})
+        updates["entities"] = entities
+    if event.capability_awards:
+        entities = dict(entities)
+        for award in event.capability_awards:
+            actor = entities[award.actor_id]
+            capabilities = CapabilitiesComponent.model_validate(actor.components.get("capabilities", {}))
+            updated = capabilities.model_copy(update={"grants": [*capabilities.grants, award.capability]})
+            entities[actor.id] = actor.model_copy(update={
+                "components": actor.components | {"capabilities": updated.model_dump(mode="json")},
+            })
+        updates["entities"] = entities
+    if event.organization_enrollments:
+        entities = dict(entities)
+        for enrollment in event.organization_enrollments:
+            organization = entities[enrollment.organization_id]
+            governance = GovernanceComponent.model_validate(organization.components["governance"])
+            members = list(dict.fromkeys([*governance.members, enrollment.actor_id]))
+            leader = governance.leader_id or (enrollment.actor_id if enrollment.leader else None)
+            governance = governance.model_copy(update={"members": members, "leader_id": leader})
+            entities[organization.id] = organization.model_copy(update={
+                "components": organization.components | {"governance": governance.model_dump(mode="json")},
+            })
+        updates["entities"] = entities
+    if milestone.revealed_entry_ids:
+        revealed = set(milestone.revealed_entry_ids)
+        updates["world_book_entries"] = [
+            entry.model_copy(update={"visibility": "public"}) if entry.entry_id in revealed else entry
+            for entry in state.world_book_entries
+        ]
     if not milestone.arrival_actor_ids:
         return updates
     new_ids = set(milestone.arrival_actor_ids)
     arrivals = [arrival for arrival in state.story_arrivals if arrival.actor.id in new_ids]
-    entities = state.entities | {arrival.actor.id: arrival.actor for arrival in arrivals}
+    entities = entities | {arrival.actor.id: arrival.actor for arrival in arrivals}
     relation_ids = {relation.id for relation in state.relations}
     seeded_relations = [
         relation.model_copy(update={"updated_tick": state.current_tick, "evidence_refs": [event.event_id]})
@@ -3206,6 +3243,14 @@ def _story_resolution_updates(
         for arrival in arrivals for goal in arrival.goals
     ]
     updates.update(entities=entities, relations=[*state.relations, *seeded_relations], goals=[*state.goals, *goals])
+    arrival_knowledge = [
+        record.model_copy(update={
+            "received_tick": state.current_tick, "source_event_id": event.event_id,
+        })
+        for arrival in arrivals for record in arrival.knowledge
+    ]
+    if arrival_knowledge:
+        updates["knowledge"] = [*state.knowledge, *event.delivered_knowledge, *arrival_knowledge]
     if event.arrival_world_id is not None:
         from .npc_plan_review import build_npc_plan_review_schedule
 

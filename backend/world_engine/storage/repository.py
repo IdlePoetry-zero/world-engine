@@ -444,6 +444,8 @@ class WorldRepository:
             raise InvalidEvent("A new world cannot seed story outcomes without committed milestone events.")
         if state.challenge_attempts:
             raise InvalidEvent("A new world cannot seed challenge receipts without committed attempts.")
+        if any(record.speech_reply_to is not None for record in state.knowledge):
+            raise InvalidEvent("A new world cannot seed private speech replies without committed actions.")
         if state.contests:
             raise InvalidEvent("A new world cannot seed active or completed contests without committed invitations.")
         if state.npc_plans:
