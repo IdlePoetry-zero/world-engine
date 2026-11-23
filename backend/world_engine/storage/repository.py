@@ -40,7 +40,9 @@ from world_engine.domain.occupation_legacy_vacancies import (
 )
 from world_engine.domain.npc_attendance_events import NPC_ATTENDANCE_EVENTS, NpcAttendanceStartedEvent
 from world_engine.domain.npc_plan_review_events import NpcPlanReviewScheduledEvent, validate_authored_npc_review_scope
-from world_engine.domain.story_nodes import StoryMilestoneResolvedEvent, ready_story_reaction, settle_story_reaction
+from world_engine.domain.story_nodes import (
+    StoryMilestoneResolvedEvent, ready_story_reaction, settle_story_reaction, story_reaction_event_id,
+)
 from world_engine.domain.challenges import CHALLENGE_COMMAND, ChallengeResolvedEvent
 from world_engine.domain.contests import CONTEST_COMMAND, ContestChangedEvent
 from world_engine.domain.relationship_invitation_events import RelationInvitationChangedEvent
@@ -2828,7 +2830,7 @@ class WorldRepository:
                     if reaction_ids and index == len(committed_events) - 1:
                         reaction = ready_story_reaction(next_state)
                         if reaction is not None:
-                            reaction_event_id = uuid5(command.command_id, f"story.reaction:{reaction.reaction_id}")
+                            reaction_event_id = story_reaction_event_id(command.command_id, reaction.reaction_id)
                             if len(committed_events) == MAX_EVENTS_PER_COMMAND or reaction_event_id in event_ids:
                                 raise InvalidEvent("Derived story reaction exceeds the batch limit or repeats an event ID.")
                             committed_events.append(settle_story_reaction(next_state, reaction, reaction_event_id))
@@ -5932,6 +5934,7 @@ class WorldRepository:
                         actor_id=replay_actor_id, ruleset_version=first.ruleset_version,
                         command_type=replay_command_type,
                         command_payload=replay_command_payload, causation_ids=first.causation_json,
+                        committed_reactions=state.story_reactions,
                     )
                     validate_market_price_review_batch(
                         events, world_id=world_id, branch_id=branch.branch_id, command_id=first.command_id,

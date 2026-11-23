@@ -5,15 +5,16 @@ from __future__ import annotations
 from decimal import Decimal, localcontext
 from graphlib import CycleError, TopologicalSorter
 from typing import TYPE_CHECKING, Annotated, Literal
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, StringConstraints, model_validator
 
-from .components import ExactDecimal, GoalCondition, ResourceName, ScheduledEventRecord, SkillsComponent, Tick
+from .components import ExactDecimal, GoalCondition, ResourceName, ScheduledEventRecord, SignedRelationValue, SkillsComponent, Tick
 from .errors import InvalidEvent
 from .contests import contest_score
 from .json_types import JsonObject
 from .npc_goal_completion import goal_condition_met
+from .promise_trust_state import PromiseTrustProjection
 from .world_books import WorldBookCitation
 
 if TYPE_CHECKING:
@@ -84,9 +85,17 @@ class StoryContestGate(_StoryModel):
     result: Literal["win", "loss", "draw", "settled"]
 
 
+class StoryPromiseTrustGate(_StoryModel):
+    kind: Literal["promise_trust"]
+    observer_id: UUID
+    counterpart_id: UUID
+    comparison: Literal["at_least", "at_most"]
+    threshold: SignedRelationValue
+
+
 StoryGate = Annotated[
     StoryGoalGate | StoryCapabilityGate | StorySkillGate | StoryKnowledgeGate | StoryPriorOutcomeGate
-    | StoryEnvironmentGate | StoryChallengeGate | StoryContestGate,
+    | StoryEnvironmentGate | StoryChallengeGate | StoryContestGate | StoryPromiseTrustGate,
     Field(discriminator="kind"),
 ]
 
@@ -198,6 +207,15 @@ def _gate_passes(state: WorldState, gate: StoryGate) -> bool:
             return False
         value = place.components.get("place", {}).get("environment", {}).get(gate.field)
         return type(value) is type(gate.equals) and value == gate.equals
+    if isinstance(gate, StoryPromiseTrustGate):
+        if not state.promise_trust:
+            return False
+        projection = PromiseTrustProjection.from_payload(state.promise_trust)
+        return any(
+            bond.from_id == gate.observer_id and bond.to_id == gate.counterpart_id
+            and (bond.trust >= gate.threshold if gate.comparison == "at_least" else bond.trust <= gate.threshold)
+            for bond in projection.bonds.values()
+        )
     actor = state.entities.get(gate.actor_id)
     if actor is None or actor.kind not in {"character", "person"} or actor.status != "active":
         return False
@@ -271,6 +289,10 @@ def ready_story_reaction(state: WorldState) -> StoryReaction | None:
                key=lambda reaction: (-reaction.priority, str(reaction.reaction_id)), default=None)
 
 
+def story_reaction_event_id(command_id: UUID, reaction_id: UUID) -> UUID:
+    return uuid5(command_id, f"story.reaction:{reaction_id}")
+
+
 def settle_story_reaction(state: WorldState, reaction: StoryReaction, event_id: UUID) -> StoryMilestoneResolvedEvent:
     return _resolved_story_event(state, reaction.reaction_id, reaction.node, event_id)
 
@@ -334,6 +356,13 @@ def validate_story_state(state: WorldState) -> None:
                 raise ValueError("Story gates may only reference a registered challenge.")
             if isinstance(gate, StoryContestGate) and gate.definition_id not in contest_ids:
                 raise ValueError("Story gates may only reference a registered contest.")
+            if isinstance(gate, StoryPromiseTrustGate):
+                endpoints = (gate.observer_id, gate.counterpart_id)
+                if endpoints[0] == endpoints[1] or any(
+                    endpoint not in state.entities or state.entities[endpoint].kind not in {"character", "person"}
+                    for endpoint in endpoints
+                ):
+                    raise ValueError("Promise trust story gates require two different characters.")
             if not isinstance(gate, StoryPriorOutcomeGate):
                 continue
             prior = gate.schedule_id

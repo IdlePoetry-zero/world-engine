@@ -1646,6 +1646,7 @@ class BackupApplication:
                                     command_id=first.command_id, actor_id=first.actor_id,
                                     ruleset_version=first.ruleset_version, command_type=None, command_payload=None,
                                     causation_ids=first.causation_ids,
+                                    committed_reactions=state.story_reactions,
                                 )
                                 validate_kinship_batch(validated_batch, world_id=first.world_id, branch_id=row.branch_id,
                                                       command_id=first.command_id, actor_id=first.actor_id, ruleset_version=first.ruleset_version)
@@ -2597,6 +2598,7 @@ def _validate_and_replay(
                     validated_batch, world_id=first.world_id, branch_id=branch.branch_id, command_id=first.command_id,
                     actor_id=first.actor_id, ruleset_version=first.ruleset_version, command_type=None, command_payload=None,
                     causation_ids=first.causation_ids,
+                    committed_reactions=state.story_reactions,
                 )
                 validate_kinship_batch(validated_batch, world_id=first.world_id, branch_id=branch.branch_id,
                                       command_id=first.command_id, actor_id=first.actor_id, ruleset_version=first.ruleset_version)

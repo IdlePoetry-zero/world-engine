@@ -25,6 +25,7 @@ from world_engine.domain.promise_trust_events import (
     PromiseItemReturnedWithTrustEvent,
 )
 from world_engine.domain.promise_trust_state import PromiseTrustProjection
+from world_engine.domain.story_nodes import StoryReaction
 from world_engine.rules import RuleContext, RuleEngine
 from world_engine.rules.promise_actions import build_fulfill_return_promise_event
 from world_engine.simulation.contracts import WorldAdvancePlan
@@ -601,5 +602,65 @@ def test_trust_settlements_are_atomic_and_fork_local_with_legacy_v1_blocked(tmp_
             assert restored_late_record.causation_ids == [breach_record.event_id]
         finally:
             restored_database.dispose()
+    finally:
+        database.dispose()
+
+
+def test_npc_promise_deadline_can_change_story_without_player_participation(tmp_path):
+    state, promisor, promisee, *_ = _fixture_state()
+    player = uuid4()
+    entities = state.entities | {player: WorldEntity(id=player, kind="character", name="Observer")}
+    outcome_id, reversed_id = uuid4(), uuid4()
+    trust = {"kind": "promise_trust", "observer_id": promisee, "counterpart_id": promisor,
+             "comparison": "at_most", "threshold": "-1"}
+    node = {"title": "A strained partnership", "visibility": "author_only",
+            "participant_ids": [promisee, promisor],
+            "fallback": {"key": "trust-fell", "effect": "occurred", "summary": "A workshop partnership cools."}}
+    state = WorldState.model_validate(state.model_dump(mode="python") | {
+        "player_id": player,
+        "entities": entities,
+        "story_reactions": [
+            StoryReaction.model_validate({"reaction_id": outcome_id, "when": [trust], "node": node}),
+            StoryReaction.model_validate({"reaction_id": reversed_id, "when": [
+                trust | {"observer_id": promisor, "counterpart_id": promisee},
+            ], "node": node}),
+        ],
+    })
+    scope = AccessScope(tenant_id=uuid4(), user_id=uuid4())
+    database = Database(f"sqlite:///{(tmp_path / 'npc-story-trust.db').as_posix()}")
+    database.create_schema()
+    try:
+        repo = WorldRepository(database)
+        created = repo.create_world(scope, NewWorld(title="Workshop", state=state))
+        world, main = created.world.world_id, created.branch.branch_id
+        _commit_action(repo, scope, world, main, promisor, "record_return_promise", {
+            "promisee_id": str(promisee), "resource_id": RESOURCE_ID, "quantity": "1",
+            "deadline_tick": 4, "private_text": "I will return the herb before closing.",
+        }, key="npc-promise")
+        before = repo.read_world(scope, world, main)
+        assert not before.state.story_milestones
+        child = repo.fork(scope, world, main, before.last_seq, "Wait past closing").branch_id
+        _run_world_advance(repo, scope, world, child, key="npc-deadline", target_tick=5)
+        after = repo.read_world(scope, world, child)
+        record, = after.state.story_milestones
+        _, bond = _trust_for_pair(after.state, promisee, promisor, child)
+        assert bond.trust == Decimal("-8")
+        promise, = after.state.relationship_promises
+        assert promise.status == "breached" and promise.resolved_tick == 5  # The deadline tick is inclusive.
+        assert (record.schedule_id, record.outcome, record.resolved_tick) == (outcome_id, "trust-fell", 5)
+        assert repo.read_world(scope, world, main).state_hash == before.state_hash
+        assert repo.replay(scope, world, child).state_hash == after.state_hash
+
+        backup = BackupApplication(repo)
+        archive = backup.export_world(scope, world)
+        restored = Database(f"sqlite:///{(tmp_path / 'npc-story-trust-restored.db').as_posix()}")
+        restored.create_schema()
+        try:
+            restored_repo = WorldRepository(restored)
+            with backup.validate_archive_file_streaming(io.BytesIO(archive)) as verified:
+                WorldBackupImporter(restored_repo).import_verified_backup(scope, verified)
+            assert restored_repo.replay(scope, world, child).state_hash == after.state_hash
+        finally:
+            restored.dispose()
     finally:
         database.dispose()

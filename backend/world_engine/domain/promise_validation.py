@@ -1,6 +1,7 @@
 """Bind private promise events to the host command that committed them."""
 
 from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from .errors import InvalidEvent
@@ -9,6 +10,10 @@ from .promise_events import (
     PromiseDeadlineBreachedEvent, PromiseItemReturnedEvent, PromiseReleasedEvent, RelationshipPromiseRecordedEvent,
 )
 from .promise_trust_events import PromiseDeadlineBreachedWithTrustEvent, PromiseItemReturnedWithTrustEvent
+from .story_nodes import StoryMilestoneResolvedEvent, story_reaction_event_id
+
+if TYPE_CHECKING:
+    from .story_nodes import StoryReaction
 
 
 _TRUST_SETTLEMENTS = (PromiseItemReturnedWithTrustEvent, PromiseDeadlineBreachedWithTrustEvent, PromiseItemReturnedLateEvent)
@@ -29,11 +34,20 @@ def validate_promise_batch(
     actor_id: UUID, ruleset_version: str, command_type: str | None,
     command_payload: Mapping[str, object] | None,
     causation_ids: Sequence[UUID | str] = (),
+    committed_reactions: Sequence["StoryReaction"] = (),
 ) -> None:
     """Check provenance before reduction. A restored batch has no original proposal."""
     if not requires_promise_validation(command_type, events):
         return
-    if len(events) != 1 or not isinstance(events[0], _EVENT_CLASSES):
+    reaction_ids = {reaction.reaction_id for reaction in committed_reactions}
+    # Replay and restore include the repository-generated suffix. Its outcomes
+    # still undergo normal reducer checks against the post-promise state.
+    if not events or not isinstance(events[0], _EVENT_CLASSES) or any(
+        not isinstance(event, StoryMilestoneResolvedEvent)
+        or event.milestone.schedule_id not in reaction_ids
+        or event.event_id != story_reaction_event_id(command_id, event.milestone.schedule_id)
+        for event in events[1:]
+    ):
         raise InvalidEvent("A promise command must commit exactly one standalone promise event.")
     event = events[0]
     late = isinstance(event, PromiseItemReturnedLateEvent)
