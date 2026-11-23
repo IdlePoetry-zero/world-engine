@@ -74,6 +74,8 @@ Leased travel saves a departure with the route, endpoints, departure tick and pl
 
 试玩顶部显示世界历日期，对话确认「照常上班一个月」时也用世界日和班次时刻。需要排查顺序时，可查看界面悬停显示的世界秒。
 
+短时训练遇到世界边界也会沿原授权时窗继续。59 秒的练习跨过第 11 秒的到期事件后，仍只在完成时发放一次原本的最低经验。持续学习按技能的累计练习时间每满五分钟结算经验。验收中的 15 分钟练习经过两个 NPC 寿终时点，实际登记 15 分钟和 3 点经验。任何独立命令推进的时间都不能用来续算一次固定时窗的练习。
+
 The separation between a traveller's waiting process and other processes that may wake or interrupt it follows SimPy's discrete-event process model. [SimPy process interaction](https://simpy.readthedocs.io/en/latest/topical_guides/process_interaction.html)
 
 ## 聊天与面板的持续工作验收

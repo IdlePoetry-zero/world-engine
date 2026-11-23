@@ -19,6 +19,7 @@ from world_engine.application.travel_chat import (
 )
 from world_engine.application.worlds import WorldApplication
 from world_engine.domain.components import GoalRecord, HealthComponent, NeedsComponent, PlaceComponent, PlaceRoute
+from world_engine.domain.errors import Conflict
 from world_engine.domain.models import (
     AccessScope,
     CommandEnvelope,
@@ -147,6 +148,7 @@ def _create_world(
     if injured:
         actor = actor.model_copy(update={"components": actor.components | {
             "health": HealthComponent(current=5, maximum=10).model_dump(mode="json"),
+            "skills": {"skills": {"skill.local_knowledge": {"level": "1"}}},
         }})
     state = WorldState(
         current_tick=0,
@@ -286,25 +288,33 @@ def _request(created, actor_id, *, request_id=None):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("activity", ["wait", "rest", "idle"])
-async def test_stationary_chat_preserves_intent_and_elapsed_recovery_across_short_boundary(tmp_path, monkeypatch, activity):
+@pytest.mark.parametrize(("activity", "outside_time"), [
+    ("wait", False), ("rest", False), ("idle", False), ("train", False), ("train", True),
+])
+async def test_stationary_chat_preserves_intent_and_elapsed_recovery_across_short_boundary(
+    tmp_path, monkeypatch, activity, outside_time,
+):
     database, repo, scope, created, ids = _create_world(tmp_path, promise_boundary=True, water_stock="2", injured=True)
     try:
         actor, world, branch = ids["actor"], created.world.world_id, created.branch.branch_id
         calls = []
+        skill_id = "skill.local_knowledge"
+        duration = 59 if activity == "train" else 7200
 
         class Models:
             async def generate(self, scope, request):
                 calls.append(request.role_task)
-                return SimpleNamespace(normalized_output={
-                    "action": {"kind": activity, "duration_ticks": 7200}, "clarification": "",
-                })
+                action = {"kind": activity, "duration_ticks": duration}
+                if activity == "train":
+                    action["skill_id"] = skill_id
+                return SimpleNamespace(normalized_output={"action": action, "clarification": ""})
 
         models = Models()
         actions = RulesActionDispatcher(repo, models, RuleEngine(), ACTION_INTENT_ADAPTER, RuleContext)
         chat = ConversationApplication(WorldApplication(repo, None), models,
                                        ConversationStore(OperationsStore(tmp_path / "ops.db")), actions=actions)
-        message = _request(created, actor).model_copy(update={"text": "现在休息两小时。" if activity == "rest" else "原地等两个小时。"})
+        text = {"rest": "现在休息两小时。", "train": "现在练习本地知识 59 秒。"}.get(activity, "原地等两个小时。")
+        message = _request(created, actor).model_copy(update={"text": text})
 
         def interrupted_finish(*args, **kwargs):
             raise SimulatedProcessLoss("Lost the acknowledgment after the job committed")
@@ -326,7 +336,29 @@ async def test_stationary_chat_preserves_intent_and_elapsed_recovery_across_shor
         assert jobs.advance(scope, lease).next_tick == due.due_tick < 60
         interrupted = repo.read_world(scope, world, branch)
         assert interrupted.state.entities[actor].components["health"]["current"] == 5
+        assert interrupted.state.entities[actor].components["skills"]["skills"][skill_id]["experience"] == 0
+        if outside_time:
+            assert jobs.advance(scope, lease).next_tick == due.due_tick
         repo.control_job(scope, job_id, "pause")
+        if outside_time:
+            head = repo.read_world(scope, world, branch)
+            command = CommandEnvelope(
+                actor_id=actor, idempotency_key="independent-wait", expected_state_version=head.branch.state_version,
+                command_type="action.wait", payload={"kind": "wait", "duration_ticks": 1},
+            )
+            ordinary_wait = RuleEngine().evaluate(head.state, command.payload, RuleContext(
+                world_id=world, branch_id=branch, actor_id=actor, command_id=command.command_id,
+                ruleset_version=head.world.ruleset_version,
+            ))
+            assert ordinary_wait.elapsed_ticks == 1
+            repo.commit_command(scope, world, branch, command, ordinary_wait.events)
+            with pytest.raises(Conflict, match="outside its simulation window"):
+                repo.control_job(scope, job_id, "resume")
+            assert repo.read_job(scope, job_id).status is JobStatus.PAUSED
+            final = repo.read_world(scope, world, branch)
+            trained = final.state.entities[actor].components["skills"]["skills"][skill_id]
+            assert (trained["trained_ticks"], trained["experience"]) == (11, 0)
+            return
         repo.control_job(scope, job_id, "resume")
         lease = repo.claim_job("stationary-window-restored")
         assert lease and lease.job_id == job_id
@@ -339,10 +371,12 @@ async def test_stationary_chat_preserves_intent_and_elapsed_recovery_across_shor
         else:
             pytest.fail("The requested station time did not finish")
         final = repo.read_world(scope, world, branch)
-        assert final.state.current_tick == 7200 and final.state.entities[actor].location_id == ids["origin"]
+        assert final.state.current_tick == duration and final.state.entities[actor].location_id == ids["origin"]
         assert final.state.relationship_promises[0].status == "breached"
         assert final.state.resources[_id(8)].balance == 2
         assert final.state.entities[actor].components["health"]["current"] == (6 if activity == "rest" else 5)
+        skill = final.state.entities[actor].components["skills"]["skills"][skill_id]
+        assert (skill["trained_ticks"], skill["experience"]) == ((duration, 1) if activity == "train" else (0, 0))
         assert await chat.send(scope, message) == reply
         assert repo.replay(scope, world, branch, from_genesis=True).state_hash == final.state_hash
     finally:

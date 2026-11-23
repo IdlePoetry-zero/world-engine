@@ -680,6 +680,8 @@ class RuleContext(ContractModel):
     accusation_repair_trust_proof: AccusationRepairTrustProof | None = None
     simulation_command_id: UUID | None = None
     travelling_window: bool = False
+    continuous_training: bool = False
+    explicit_training_window: tuple[int, int] | None = None
 
     @model_validator(mode="after")
     def sorted_unique_background_choices(self) -> RuleContext:

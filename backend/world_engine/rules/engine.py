@@ -1536,6 +1536,8 @@ class RuleEngine:
             background_choices=typed_choices,
             simulation_command_id=context.simulation_command_id,
             travelling_window=context.travelling_window,
+            continuous_training=context.continuous_training,
+            explicit_training_window=context.explicit_training_window,
         )
 
     def next_background_boundary(
@@ -4627,7 +4629,19 @@ class RuleEngine:
         current = skills.skills.get(intent.skill_id)
         if current is None:
             return self._rejected(context, "skill_not_registered", "The selected skill is not registered for this character.")
-        experience_gained = max(1, duration // 300)
+        if context.explicit_training_window is not None:
+            start, end = context.explicit_training_window
+            prior_ticks, total_ticks = trained_at_tick - duration - start, trained_at_tick - start
+            if not 0 <= prior_ticks < total_ticks <= end - start:
+                return self._rejected(context, "training_window_invalid", "Training must stay within its authorized interval.")
+            earned = total_ticks // 300
+            if trained_at_tick == end:
+                earned = max(1, earned)
+            experience_gained = earned - prior_ticks // 300
+        elif context.continuous_training:
+            experience_gained = (current.trained_ticks + duration) // 300 - current.trained_ticks // 300
+        else:
+            experience_gained = max(1, duration // 300)
         with localcontext() as decimal_context:
             decimal_context.prec = 50
             level = min(Decimal("100"), current.level + Decimal(experience_gained) / Decimal("100"))

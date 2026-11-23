@@ -575,6 +575,38 @@ def test_study_long_action_api_validates_skill_matches_idempotency_and_commits_t
         assert repository.replay(scope, world_id, branch_id).state_hash == after.state_hash
 
 
+def test_study_counts_training_before_world_boundaries_without_duplicate_experience(tmp_path):
+    app = build_application(data_directory=tmp_path, run_simulation_worker=False)
+    scope, repository = local_identity(tmp_path), app.state.worlds.repository
+    actor, first_npc, second_npc = uuid4(), uuid4(), uuid4()
+    skill_id = "skill.local_knowledge"
+    created = repository.create_world(scope, NewWorld(title="Interrupted study", state=WorldState(
+        player_id=actor,
+        entities={
+            actor: WorldEntity(id=actor, kind="character", components={"skills": {"skills": {skill_id: {"level": "1"}}}}),
+            first_npc: WorldEntity(id=first_npc, kind="character", components={"life": {"birth_tick": 0, "lifespan_ticks": 11}}),
+            second_npc: WorldEntity(id=second_npc, kind="character", components={"life": {"birth_tick": 0, "lifespan_ticks": 302}}),
+        },
+    )))
+    world, branch = created.world.world_id, created.branch.branch_id
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        client.get("/api/v1/session").raise_for_status()
+        accepted = client.post(f"/api/v1/worlds/{world}/long-actions", headers={"Idempotency-Key": "study-through-npc-events"}, json={
+            "branch_id": str(branch), "expected_state_version": "0",
+            "duration_seconds": 900, "activity": "study", "skill_id": skill_id,
+        }).raise_for_status()
+        job_id = UUID(accepted.json()["job_id"])
+        lease = repository.claim_job("study-through-npc-events")
+        assert lease and lease.job_id == job_id
+        for tick, experience in ((11, 0), (302, 1), (900, 3)):
+            assert SimulationJobs(repository).advance(scope, lease).next_tick == tick
+            after = repository.read_world(scope, world, branch)
+            trained = after.state.entities[actor].components["skills"]["skills"][skill_id]
+            assert (trained["trained_ticks"], trained["experience"]) == (tick, experience)
+        assert repository.read_job(scope, job_id).status == JobStatus.SUCCEEDED
+        assert repository.replay(scope, world, branch, from_genesis=True).state_hash == after.state_hash
+
+
 @pytest.mark.parametrize("world_advance", [False, True])
 def test_background_deprivation_job_resolves_at_exact_tick_and_continues(tmp_path, world_advance):
     app = build_application(data_directory=tmp_path, run_simulation_worker=False)

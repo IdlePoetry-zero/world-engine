@@ -4058,7 +4058,9 @@ class WorldRepository:
             now = utc_now()
             if action == "resume" and job.job_type == "simulation.long_action":
                 plan = job.payload_json.get("plan")
-                if isinstance(plan, dict) and plan.get("activity") == "study":
+                if isinstance(plan, dict) and plan.get("stationary_only") is True:
+                    self._resume_stationary_from_current_checkpoint(session, branch, job, now)
+                elif isinstance(plan, dict) and plan.get("activity") == "study":
                     self._resume_study_from_current_checkpoint(session, branch, job, plan, now)
                 elif isinstance(plan, dict) and plan.get("activity") == "work":
                     self._resume_work_from_current_checkpoint(session, branch, job, plan, now)
@@ -4072,6 +4074,15 @@ class WorldRepository:
             job.status = destination.value
             session.flush()
             return self._job_record(job)
+
+    def _resume_stationary_from_current_checkpoint(self, session: Session, branch: BranchRow, job: JobRow, now: datetime) -> None:
+        payload = job.payload_json
+        version = payload.get("committed_state_version", payload.get("initial_state_version"))
+        if branch.current_tick != job.committed_through_tick or payload.get("pending_decision") is not None:
+            raise Conflict("A fixed action cannot count time advanced outside its simulation window.")
+        if version != branch.state_version:
+            self._ensure_no_active_branch_lease(session, branch.branch_id, now)
+            job.payload_json = {**payload, "committed_state_version": branch.state_version}
 
     def _resume_work_from_current_checkpoint(
         self, session: Session, branch: BranchRow, job: JobRow, raw_plan: dict, now: datetime,

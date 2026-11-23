@@ -103,9 +103,9 @@ class LongActionPlan(FrozenModel):
 
     @model_validator(mode="after")
     def action_has_parameters(self) -> LongActionPlan:
-        if self.stationary_only and (self.activity not in {"wait", "rest"} or self.started_tick is None
+        if self.stationary_only and (self.activity not in {"wait", "rest", "study"} or self.started_tick is None
                                     or self.target_tick - self.started_tick < (60 if self.activity == "rest" else 1)):
-            raise ValueError("An explicit stationary action requires a fixed wait or rest interval.")
+            raise ValueError("An explicit stationary action requires a fixed wait, rest or study interval.")
         if self.activity == "consume":
             if (self.consumption is None or self.started_tick is None
                 or self.target_tick - self.started_tick != self.consumption.duration_ticks

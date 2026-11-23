@@ -1051,6 +1051,7 @@ class SimulationEngine:
             actor_id=plan.actor_id,
             ruleset_version=context.ruleset_version or RULES_VERSION,
             simulation_command_id=context.command_id,
+            continuous_training=plan.activity == "study" and activity == "study",
         )
         is_paid_work_shift = plan.activity == "work" and activity == "work"
         if is_paid_work_shift:
@@ -2014,6 +2015,8 @@ class SimulationEngine:
             return routine
         horizon = min(plan.target_tick, state.current_tick + context.max_step_ticks,
                       state.current_tick + self.policy.max_macro_step_seconds, state.current_tick + 30 * state.calendar.day_seconds)
+        if plan.activity == "study":
+            horizon = min(horizon, state.current_tick + 8 * 60 * 60)
         boundary = self._next_external_boundary(
             state, horizon, actor_id=plan.actor_id, externally_controlled_actor_ids=context.externally_controlled_actor_ids,
             include_meeting_start=context.allow_autonomous_meeting_attendance,
@@ -3248,7 +3251,12 @@ class SimulationEngine:
             context.command_id,
             f"{context.world_seed}:simulation:{context.state_version}:{state.current_tick}:boundary:{reason}:{activity}",
         )
-        boundary_intent = RestIntent(duration_ticks=duration) if activity == "rest" and duration >= 60 else WaitIntent(duration_ticks=duration)
+        if activity == "study" and plan.skill_id is not None:
+            boundary_intent = TrainIntent(skill_id=plan.skill_id, duration_ticks=duration)
+        elif activity == "rest" and duration >= 60:
+            boundary_intent = RestIntent(duration_ticks=duration)
+        else:
+            boundary_intent = WaitIntent(duration_ticks=duration)
         boundary_context = RuleContext(
             world_id=context.world_id,
             branch_id=context.branch_id,
@@ -3257,6 +3265,9 @@ class SimulationEngine:
             ruleset_version=context.ruleset_version or RULES_VERSION,
             simulation_command_id=context.command_id,
             travelling_window=activity not in {"rest", "eat", "drink", "wait"},
+            continuous_training=plan.activity == "study" and activity == "study",
+            explicit_training_window=(plan.started_tick, plan.target_tick)
+            if activity == "study" and plan.stationary_only and plan.started_tick is not None else None,
         )
         background_choices = self.agent_policy.choose_background(
             state,

@@ -787,6 +787,9 @@ class RulesActionDispatcher:
             return enqueue_travel_for_move(
                 scope, view, request, action, self.simulation_jobs, self.engine,
             )
+        if action.kind == "train" and hit_world_boundary:
+            study = QueueStudyIntent(kind="queue_study", skill_id=action.skill_id, amount=action.duration_ticks, unit="second")
+            return self._queue_study(scope, view, request, version, study, state, stationary_only=True)
         if action.kind in {"wait", "idle", "rest"} and (
             hit_world_boundary or resolution.elapsed_ticks > view.state.calendar.day_seconds
         ):
@@ -1084,7 +1087,7 @@ class RulesActionDispatcher:
                if relief_event is not None else {}),
         }
 
-    def _queue_study(self, scope, view, request, version, action: QueueStudyIntent, state):
+    def _queue_study(self, scope, view, request, version, action: QueueStudyIntent, state, *, stationary_only=False):
         response = ConversationApplication._response
         actor = view.state.entities.get(request.actor_id)
         if actor is None:
@@ -1126,6 +1129,7 @@ class RulesActionDispatcher:
             activity="study",
             skill_id=action.skill_id,
             stop_conditions=study_safety_stop(request.actor_id, safety_threshold),
+            stationary_only=stationary_only,
         )
         job = self.simulation_jobs.enqueue(
             scope,
