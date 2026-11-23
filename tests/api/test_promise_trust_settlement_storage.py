@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import io
 from decimal import Decimal
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 import pytest
 from sqlalchemy import select
@@ -12,26 +12,30 @@ from world_engine.application.backups import BackupApplication
 from world_engine.application.npc_planning import _planning_promises
 from world_engine.application.visibility import project_player_state
 from world_engine.application.simulation_jobs import SimulationJobs
-from world_engine.domain.components import InventoryComponent, InventoryLot
+from world_engine.domain.components import GoalRecord, InventoryComponent, InventoryLot
 from world_engine.domain.errors import InvalidEvent
 from world_engine.domain.models import (
     AccessScope,
     CommandEnvelope,
+    MembershipRole,
     NewWorld,
     ResourceAccount,
     WorldEntity,
     WorldState,
 )
+from world_engine.domain.npc_plan_review import build_npc_plan_review_schedule
+from world_engine.domain.npc_plans import NpcPlan, NpcPlanStep
 from world_engine.domain.promise_events import PromiseItemReturnedEvent
 from world_engine.domain.promise_late_return_event import PromiseItemReturnedLateEvent
 from world_engine.domain.promise_trust_events import (
     PromiseItemReturnedWithTrustEvent,
 )
 from world_engine.domain.promise_trust_state import PromiseTrustProjection
+from world_engine.domain.reducers import state_hash
 from world_engine.domain.story_nodes import StoryReaction
 from world_engine.rules import RuleContext, RuleEngine
 from world_engine.rules.promise_actions import assess_return_promise, build_fulfill_return_promise_event
-from world_engine.simulation.contracts import WorldAdvancePlan
+from world_engine.simulation.contracts import DecisionResponse, WorldAdvancePlan
 from world_engine.simulation.engine import SimulationEngine, SimulationPolicy
 from world_engine.storage.database import Database
 from world_engine.storage.backup_import import WorldBackupImporter
@@ -609,7 +613,8 @@ def test_trust_settlements_are_atomic_and_fork_local_with_legacy_v1_blocked(tmp_
         database.dispose()
 
 
-def test_npc_promise_deadline_can_change_story_without_player_participation(tmp_path):
+@pytest.mark.parametrize("externally_controlled", [False, True])
+def test_promise_deadline_can_change_story_without_player_participation(tmp_path, externally_controlled):
     state, promisor, promisee, *_ = _fixture_state()
     player = uuid4()
     entities = state.entities | {player: WorldEntity(id=player, kind="character", name="Observer")}
@@ -622,6 +627,7 @@ def test_npc_promise_deadline_can_change_story_without_player_participation(tmp_
     state = WorldState.model_validate(state.model_dump(mode="python") | {
         "player_id": player,
         "entities": entities,
+        "metadata": state.metadata | ({"npc_return_commitment_reviews_v1": True} if externally_controlled else {}),
         "story_reactions": [
             StoryReaction.model_validate({"reaction_id": outcome_id, "when": [trust], "node": node}),
             StoryReaction.model_validate({"reaction_id": reversed_id, "when": [
@@ -670,11 +676,23 @@ def test_npc_promise_deadline_can_change_story_without_player_participation(tmp_
             "recipient_available_here", False,
         )
         child = repo.fork(scope, world, main, before.last_seq, "Wait past closing").branch_id
+        if externally_controlled:
+            guest = uuid4()
+            repo.grant_membership(scope, world, guest, MembershipRole.PLAYER)
+            repo.grant_actor_control(scope, world, guest, promisor)
         _run_world_advance(repo, scope, world, child, key="npc-deadline", target_tick=5)
         after = repo.read_world(scope, world, child)
         record, = after.state.story_milestones
         _, bond = _trust_for_pair(after.state, promisee, promisor, child)
         assert bond.trust == Decimal("-8")
+        if externally_controlled:
+            goal, = after.state.goals
+            assert goal.status == "failed"
+            reviews = [row for row in repo.list_events(scope, world, child).events
+                       if row.type == "core.npc_plan_review_resolved.v1"]
+            assert len(reviews) == 3
+            assert {row.payload["reason"] for row in reviews} == {"npc_review_actor_user_controlled"}
+            assert not after.state.npc_plans
         promise, = after.state.relationship_promises
         assert promise.status == "breached" and promise.resolved_tick == 5  # The deadline tick is inclusive.
         assert (record.schedule_id, record.outcome, record.resolved_tick) == (outcome_id, "trust-fell", 5)
@@ -694,3 +712,124 @@ def test_npc_promise_deadline_can_change_story_without_player_participation(tmp_
             restored.dispose()
     finally:
         database.dispose()
+
+
+@pytest.mark.parametrize(("use_streaming_backup", "automatic", "defer_count"), [
+    (False, False, 0), (False, True, 0), (True, True, 2),
+])
+def test_npc_executes_its_own_return_plan_and_story_replays(tmp_path, use_streaming_backup, automatic, defer_count):
+    state, promisor, promisee, source_account, recipient_account, *_ = _fixture_state()
+    player, milestone_id = uuid4(), uuid4()
+    goal = GoalRecord(id=uuid4(), owner_id=promisor, title="Return the borrowed herb", deadline=4)
+    state = WorldState.model_validate(state.model_dump(mode="python") | {
+        "player_id": player,
+        "entities": state.entities | {player: WorldEntity(id=player, kind="character", name="Observer")},
+        "goals": [] if automatic else [goal],
+        "metadata": state.metadata | ({"npc_return_commitment_reviews_v1": True} if automatic else {}),
+        "story_reactions": [StoryReaction.model_validate({
+            "reaction_id": milestone_id,
+            "when": [{"kind": "promise_trust", "observer_id": promisee, "counterpart_id": promisor,
+                      "comparison": "at_least", "threshold": "1"}],
+            "node": {"title": "A workshop keeps its word", "visibility": "author_only",
+                     "fallback": {"key": "trust-rose", "effect": "occurred", "summary": "The borrower returned the herb."}},
+        })],
+    })
+    draft = NewWorld(title="Autonomous workshop", state=state)
+    if not automatic:
+        schedule = build_npc_plan_review_schedule(state, draft.world_id, promisor, 4)
+        state = WorldState.model_validate(state.model_dump(mode="python") | {"scheduled_events": [schedule]})
+    scope = AccessScope(tenant_id=uuid4(), user_id=uuid4())
+    db = Database(f"sqlite:///{(tmp_path / 'npc-return.db').as_posix()}")
+    db.create_schema()
+    restored_db = Database(f"sqlite:///{(tmp_path / 'npc-return-copy.db').as_posix()}")
+    restored_db.create_schema()
+    try:
+        repository = WorldRepository(db)
+        world, branch = draft.world_id, draft.branch_id
+        repository.create_world(scope, draft.model_copy(update={"state": state}))
+        _commit_action(repository, scope, world, branch, promisor, "record_return_promise", {
+            "promisee_id": str(promisee), "resource_id": RESOURCE_ID, "quantity": "1",
+            "deadline_tick": 4, "private_text": "I'll bring the herb back before closing.",
+        }, key="create-active-npc-promise")
+        before = repository.read_world(scope, world, branch)
+        promise, = before.state.relationship_promises
+        opening_review_tick = 2 if automatic else promise.deadline_tick
+        goal, = before.state.goals
+        if automatic:
+            assert goal.deadline == promise.deadline_tick
+            assert goal.id == uuid5(promise.id, "npc.commitment:return")
+            schedule = next(row for row in before.state.scheduled_events if row.handler_id == "npc.goal_review")
+            assert schedule.due_tick == opening_review_tick and schedule.max_runs == 3
+        jobs = SimulationJobs(repository)
+        job = jobs.enqueue_world_advance(
+            scope, world, branch, WorldAdvancePlan(started_tick=0, target_tick=6),
+            idempotency_key="npc-return-and-advance", speed="balanced", depth="deep",
+            expected_state_version=before.branch.state_version,
+        )
+        lease = repository.claim_job("npc-item-return", job_type=job.job_type)
+        assert lease is not None
+        def wait_for_review():
+            for _ in range(8):
+                resolution = jobs.advance(scope, lease)
+                if resolution.decision_requests:
+                    request, = resolution.decision_requests
+                    return request, repository.read_world(scope, world, branch)
+            pytest.fail("Expected the actor's commitment review before the deadline.")
+
+        request, reviewed = wait_for_review()
+        assert request.at_tick == opening_review_tick
+        for _ in range(defer_count):
+            jobs.advance(scope, lease, model_decision=DecisionResponse(
+                request_id=request.request_id, state_version=request.state_version, at_tick=request.at_tick,
+                source="policy", option_id="plan", npc_planning_status="defer",
+                npc_plan_state_hash=state_hash(reviewed.state),
+            ))
+            request, reviewed = wait_for_review()
+            assert reviewed.state.relationship_promises[0].status == "active"
+            assert reviewed.state.resources[source_account].balance == Decimal("5")
+        review_tick = opening_review_tick + defer_count
+        assert request.at_tick == review_tick
+        plan = NpcPlan(
+            plan_id=uuid5(request.request_id, f"npc.plan.v1:{promisor}:{request.state_version}"),
+            actor_id=promisor, goal_ids=[goal.id], revision=1, status="ready",
+            created_tick=review_tick, updated_tick=review_tick, next_review_tick=review_tick, current_step=0,
+            steps=[NpcPlanStep(capability_id="world.action.fulfill_return_promise.v1",
+                               arguments={"promise_id": str(promise.id)})],
+            reason="Return the herb while its recipient is here.",
+        )
+        jobs.advance(scope, lease, model_decision=DecisionResponse(
+            request_id=request.request_id, state_version=request.state_version, at_tick=review_tick, source="policy",
+            option_id="plan", npc_planning_status="ready", npc_plan=plan,
+            npc_plan_state_hash=state_hash(reviewed.state),
+        ))
+        for _ in range(22):
+            jobs.advance(scope, lease)
+            if repository.read_job(scope, job.job_id).status == "succeeded":
+                break
+        assert repository.read_job(scope, job.job_id).status == "succeeded"
+        result = repository.read_world(scope, world, branch)
+        returned, = result.state.relationship_promises
+        assert returned.status == "fulfilled" and returned.resolved_tick == review_tick
+        if automatic:
+            completed_goal, = result.state.goals
+            assert completed_goal.status == "succeeded" and completed_goal.evidence_refs == [returned.outcome_event_id]
+        assert result.state.resources[source_account].balance == Decimal("4")
+        assert result.state.resources[recipient_account].balance == Decimal("1")
+        assert result.state.npc_plans[0].status == "completed"
+        milestone, = result.state.story_milestones
+        assert (milestone.schedule_id, milestone.resolved_tick) == (milestone_id, review_tick)
+        assert repository.replay(scope, world, branch).state_hash == result.state_hash
+
+        backup = BackupApplication(repository)
+        archive = backup.export_world(scope, world)
+        restored_repo = WorldRepository(restored_db)
+        importer = WorldBackupImporter(restored_repo)
+        if use_streaming_backup:
+            with backup.validate_archive_file_streaming(io.BytesIO(archive)) as verified:
+                importer.import_verified_backup(scope, verified)
+        else:
+            importer.import_verified_backup(scope, backup.validate_archive(archive))
+        assert restored_repo.replay(scope, world, branch).state_hash == result.state_hash
+    finally:
+        restored_db.dispose()
+        db.dispose()

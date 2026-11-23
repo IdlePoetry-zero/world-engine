@@ -2639,9 +2639,10 @@ class WorldRepository:
                     command_type=command.command_type, command_payload=command.payload,
                 )
                 validate_promise_batch(
-                    typed_events, world_id=world_id, branch_id=branch_id, command_id=command.command_id,
-                    actor_id=command.actor_id, ruleset_version=world.ruleset_version,
-                    command_type=command.command_type, command_payload=command.payload, causation_ids=command.causation_ids,
+                    validation_events, world_id=world_id, branch_id=branch_id, command_id=command.command_id,
+                    actor_id=validation_actor_id, ruleset_version=world.ruleset_version,
+                    command_type=validation_command_type, command_payload=validation_command_payload,
+                    causation_ids=command.causation_ids,
                 )
                 validate_shipment_spoilage_batch(
                     state, command.actor_id, typed_events, world_id=world_id, branch_id=branch_id,

@@ -30,6 +30,7 @@ from world_engine.rules.contracts import (
     ACTION_INTENT_ADAPTER,
     CastLeadershipBallotVoteIntent,
     ExploreIntent,
+    FulfillReturnPromiseIntent,
     IntentModel,
     MoveIntent,
     ProduceIntent,
@@ -167,6 +168,11 @@ def build_default_npc_capability_registry() -> NpcCapabilityRegistry:
     registry.register(capability_id_for_action("trade"), TradeIntent, reference_validator=_validate_trade_reference)
     registry.register(capability_id_for_action("produce"), ProduceIntent, reference_validator=_validate_produce_reference)
     registry.register(capability_id_for_action("speak"), SpeakIntent, reference_validator=_validate_speak_reference)
+    registry.register(
+        capability_id_for_action("fulfill_return_promise"),
+        FulfillReturnPromiseIntent,
+        reference_validator=_validate_return_promise_reference,
+    )
     registry.register(
         capability_id_for_action("propose_relationship_invitation"),
         ProposeRelationshipInvitationIntent,
@@ -490,6 +496,19 @@ def _validate_produce_reference(
         return "npc_reference_not_known", "Production must refer to a recipe in the visible producer's record."
     if not any(recipe.recipe_id == action.recipe_id for recipe in production.recipes):
         return "npc_reference_not_known", "Production must refer to a recipe in the visible producer's record."
+    return None
+
+
+def _validate_return_promise_reference(
+    state: WorldState, actor: WorldEntity, action: IntentModel,
+) -> tuple[str, str] | None:
+    assert isinstance(action, FulfillReturnPromiseIntent)
+    promise = next((item for item in state.relationship_promises if item.id == action.promise_id
+                    and item.promisor_id == actor.id and item.status == "active"), None)
+    if promise is None:
+        return "npc_reference_not_known", "A return must refer to the actor's own active promise."
+    if not entity_visible_to_actor(state, actor.id, promise.promisee_id):
+        return "promise_recipient_not_observed", "The recipient is not visible at the actor's current location."
     return None
 
 

@@ -34,7 +34,6 @@ from world_engine.domain.events import (
     parse_event, validate_adjudication_batch, validate_background_clock_batch,
     validate_historical_evidence_destruction_batch, validate_investigation_case_batch,
 )
-from world_engine.domain.promise_validation import validate_promise_batch
 from world_engine.domain.family_events import validate_kinship_batch
 from world_engine.domain.occupation_events import validate_occupation_batch
 from world_engine.domain.occupation_death_validation import validate_persisted_death_vacancies
@@ -62,6 +61,7 @@ from world_engine.domain.models import (
     ContractModel,
 )
 from world_engine.domain.reducers import apply_event, state_hash, state_json
+from world_engine.storage.npc_plan_replay import validate_archived_promise_batch
 
 from .world_packs import MAX_WORLD_PACK_BYTES, WorldPackArchiveError, load_world_pack
 
@@ -1641,13 +1641,7 @@ class BackupApplication:
                                     branch_id=row.branch_id, command_id=first.command_id,
                                     ruleset_version=first.ruleset_version, command_type=None, command_payload=None,
                                 )
-                                validate_promise_batch(
-                                    validated_batch, world_id=first.world_id, branch_id=row.branch_id,
-                                    command_id=first.command_id, actor_id=first.actor_id,
-                                    ruleset_version=first.ruleset_version, command_type=None, command_payload=None,
-                                    causation_ids=first.causation_ids,
-                                    committed_reactions=state.story_reactions,
-                                )
+                                validate_archived_promise_batch(state, pending, validated_batch)
                                 validate_kinship_batch(validated_batch, world_id=first.world_id, branch_id=row.branch_id,
                                                       command_id=first.command_id, actor_id=first.actor_id, ruleset_version=first.ruleset_version)
                                 validate_occupation_batch(validated_batch, world_id=first.world_id, branch_id=row.branch_id,
@@ -2594,12 +2588,7 @@ def _validate_and_replay(
                     command_id=first.command_id, ruleset_version=first.ruleset_version,
                     command_type=None, command_payload=None,
                 )
-                validate_promise_batch(
-                    validated_batch, world_id=first.world_id, branch_id=branch.branch_id, command_id=first.command_id,
-                    actor_id=first.actor_id, ruleset_version=first.ruleset_version, command_type=None, command_payload=None,
-                    causation_ids=first.causation_ids,
-                    committed_reactions=state.story_reactions,
-                )
+                validate_archived_promise_batch(state, batch, validated_batch)
                 validate_kinship_batch(validated_batch, world_id=first.world_id, branch_id=branch.branch_id,
                                       command_id=first.command_id, actor_id=first.actor_id, ruleset_version=first.ruleset_version)
                 validate_occupation_batch(validated_batch, world_id=first.world_id, branch_id=branch.branch_id,

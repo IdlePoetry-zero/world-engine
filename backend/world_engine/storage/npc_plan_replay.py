@@ -15,6 +15,8 @@ from world_engine.domain.events import parse_event
 from world_engine.domain.models import EventRecord, WorldState
 from world_engine.domain.npc_plan_events import NpcPlanRevisedEvent
 from world_engine.domain.npc_plan_review_events import NpcPlanReviewResolvedEvent
+from world_engine.domain.promise_validation import requires_promise_validation, validate_promise_batch
+from world_engine.domain.story_nodes import StoryMilestoneResolvedEvent, story_reaction_event_id
 from world_engine.domain.travel_journey_events import TravelJourneyChangedEvent
 from world_engine.rules.engine import RuleEngine
 from world_engine.simulation.contracts import WorldAdvancePlan
@@ -62,6 +64,15 @@ def replay_npc_plan_batch(
     )
 
     parsed = tuple(_parse_source_event(record) for record in source_batch)
+    reaction_ids = {reaction.reaction_id for reaction in before_state.story_reactions}
+    plan_event_count = len(parsed)
+    for outcome in reversed(parsed):
+        if (not isinstance(outcome, StoryMilestoneResolvedEvent)
+                or outcome.milestone.schedule_id not in reaction_ids
+                or outcome.event_id != story_reaction_event_id(first.command_id, outcome.milestone.schedule_id)):
+            break
+        plan_event_count -= 1
+    parsed = parsed[:plan_event_count]
     input_version = first.state_version_after - 1
     if input_version < 0:
         raise InvalidEvent("NPC plan source batch has no preceding branch version.")
@@ -124,6 +135,30 @@ def replay_npc_plan_batch(
         journey_resolution_receipts=receipts,
         registry=registry,
         rule_engine=rule_engine,
+    )
+
+
+def validate_archived_promise_batch(
+    state: WorldState,
+    source_batch: Sequence[EventRecord],
+    events: Sequence[object],
+    *,
+    npc_validation: NpcPlanSimulationBatchValidation | None = None,
+) -> None:
+    """Validate a promise against the recorded actor, or the recomputed NPC command."""
+    if not requires_promise_validation(None, events):
+        return
+    if npc_validation is None and any(record.type in _NPC_PLAN_EVENT_TYPES for record in source_batch):
+        npc_validation = replay_npc_plan_batch(state, source_batch)
+    first = source_batch[0]
+    validate_promise_batch(
+        events if npc_validation is None else npc_validation.core_rule_events,
+        world_id=first.world_id, branch_id=first.branch_id, command_id=first.command_id,
+        actor_id=first.actor_id if npc_validation is None else npc_validation.actual_npc_actor_id,
+        ruleset_version=first.ruleset_version,
+        command_type=None if npc_validation is None else npc_validation.action_command_type,
+        command_payload=None if npc_validation is None else npc_validation.action_command_payload,
+        causation_ids=first.causation_ids, committed_reactions=state.story_reactions,
     )
 
 

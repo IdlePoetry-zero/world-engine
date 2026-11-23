@@ -54,6 +54,7 @@ from world_engine.domain.reducers import state_hash
 from world_engine.rules.contracts import (
     ACTION_INTENT_ADAPTER,
     ExploreIntent,
+    FulfillReturnPromiseIntent,
     MoveIntent,
     ProduceIntent,
     ProposeRelationshipInvitationIntent,
@@ -1219,6 +1220,12 @@ def _references_are_known(
         except (TypeError, ValueError):
             return "unknown", "unknown"
         return None if any(recipe.recipe_id == action.recipe_id for recipe in registered.recipes) else ("unknown", "unknown")
+    if isinstance(action, FulfillReturnPromiseIntent):
+        own_promises = projection.get("own_promises", [])
+        return None if any(
+            row["promise_id"] == str(action.promise_id) and row["status"] == "active" and row["role"] == "promisor"
+            for row in own_promises
+        ) else ("unknown", "unknown")
     if isinstance(action, ProposeRelationshipInvitationIntent):
         return None if action.target_id in known_visible_entities else ("unknown", "unknown")
     if isinstance(action, SpeakIntent):
@@ -1299,6 +1306,8 @@ def _model_request(
         "shared_production_available 为真时，可按 available_production 中的工坊、配方和技能要求安排生产。"
         "原料与产出归登记生产方，现场协助不等于取得个人库存。"
         "配方所列原料和产出只是用量和产品；flows_truncated 为真时仅列部分品类。实际原料与额度仍需规则核验。"
+        "归还时只从 own_promises 里选本人作为 promisor 的 active 记录，使用 fulfill_return_promise 和对应 promise_id。"
+        "fulfillment_preflight 表示当前可观察的条件及期限。当场缺货或交付对象不在场时，先规划可验证的准备步骤，或暂缓。"
         "遇到本人最近的失败，结合现在的报价、地点和人物状态重新选方法。旧失败不能证明条件今天仍相同。"
         "goal_completed 条件里的 prerequisite_status 来自本人前置目标的真实记录。succeeded 表示此前已经完成，可沿用这一前提。其他状态均不可视为已经完成。"
         f"先从 active_goals 和 schema 列出的相同本人目标 ID 中选择一至{goal_selection_limit}个，"

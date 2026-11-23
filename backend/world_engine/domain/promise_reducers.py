@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, localcontext
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 from uuid import UUID
 
 from .components import InventoryComponent, InventoryLot, ScheduledEventRecord
@@ -30,7 +30,7 @@ from .relationship_promises import (
 )
 
 if TYPE_CHECKING:
-    from .models import WorldEntity
+    from .models import WorldEntity, WorldState
 
 
 class PromiseState(Protocol):
@@ -64,14 +64,20 @@ def apply_promise_event(
 
     event = parse_promise_event(raw_event)
     if isinstance(event, RelationshipPromiseRecordedEvent):
-        return _apply_recorded(state, event)
-    if isinstance(event, PromiseItemReturnedEvent):
-        return _apply_returned(state, event)
-    if isinstance(event, PromiseReleasedEvent):
-        return _apply_released(state, event)
-    if isinstance(event, PromiseDeadlineBreachedEvent):
-        return _apply_breached(state, event)
-    raise InvalidEvent(f"No promise reducer is registered for {event.type!r}.")
+        updated = _apply_recorded(state, event)
+    elif isinstance(event, PromiseItemReturnedEvent):
+        updated = _apply_returned(state, event)
+    elif isinstance(event, PromiseReleasedEvent):
+        updated = _apply_released(state, event)
+    elif isinstance(event, PromiseDeadlineBreachedEvent):
+        updated = _apply_breached(state, event)
+    else:
+        raise InvalidEvent(f"No promise reducer is registered for {event.type!r}.")
+    if getattr(updated, "metadata", {}).get("npc_return_commitment_reviews_v1") is True:
+        from .npc_commitments import update_npc_return_commitment
+
+        return update_npc_return_commitment(cast("WorldState", updated), event)
+    return updated
 
 
 def validate_promise_event(

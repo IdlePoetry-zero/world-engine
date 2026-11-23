@@ -32,7 +32,6 @@ from world_engine.domain.events import (
     parse_event, validate_adjudication_batch, validate_background_clock_batch,
     validate_historical_evidence_destruction_batch, validate_investigation_case_batch,
 )
-from world_engine.domain.promise_validation import validate_promise_batch
 from world_engine.domain.family_events import validate_kinship_batch
 from world_engine.domain.occupation_events import validate_occupation_batch
 from world_engine.domain.occupation_death_validation import validate_persisted_death_vacancies
@@ -90,7 +89,7 @@ from .models import (
     WorldPackArchiveRow,
     WorldRow,
 )
-from .npc_plan_replay import replay_npc_plan_batch
+from .npc_plan_replay import replay_npc_plan_batch, validate_archived_promise_batch
 
 
 _SENSITIVE_CONFIG_KEYS = frozenset(
@@ -665,12 +664,7 @@ class WorldBackupImporter:
                 command_id=first.command_id, ruleset_version=first.ruleset_version,
                 command_type=None, command_payload=None,
             )
-            validate_promise_batch(
-                validated_batch, world_id=first.world_id, branch_id=branch.branch_id, command_id=first.command_id,
-                actor_id=first.actor_id, ruleset_version=first.ruleset_version, command_type=None, command_payload=None,
-                causation_ids=first.causation_ids,
-                committed_reactions=state.story_reactions,
-            )
+            validate_archived_promise_batch(state, batch, validated_batch, npc_validation=npc_validation)
             validate_kinship_batch(validated_batch, world_id=first.world_id, branch_id=branch.branch_id,
                                   command_id=first.command_id, actor_id=first.actor_id, ruleset_version=first.ruleset_version)
             validate_occupation_batch(validated_batch, world_id=first.world_id, branch_id=branch.branch_id,
@@ -1790,12 +1784,7 @@ def _preflight(
                     command_id=first.command_id, ruleset_version=first.ruleset_version,
                     command_type=None, command_payload=None,
                 )
-                validate_promise_batch(
-                    validated_batch, world_id=first.world_id, branch_id=branch.branch_id, command_id=first.command_id,
-                    actor_id=first.actor_id, ruleset_version=first.ruleset_version, command_type=None, command_payload=None,
-                    causation_ids=first.causation_ids,
-                    committed_reactions=state.story_reactions,
-                )
+                validate_archived_promise_batch(state, event_batch.events, validated_batch, npc_validation=npc_validation)
                 validate_kinship_batch(validated_batch, world_id=first.world_id, branch_id=branch.branch_id,
                                       command_id=first.command_id, actor_id=first.actor_id, ruleset_version=first.ruleset_version)
                 validate_occupation_batch(validated_batch, world_id=first.world_id, branch_id=branch.branch_id,

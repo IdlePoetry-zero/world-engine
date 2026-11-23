@@ -27,6 +27,8 @@ from world_engine.domain.npc_plan_review import (
 )
 from world_engine.domain.npc_plan_review_events import NpcPlanReviewResolvedEvent
 from world_engine.domain.relationship_invitation_events import RelationInvitationChangedEvent
+from world_engine.domain.promise_events import PromiseItemReturnedEvent
+from world_engine.domain.promise_trust_events import PromiseItemReturnedWithTrustEvent
 from world_engine.domain.reducers import state_hash
 from world_engine.domain.travel_journey_events import TravelJourneyChangedEvent
 from world_engine.rules.engine import RuleEngine
@@ -378,6 +380,15 @@ def _action_command(
     events: tuple[DomainEvent, ...],
     actor_id: UUID,
 ) -> tuple[str | None, JsonObject | None]:
+    if len(events) == 1 and isinstance(events[0], (PromiseItemReturnedEvent, PromiseItemReturnedWithTrustEvent)):
+        event = events[0]
+        settlement = event.settlement if isinstance(event, PromiseItemReturnedWithTrustEvent) else event
+        if settlement.actor_id != actor_id:
+            raise InvalidEvent("An NPC plan must return its own promised goods.")
+        return "action.fulfill_return_promise", {
+            "kind": "fulfill_return_promise",
+            "promise_id": str(settlement.promise_id),
+        }
     invitations = [event for event in events if isinstance(event, RelationInvitationChangedEvent)]
     ballots = [event for event in events if isinstance(event, LeadershipBallotChangedEvent)]
     if invitations and ballots:

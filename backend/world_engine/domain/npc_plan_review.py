@@ -253,6 +253,32 @@ def build_npc_failure_review(state: WorldState, world_id: UUID, plan: NpcPlan) -
     return _rearm_npc_review(old, due_tick)
 
 
+def schedule_npc_commitment_review(
+    state: WorldState, world_id: UUID, actor_id: UUID, deadline: int,
+) -> ScheduledEventRecord | None:
+    """Wake the regular planner early enough to act on a newly registered commitment."""
+    remaining = deadline - state.current_tick
+    if remaining < 0:
+        return None
+    interval = max(1, (remaining - 1) // 2)
+    runs = min(3, remaining + 1)
+    due_tick = deadline - (runs - 1) * interval
+    schedule_id = npc_plan_review_schedule_id(world_id, actor_id)
+    existing = next((row for row in state.scheduled_events if row.id == schedule_id), None)
+    if existing is None:
+        return build_npc_plan_review_schedule(
+            state, world_id, actor_id, due_tick,
+            repeat_ticks=interval if runs > 1 else None, max_runs=runs,
+        )
+    if existing.status == "queued":
+        validate_npc_plan_review_schedule(state, existing, world_id)
+        if existing.due_tick > due_tick:
+            return existing.model_copy(update={"due_tick": due_tick, "revision": existing.revision + 1})
+        return None
+    exhausted = _exhausted_npc_review(state, world_id, actor_id)
+    return _rearm_npc_review(exhausted, due_tick) if exhausted is not None else None
+
+
 def _exhausted_npc_review(state: WorldState, world_id: UUID, actor_id: UUID) -> ScheduledEventRecord | None:
     schedule_id = npc_plan_review_schedule_id(world_id, actor_id)
     old = next((row for row in state.scheduled_events if row.id == schedule_id), None)
