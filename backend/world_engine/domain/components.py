@@ -199,8 +199,11 @@ class NeedsComponent(ComponentModel):
     custom: dict[BoundedName, NeedValue] = Field(default_factory=dict, max_length=64)
 
 
+MAX_SKILL_LEVEL = 100
+
+
 class SkillValue(ComponentModel):
-    level: ExactDecimal = Field(default=Decimal("0"), ge=Decimal("0"), le=Decimal("100"))
+    level: ExactDecimal = Field(default=Decimal("0"), ge=Decimal("0"), le=MAX_SKILL_LEVEL)
     experience: int = Field(default=0, ge=0)
     trained_ticks: int = Field(default=0, ge=0)
     last_practiced_tick: Tick | None = None

@@ -22,11 +22,12 @@ from world_engine.rules.versions import LEGACY_RULESET_VERSION, SUPPORTED_RULESE
 
 from .author_rule_checks import AuthorFieldError, author_component_rule_errors
 from .errors import ApplicationFailure
-from .world_packs import VerifiedWorldPack, WorldPackArchiveError, load_world_pack
+from .world_packs import OpeningPlayerSetup, VerifiedWorldPack, WorldPackArchiveError, load_world_pack
 from .worlds import WorldApplication
 
 
 _IMPORT_NAMESPACE = UUID("388591b1-a102-472c-b181-e31ba09cb888")
+_PLAYER_SETUP_DIGEST = "world_pack_player_setup_sha256"
 
 
 def _bind_npc_review_schedules(state: WorldState, world_id: UUID) -> WorldState:
@@ -70,6 +71,32 @@ class PreparedWorldPack:
             "contains_author_material": True,
             "field_errors": list(self.field_errors),
         } | ({"story_openings": list(self.openings)} if self.openings else {})
+
+
+def _setup_opening_player(state: WorldState, setup: OpeningPlayerSetup, profiles: list[dict]) -> WorldState:
+    if not profiles:
+        raise ApplicationFailure("PLAYER_SETUP_UNAVAILABLE", "这个开局使用固定人物。", status_code=422)
+    profile = next((row for row in profiles if row["profile_id"] == setup.profile_id), None)
+    if setup.profile_id is not None and profile is None:
+        raise ApplicationFailure("PLAYER_PROFILE_UNKNOWN", "请选择这个开局提供的身份。", status_code=422)
+    actor = state.entities[state.player_id]
+    components = dict(actor.components)
+    descriptions = [components.get("public_description")]
+    if profile is not None:
+        components["public_role"] = profile["title"]
+        descriptions.append(profile["description"])
+        if profile.get("food_requirement") == "not_required" and "needs" in components:
+            needs = dict(components["needs"])
+            needs.pop("food", None)
+            if any(needs.values()):
+                components["needs"] = needs
+            else:
+                components.pop("needs", None)
+    descriptions.append(setup.description)
+    if any(descriptions):
+        components["public_description"] = "\n".join(value for value in descriptions if value)[:4000]
+    updated = actor.model_copy(update={"name": setup.name or actor.name, "components": components})
+    return state.model_copy(update={"entities": state.entities | {actor.id: updated}})
 
 
 def _scenario_rule_errors(scenario: dict) -> tuple[AuthorFieldError, ...]:
@@ -202,6 +229,7 @@ class WorldPackApplication:
             place = initial.entities.get(actor.location_id)
             summaries.append({
                 **{field: item[field] for field in ("opening_id", "title", "position", "known_history")},
+                **({"player_profiles": item["player_profiles"]} if item.get("player_profiles") else {}),
                 "opening_state": {
                     "player_name": actor.name,
                     "place_name": place.name if place and not place.components.get("hidden") else None,
@@ -222,12 +250,17 @@ class WorldPackApplication:
 
     def import_world(
         self, scope: AccessScope, data: bytes, archive_hash: str, idempotency_key: str, opening_id: str | None = None,
+        player_setup: OpeningPlayerSetup | None = None,
     ) -> dict:
         digest = hashlib.sha256(data).hexdigest()
         if digest != archive_hash:
             raise ApplicationFailure("WORLD_PACK_PREVIEW_MISMATCH", "文件与预览版本不一致，请重新预览。", status_code=409)
         world_id = uuid5(_IMPORT_NAMESPACE, f"{scope.tenant_id}:{scope.user_id}:{idempotency_key}")
         repository = self.worlds.repository
+        setup_values = player_setup.model_dump(mode="json", exclude_none=True) if player_setup else {}
+        setup_digest = hashlib.sha256(json.dumps(
+            setup_values, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest() if setup_values else None
 
         def confirmation(duplicate: bool) -> dict:
             view = repository.read_world(scope, world_id)
@@ -236,6 +269,8 @@ class WorldPackApplication:
                 raise Conflict("This idempotency key already identifies another world pack import.")
             if view.state.metadata.get(STORY_OPENING_METADATA) != opening_id:
                 raise Conflict("This idempotency key already identifies another story opening.")
+            if view.state.metadata.get(_PLAYER_SETUP_DIGEST) != setup_digest:
+                raise Conflict("This idempotency key already identifies another opening player setup.")
             return self.worlds._world_header(view) | {"duplicate": duplicate}
 
         try:
@@ -248,13 +283,19 @@ class WorldPackApplication:
                 raise ApplicationFailure("STORY_OPENING_REQUIRED", "请先选择介入点。", status_code=422)
             raise ApplicationFailure("WORLD_PACK_INCOMPATIBLE", "; ".join(prepared.blockers), status_code=422)
         draft = prepared.draft
-        metadata = dict(draft.state.metadata)
+        initial = draft.state
+        metadata = dict(initial.metadata)
         metadata.pop("creation_payload_hash", None)
+        metadata.pop(_PLAYER_SETUP_DIGEST, None)
+        if setup_digest is not None:
+            selected = next((item for item in prepared.openings if item["opening_id"] == opening_id), {})
+            initial = _setup_opening_player(initial, player_setup, selected.get("player_profiles", []))
+            metadata[_PLAYER_SETUP_DIGEST] = setup_digest
         if opening_id is None:
             metadata.pop(STORY_OPENING_METADATA, None)
         metadata["world_pack_archive_sha256"] = digest
         try:
-            state = _bind_npc_review_schedules(draft.state, world_id).model_copy(update={"metadata": metadata})
+            state = _bind_npc_review_schedules(initial, world_id).model_copy(update={"metadata": metadata})
         except InvalidEvent as exc:
             raise ApplicationFailure("WORLD_PACK_INCOMPATIBLE", str(exc), status_code=422) from exc
         world = draft.model_copy(update={

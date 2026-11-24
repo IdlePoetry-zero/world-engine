@@ -865,6 +865,11 @@ class RulesActionDispatcher:
             feedback = {
                 "price_ceiling_exceeded": "当前总价超过你的上限，已跳过这笔交易。",
                 "price_ceiling_currency_mismatch": "当前市场币种与上限不一致，已跳过这笔交易。",
+                "insufficient_currency": "你的可用货币不足以支付这笔交易。可以减少数量或继续其他活动。",
+                "insufficient_stock": "当前挂牌库存不足。可以减少数量或另选商品。",
+                "below_minimum_quantity": "数量低于当前挂牌的最小交易量。",
+                "listing_unavailable": "这条挂牌已不可用，请查看当前市集。",
+                "seller_unavailable": "卖家当前不在市集，请稍后再询或另选商品。",
             }.get(resolution.outcome.code, feedback)
         if action.kind == "explore" and resolution.outcome.code in {"nothing_hidden_found", "search_failed"}:
             feedback = f"你花了 {resolution.elapsed_ticks} 世界秒搜查，暂未发现新线索。"

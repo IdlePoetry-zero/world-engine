@@ -101,6 +101,7 @@ async def test_scarlet_mist_training_unlocks_four_exercises_and_a_consented_spel
             ident = _id(f"world:challenge:{discipline}")
             option, = [row for row in player_view()["local_challenges"] if row["challenge_id"] == str(ident)]
             assert option["passed"] is None and Decimal(option["pass_level"]) == 12
+            assert Decimal(option["current_level"]) == 10 and not option["can_attempt_skill"]
             skill_id = f"gensokyo.{discipline}"
             before = read().state.entities[player].components["skills"]["skills"][skill_id]
             assert Decimal(before["level"]) == 10
@@ -119,8 +120,9 @@ async def test_scarlet_mist_training_unlocks_four_exercises_and_a_consented_spel
             "branch_id": str(branch_id), "sequence": str(untrained.last_seq), "label": "Attempt before studying",
         }).raise_for_status().json()
         control = UUID(fork["branch_id"])
-        assert challenge("declaration", branch=control)["passed"] is False
         assert challenge("declaration", branch=control, expected=409)["error"]["code"] == "CHALLENGE_UNAVAILABLE"
+        assert read(control).state_hash == untrained.state_hash
+        assert not read(control).state.challenge_attempts
 
         contest_id = _id("world:contest:shrine")
         offer = {"operation": "invite", "definition_id": str(contest_id), "recipient_id": str(reimu),

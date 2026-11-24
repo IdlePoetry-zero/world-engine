@@ -136,7 +136,7 @@ def incident_nodes(
             "lead_ticks": chapter.hours * 3600,
             **({
                 "known_cost": "从人间之里到博丽神社，按当前开放路线步行约需 45 分钟。",
-                "possible_impact": "及时登记现场目击可让灵梦将其列入调查，并影响神社安置受红雾影响的来客。",
+                "possible_impact": "及时登记目击可影响灵梦的调查和神社对受红雾影响者的安置。口粮属于公共救济。",
             } if chapter.key == "scarlet-mist" else {}),
             **({
                 "detail": "可去守矢神社联系早苗并登记来客顾虑，也可在妖怪之山完成山道安全核查。",

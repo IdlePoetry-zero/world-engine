@@ -31,6 +31,13 @@ export class ApiError extends Error {
 export type Session = { principal: { id: string; display_name: string }; permissions: string[] }
 export type World = { world_id: string; title: string; active_branch_id: string | null; current_tick: string; state_version: string; status: string; ruleset_version?: string; pack_version?: string; world_mode?: 'story' }
 export type Pack = { pack_id: string; title: string; version: string; available_versions?: string[]; sustained_available_versions?: string[]; description: string }
+export type WorldPackPlayerProfile = {
+  profile_id: string
+  title: string
+  description: string
+  food_requirement: 'opening' | 'not_required'
+}
+export type WorldPackPlayerSetup = { profile_id?: string; name?: string; description?: string }
 export type WorldPackPreview = {
   manifest: { pack_id: string; version: string; title: string; license: string; engine_range: string }
   compatibility: {
@@ -48,6 +55,7 @@ export type WorldPackPreview = {
     position: string
     known_history: string[]
     opening_state?: { player_name: string | null; place_name: string | null }
+    player_profiles?: WorldPackPlayerProfile[]
   }[]
 }
 export type WorldPackImportResult = World & { duplicate: boolean }
@@ -57,6 +65,9 @@ export type ChallengeOption = {
   description: string
   skill_label: string
   pass_level: string
+  current_level?: string | null
+  requires_pass_level?: boolean
+  can_attempt_skill?: boolean
   fee: { resource_id: string; quantity: string; label: string } | null
   passed: boolean | null
 }
@@ -1115,13 +1126,14 @@ export const api = {
   previewWorldPack: (archive: File, signal: AbortSignal) => request<WorldPackPreview>('/packs/import/preview', {
     method: 'POST', body: archive, signal, headers: { 'Content-Type': 'application/zip' },
   }, false),
-  importWorldPack: (archive: File, previewDigest: string, idempotencyKey: string, openingId?: string) => request<WorldPackImportResult>('/packs/import', {
+  importWorldPack: (archive: File, previewDigest: string, idempotencyKey: string, openingId?: string, playerSetup?: WorldPackPlayerSetup) => request<WorldPackImportResult>('/packs/import', {
     method: 'POST', body: archive,
     headers: {
       'Content-Type': 'application/zip',
       'X-World-Pack-Sha256': previewDigest,
       'Idempotency-Key': idempotencyKey,
       ...(openingId ? { 'X-Story-Opening': openingId } : {}),
+      ...(playerSetup ? { 'X-Player-Setup': encodeURIComponent(JSON.stringify(playerSetup)) } : {}),
     },
   }, false),
   createWorld: (body: {

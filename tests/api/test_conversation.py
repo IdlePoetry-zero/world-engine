@@ -89,6 +89,9 @@ async def test_hypothetical_query_never_changes_world_and_retry_does_not_call_mo
     assert len(captured) == 2
     assert "HIDDEN_CONSPIRACY" not in json.dumps(captured)
     assert "artisan" in json.dumps(captured)
+    current_rules = json.loads(captured[-1]["messages"][-1]["content"])["context"]
+    assert current_rules["tracked_personal_needs"] == {"food": False, "water": False, "rest": False}
+    assert current_rules["skill_level_scale"] == {"minimum": 0, "maximum": 100}
     assert await service.send(identity, request) == result
     assert len(captured) == 2
     with pytest.raises(Conflict):
@@ -194,6 +197,7 @@ async def test_direct_rest_clock_question_uses_rule_explanation_without_a_model_
     result = await service.send(identity, request)
     assert result["kind"] == "hypothetical" and result["world_effect"] is False
     assert "实际休息时长" in result["content"] and result["references"] == []
+    assert "没有启用进食或饮水需求" in result["content"]
     assert len(captured) == 1
     after = repository.read_world(identity, request.world_id, request.branch_id)
     assert (after.state_hash, after.last_seq, after.state.current_tick) == (
@@ -916,10 +920,10 @@ async def test_action_response_reveals_historical_archive_only_after_successful_
     assert result["kind"] == "action" and result["world_effect"] is True
     assert result["content"] == artifact.claim
     assert result["elapsed_ticks"] == "60"
-    assert result["references"] == [str(item_id)]
     assert len(calls) == 1
     after = repository.read_world(identity, inspect.world_id, inspect.branch_id)
     observation = next(record for record in after.state.knowledge if record.source_refs == [artifact.evidence_id])
+    assert result["references"] == [str(item_id), str(observation.id)]
     assert observation.fact == artifact.fact and observation.received_tick == 60
     assert repository.replay(identity, inspect.world_id, inspect.branch_id).state_hash == after.state_hash
 

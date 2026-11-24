@@ -37,6 +37,7 @@ class StubModelOperations:
     def __init__(self, listing_id, *, proposed_ceiling=None):
         self.listing_id = listing_id
         self.proposed_ceiling = proposed_ceiling
+        self.quantity = QUANTITY
         self.calls = []
 
     async def generate(self, scope, request):
@@ -46,7 +47,7 @@ class StubModelOperations:
         if first_message == INTENT_SYSTEM_PROMPT:
             output = {"intent": "action", "explanation": "玩家明确要求执行购买。"}
         else:
-            action = {"kind": "trade", "listing_id": str(self.listing_id), "quantity": QUANTITY}
+            action = {"kind": "trade", "listing_id": str(self.listing_id), "quantity": self.quantity}
             if self.proposed_ceiling is not None:
                 action["price_ceiling"] = self.proposed_ceiling
             output = {"action": action, "clarification": ""}
@@ -191,6 +192,17 @@ async def test_auto_purchase_cannot_exceed_written_total_ceiling_even_when_model
     assert await data.service.send(data.identity, request) == result
     assert len(data.models.calls) == 2
     _assert_replay_matches_head(data)
+
+
+@pytest.mark.asyncio
+async def test_insufficient_funds_explain_only_the_requested_trade_and_leave_world_unchanged(market_conversation):
+    data = market_conversation
+    data.models.quantity = "21"
+    before = _snapshot(data)
+    result = await data.service.send(data.identity, _request(data, text="我现在买二十一份矿石。"))
+    assert result["action_status"] == "rejected" and result["world_effect"] is False
+    assert "可用货币不足以支付这笔交易" in result["content"]
+    assert _snapshot(data).state_hash == before.state_hash
 
 
 @pytest.mark.asyncio

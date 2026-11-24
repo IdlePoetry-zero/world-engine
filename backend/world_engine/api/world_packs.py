@@ -1,17 +1,18 @@
 """Bounded, authenticated world template ZIP operations."""
 
 from typing import Annotated
+from urllib.parse import unquote
 from uuid import UUID
 
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import Response
-from pydantic import StringConstraints
+from pydantic import StringConstraints, ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from world_engine.application.errors import ApplicationFailure
 from world_engine.application.template_migration import TemplateMigrationApplication
 from world_engine.application.world_pack_import import WorldPackApplication
-from world_engine.application.world_packs import MAX_WORLD_PACK_BYTES, STORY_OPENING_ID_PATTERN
+from world_engine.application.world_packs import MAX_WORLD_PACK_BYTES, STORY_OPENING_ID_PATTERN, OpeningPlayerSetup
 from world_engine.domain.models import MembershipRole
 
 from .contracts import RequestModel
@@ -48,11 +49,16 @@ def world_pack_router(service: WorldPackApplication, scope, authoring=None):
         idempotency_key: Annotated[str, Header(min_length=1, max_length=200)],
         x_world_pack_sha256: Annotated[str, Header(pattern=r"^[a-f0-9]{64}$")],
         x_story_opening: Annotated[str | None, Header(pattern=STORY_OPENING_ID_PATTERN)] = None,
+        x_player_setup: Annotated[str | None, Header(max_length=4096)] = None,
     ):
         identity = scope(request)
+        try:
+            setup = OpeningPlayerSetup.model_validate_json(unquote(x_player_setup, errors="strict")) if x_player_setup else None
+        except (ValidationError, UnicodeError) as error:
+            raise ApplicationFailure("PLAYER_SETUP_INVALID", "请核对开局角色的资料。", status_code=422) from error
         data = await _archive_body(request)
         return wire(await run_in_threadpool(service.import_world, identity, data, x_world_pack_sha256, idempotency_key,
-                                            x_story_opening))
+                                            x_story_opening, setup))
 
     @router.get("/worlds/{world_id}/source-world-pack")
     def download_author_source_package(request: Request, world_id: UUID):

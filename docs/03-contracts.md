@@ -210,6 +210,8 @@ LLM 可提出参数与备选语义，不能决定余额检查结果或自行创�
 
 统一错误结构包含 code、message、retryable、field_errors、correlation_id、committed_through_tick。主要错误为 AUTH_REQUIRED、FORBIDDEN、STALE_VERSION、AMBIGUOUS_INTENT、RULE_REJECTED、INSUFFICIENT_RESOURCE、MODEL_UNAVAILABLE、MODEL_INVALID_OUTPUT、PACK_INCOMPATIBLE、JOB_CANCELLED 和 STORAGE_UNAVAILABLE。RULE_REJECTED 是游戏结果或可纠正输入，不自动当服务 500 错误。
 
+有主线世界包可以在介入点声明 `player_profiles`。预览只返回公开资料；导入时可在 `X-Player-Setup` 提供百分号编码的 UTF-8 JSON，字段限于 `profile_id`、`name`、`description`。不允许自行传入组件、能力或账户余额。配置仅作用于新世界的玩家角色。包内的 `food_requirement=not_required` 只移除进食需求，其余需求保持原开局。幂等键绑定归一化的角色配置与介入点。
+
 ## 多人协调接口
 
 `RoomScope` 将房间绑定到租户、世界和分支，`RoomMember` 将成员标识绑定到已认证账号，`RoomSnapshot` 固定世界版本和世界时刻。主持人可为具备现有角色权限的成员签发有期限的 `ActorControlLease`。角色控制权撤销或到期后，旧控制凭据不再允许提交新提案。接续租约使用递增令牌。

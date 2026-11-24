@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from typing import Annotated, Literal
 
-from pydantic import ConfigDict, Field, ValidationError
+from pydantic import ConfigDict, Field, ValidationError, model_validator
 
 from world_engine import __version__
 from world_engine.application.media_assets import MediaAssetStore
@@ -95,12 +95,32 @@ class WorldPackManifest(ContractModel):
         return _engine_compatible(self.engine_range, version)
 
 
+class OpeningPlayerProfile(ContractModel):
+    profile_id: _STORY_OPENING_ID
+    title: str = Field(min_length=1, max_length=80)
+    description: str = Field(min_length=1, max_length=240)
+    food_requirement: Literal["opening", "not_required"] = "opening"
+
+
+class OpeningPlayerSetup(ContractModel):
+    profile_id: _STORY_OPENING_ID | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    description: str | None = Field(default=None, min_length=1, max_length=240)
+
+
 class _StoryOpening(ContractModel):
     opening_id: _STORY_OPENING_ID
     title: str = Field(min_length=1, max_length=120)
     position: str = Field(min_length=1, max_length=160)
     known_history: tuple[Annotated[str, Field(min_length=1, max_length=360)], ...] = Field(max_length=12)
     scenario: JsonObject
+    player_profiles: tuple[OpeningPlayerProfile, ...] = Field(default=(), max_length=8)
+
+    @model_validator(mode="after")
+    def distinct_player_profiles(self):
+        if len(self.player_profiles) != len({profile.profile_id for profile in self.player_profiles}):
+            raise ValueError("Opening player profiles must have unique IDs.")
+        return self
 
 
 class _WorldPackTemplate(ContractModel):

@@ -28,8 +28,17 @@ from .gensokyo_village_life import RESOURCE_LABELS, add_local_economy
 
 
 PACK_ID = "author.gensokyo-world"
-PACK_VERSION = "1.2.0"
+PACK_VERSION = "1.3.0"
 PACK_TITLE = "东方幻想乡·异变年代"
+
+_PLAYER_PROFILES = (
+    {"profile_id": "village-visitor", "title": "人里来客",
+     "description": "与人间之里有来往的访客。你可以探亲、访人、学习或自行走访，无须接受调查委托。",
+     "food_requirement": "opening"},
+    {"profile_id": "food-independent", "title": "不靠普通食物的妖怪",
+     "description": "你不需要普通食物维生。食物仍可用来交易或送人。具体来历和日常由你自己描述。",
+     "food_requirement": "not_required"},
+)
 _HOUR = 3600
 
 _ENTRY_WINDOWS = {
@@ -566,7 +575,7 @@ def build_opening(chapter: Chapter) -> dict:
                                         "youkai-mountain", "moriya-shrine")
     ]
     player = WorldEntity(
-        id=_id("actor:resident"), name="异变调查来客", kind="character", location_id=player_start,
+        id=_id("actor:resident"), name="旅人", kind="character", location_id=player_start,
         components={
             "capabilities": {"grants": ["world.travel", "world.trade", *chapter.access]},
             "skills": skill_levels("player"),
@@ -635,8 +644,9 @@ def build_opening(chapter: Chapter) -> dict:
         challenges=challenges, contest_definitions=contests,
         metadata={
             "pack_id": PACK_ID, "pack_version": PACK_VERSION, "public_title": PACK_TITLE,
-            "public_description": chapter.position + f" 如要介入首轮调查，可在{entities[meeting].name}登记线索并联系"
-            f"{entities[actor_id(chapter.contact)].name}。路程、日程、来客资格和调查后果为世界包的模拟配置。",
+            "public_description": chapter.position + " 你可以自行访人、修习或旅行，也可让异变自行发展。"
+            f"如要介入首轮调查，可在{entities[meeting].name}登记线索并联系{entities[actor_id(chapter.contact)].name}。"
+            "铜钱用于自愿交易，公共救济口粮由地点保管。路程、日程、来客资格和调查后果为世界包的模拟配置。",
             "reference_incident": chapter.key,
             "resource_catalog": RESOURCE_LABELS,
         },
@@ -654,6 +664,7 @@ def build_opening(chapter: Chapter) -> dict:
     return {
         "opening_id": chapter.key, "title": history[chapter.key].title,
         "position": chapter.position, "known_history": [*past[-10:], chapter.position],
+        "player_profiles": list(_PLAYER_PROFILES),
         "scenario": state.model_dump(mode="json"),
     }
 

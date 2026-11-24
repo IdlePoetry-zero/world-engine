@@ -1,5 +1,7 @@
 """HTTP boundaries exercised against real temporary SQLite storage."""
 
+import json
+from urllib.parse import quote
 from uuid import UUID, uuid4
 
 import pytest
@@ -149,6 +151,56 @@ def test_story_world_pack_previews_history_and_starts_a_selected_genesis(service
     assert second["world_id"] != first["world_id"] and second["current_tick"] == "0"
     author = client.get(f"/api/v1/worlds/{first['world_id']}/view", params={"mode": "author"}).raise_for_status().json()
     assert author["state"]["metadata"]["world_pack_story_opening_id"] == "after"
+
+
+def test_story_player_setup_is_opt_in_and_only_changes_the_selected_players_food_need(service):
+    client, application, _, _ = service
+    story = application.catalog.build_world("fixture", "Story", "Traveler").state
+    scenario = story.model_dump(mode="json")
+    player_id = str(story.player_id)
+    scenario["entities"][player_id]["components"] = {
+        "needs": {"food": {"value": 15}, "water": {"value": 90}}, "capabilities": {"grants": ["world.travel"]},
+    }
+    opening = {"opening_id": "before", "title": "Before", "position": "Market day",
+               "known_history": [], "scenario": scenario}
+    profile = {"profile_id": "untouched-by-hunger", "title": "River Spirit",
+               "description": "Does not need ordinary food.", "food_requirement": "not_required"}
+    source = write_world_pack(manifest=WorldPackManifest(pack_id="test-story", version="1.0.0", title="Story"),
+                              template={"story_openings": [
+                                  opening | {"player_profiles": [profile]},
+                                  opening | {"opening_id": "fixed"},
+                              ]})
+    base_headers = {"Content-Type": "application/zip", "Origin": "http://testserver"}
+    report = client.post("/api/v1/packs/import/preview", headers=base_headers, content=source).raise_for_status().json()
+    assert report["story_openings"][0]["player_profiles"] == [profile]
+    assert "player_profiles" not in report["story_openings"][1]
+    headers = base_headers | {"X-Story-Opening": "before", "X-World-Pack-Sha256": report["archive_sha256"]}
+
+    def import_opening(key, setup=None, opening_id="before"):
+        request_headers = headers | {"Idempotency-Key": key, "X-Story-Opening": opening_id}
+        if setup is not None:
+            request_headers["X-Player-Setup"] = quote(json.dumps(setup, ensure_ascii=False), safe="")
+        return client.post("/api/v1/packs/import", headers=request_headers, content=source)
+
+    customization = {"profile_id": profile["profile_id"], "name": "雾月", "description": "河上旅行者"}
+    result = import_opening("custom", customization).raise_for_status().json()
+    path = "/api/v1/worlds/" + result["world_id"]
+    projected = client.get(path + "/view").raise_for_status().json()["state"]
+    player = projected["entities"][player_id]
+    assert player["name"] == "雾月" and player["components"]["public_role"] == "River Spirit"
+    assert "河上旅行者" in player["components"]["public_description"]
+    assert player["components"]["needs"].get("food") is None
+    assert player["components"]["needs"]["water"]["value"] == 90
+    assert player["components"]["capabilities"]["grants"] == ["world.travel"]
+    assert import_opening("custom", customization | {"name": " 雾月 "}).json()["duplicate"]
+    assert import_opening("custom", customization | {"description": "不同角色"}).status_code == 409
+    assert import_opening("unknown", customization | {"profile_id": "unknown"}).json()["error"]["code"] == "PLAYER_PROFILE_UNKNOWN"
+    assert import_opening("fixed", customization, opening_id="fixed").json()["error"]["code"] == "PLAYER_SETUP_UNAVAILABLE"
+    assert import_opening("tamper", customization | {"capabilities": ["world.everything"]}).json()["error"]["code"] == "PLAYER_SETUP_INVALID"
+    default = import_opening("default").raise_for_status().json()
+    default_state = client.get(f"/api/v1/worlds/{default['world_id']}/view").raise_for_status().json()["state"]
+    assert default_state["entities"][player_id]["components"]["needs"]["food"]["value"] == 15
+    assert import_opening("default", {}).raise_for_status().json()["duplicate"]
 
 
 def test_world_creation_seed_is_optional_and_bound_to_the_request(service):

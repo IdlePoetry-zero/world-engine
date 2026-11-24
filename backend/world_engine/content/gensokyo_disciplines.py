@@ -49,7 +49,7 @@ def local_play(
         ChallengeDefinition(
             challenge_id=_id(f"world:challenge:{skill}"), venue_id=_id(f"place:{place}"),
             title=title, description=description + " 及格门槛为本包游玩配置。",
-            skill_id=f"gensokyo.{skill}", skill_label=_SKILLS[skill], pass_level="12",
+            skill_id=f"gensokyo.{skill}", skill_label=_SKILLS[skill], pass_level="12", requires_pass_level=True,
             note_on_pass=(
                 "已经练习过符卡的命名、限额与双方同意，场地规则仍由双方确认。"
                 if skill == "declaration" else None

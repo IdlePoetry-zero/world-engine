@@ -39,6 +39,7 @@ class ChallengeDefinition(_ChallengeModel):
     skill_id: ResourceName
     skill_label: Annotated[str, StringConstraints(min_length=1, max_length=120)] | None = None
     pass_level: ExactDecimal = Field(ge=0, le=100)
+    requires_pass_level: StrictBool = Field(default=False, exclude_if=lambda value: not value)
     required_capability: ResourceName | None = None
     prerequisite_id: UUID | None = None
     fee: ChallengeFee | None = None
@@ -93,15 +94,21 @@ def _has_prerequisites(state: WorldState, actor_id: UUID, definition: ChallengeD
 def open_challenges(state: WorldState, actor_id: UUID) -> list[dict]:
     own_attempts = {row.challenge_id: row for row in state.challenge_attempts if row.actor_id == actor_id}
     catalog = state.metadata.get("resource_catalog", {})
+    actor = state.entities.get(actor_id)
+    skills = SkillsComponent.model_validate(actor.components.get("skills", {})).skills if actor else {}
     options = []
     for row in state.challenges:
         if not _available_at_venue(state, actor_id, row) or not _has_prerequisites(state, actor_id, row):
             continue
         receipt = own_attempts.get(row.challenge_id)
+        skill = skills.get(row.skill_id)
         label = catalog.get(row.fee.resource_id, row.fee.resource_id) if row.fee and isinstance(catalog, dict) else None
         options.append({
             "challenge_id": str(row.challenge_id), "title": row.title, "description": row.description,
             "skill_label": row.skill_label or row.skill_id, "pass_level": str(row.pass_level),
+            "current_level": str(skill.level) if skill is not None else None,
+            "requires_pass_level": row.requires_pass_level,
+            "can_attempt_skill": skill is not None and (not row.requires_pass_level or skill.level >= row.pass_level),
             "fee": ({"resource_id": row.fee.resource_id, "quantity": str(row.fee.quantity),
                      "label": label if isinstance(label, str) else row.fee.resource_id} if row.fee else None),
             "passed": receipt.passed if receipt else None,
@@ -125,6 +132,8 @@ def settle_challenge(state: WorldState, challenge_id: UUID, actor_id: UUID, even
     skill = SkillsComponent.model_validate(actor.components.get("skills", {})).skills.get(definition.skill_id)
     if skill is None:
         raise InvalidEvent("请先学习这项考核所要求的技能。")
+    if definition.requires_pass_level and skill.level < definition.pass_level:
+        raise InvalidEvent("当前技能尚未达到报名门槛。可以先修习，未消耗考核机会。")
     fee = None
     if definition.fee is not None:
         charge = definition.fee
