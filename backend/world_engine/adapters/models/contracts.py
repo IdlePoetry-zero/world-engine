@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
 import ipaddress
+from math import isfinite
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit
@@ -146,6 +147,10 @@ class TimeoutPolicy:
     write_seconds: float = 30.0
     pool_seconds: float = 10.0
     deadline_seconds: float = 600.0
+    # Process-local monotonic deadline carried from model admission through
+    # provider retries. This is deliberately transient and is never persisted
+    # as model configuration or included in public traces.
+    deadline_at: float | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         bounded = {
@@ -158,6 +163,12 @@ class TimeoutPolicy:
         for name, (value, upper_bound) in bounded.items():
             if value <= 0 or value > upper_bound:
                 raise ValueError(f"{name} must be in (0, {upper_bound:g}]")
+        if self.deadline_at is not None and (
+            isinstance(self.deadline_at, bool)
+            or not isinstance(self.deadline_at, (int, float))
+            or not isfinite(self.deadline_at)
+        ):
+            raise ValueError("deadline_at must be a finite monotonic timestamp")
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,6 +235,13 @@ class ProviderConfig:
             raise ValueError("base_url cannot contain userinfo, query parameters, or a fragment")
         if port is not None and not 1 <= port <= 65535:
             raise ValueError("base_url port is out of range")
+        if self.secret_ref == "env:WORLD_ENGINE_DEEPSEEK_API_KEY" and (
+            self.kind is not ProviderKind.DEEPSEEK
+            or parsed.scheme != "https"
+            or hostname != "api.deepseek.com"
+            or port not in {None, 443}
+        ):
+            raise ValueError("the built-in DeepSeek credential requires the official HTTPS endpoint")
         host = hostname.rstrip(".").lower()
         try:
             is_loopback = ipaddress.ip_address(host).is_loopback

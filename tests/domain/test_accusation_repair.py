@@ -17,7 +17,7 @@ from world_engine.domain.events import (
     requires_accusation_repair_validation,
     validate_accusation_repair_batch,
 )
-from world_engine.domain.gameplay_events import AccusationRepairTrustProof
+from world_engine.domain.gameplay_events import AccusationRepairKeyReview, AccusationRepairTrustProof
 from world_engine.domain.investigation_cases import (
     CaseEvidenceRequirement,
     CaseSourceReference,
@@ -383,6 +383,32 @@ def test_accept_recovery_is_proven_directed_and_bounded_to_one_third_of_actual_l
     assert result.investigation_cases == offered.investigation_cases
     assert result.accusation_repair_offers[0].status == "accepted"
     assert correction.record.source_closure_event_id == proof.source_closure_event_id
+
+
+def test_high_magnitude_social_trust_requires_a_source_bound_hosted_review_for_recovery():
+    _, _, _, offered = _state_with_offer(trust=Decimal("-94"))
+    offered = offered.model_copy(update={"metadata": {"social_world_v1": True}})
+    offer = offered.accusation_repair_offers[0]
+    proof = AccusationRepairTrustProof(
+        case_file_id=CASE_FILE_ID, source_closure_event_id=SOURCE_CLOSURE_EVENT_ID,
+        source_relation_effect_event_id=uuid4(), accuser_id=ACCUSER_ID, suspect_id=SUSPECT_ID,
+        baseline_trust=Decimal("-79"), post_effect_trust=Decimal("-94"),
+    )
+    common = dict(world_id=WORLD_ID, branch_id=BRANCH_ID, command_id=uuid4(), ruleset_version=RULESET_VERSION,
+                  actor_id=SUSPECT_ID, offer_id=offer.offer_id, expected_revision=offer.revision, operation="accept",
+                  requested_by=ACCUSER_ID, trust_proof=proof)
+    without_review, unchanged = plan_accusation_repair_resolution(offered, **common)
+    assert without_review.trust_recovery.applied_delta == 0 and unchanged is None
+    review = AccusationRepairKeyReview(evidence_event_ids=(offer.correction_event_id, offer.offer_id),
+                                      model_call_id="fixture-review-trace")
+    response, relation = plan_accusation_repair_resolution(offered, **common, key_review=review)
+    assert response.trust_recovery.key_review == review
+    assert response.trust_recovery.applied_delta == 5
+    assert relation.value == Decimal("-89")
+    with pytest.raises(ValidationError, match="must bind"):
+        plan_accusation_repair_resolution(offered, **common, key_review=review.model_copy(update={
+            "evidence_event_ids": (offer.correction_event_id, uuid4()),
+        }))
 
 
 def test_accept_caps_recovery_at_the_pre_harm_baseline_and_accepts_without_any_recovery():

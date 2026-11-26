@@ -1399,6 +1399,13 @@ def _model_request(
             "如果人物愿意回应其中与你的目标相关的一句，可用 world.action.speak.v1，"
             "将 speaker_id 作为唯一 target_ids，另填 reply_to_memory_id。回应不代表同意任何条件。"
         )
+    if any(condition["kind"] == "discuss_known_topic" for goal in context.get("active_goals", ())
+           for condition in goal.get("conditions", ())):
+        system_content += (
+            "discuss_known_topic 是与另一位已知道同一线索的人讨论此事的目标。"
+            "愿意讨论且对方在场时，可用 world.action.speak.v1，以 target_id 为唯一 target_ids，"
+            "填写 topic_record_id 为条件中的 evidence_id。发言只表明谈过此事，不能同意任何交易、邀约或组织方案。"
+        )
     if "goal_prerequisite_edges" in context:
         system_content += (
             "goal_prerequisite_edges 的方向是 dependent_goal_id 依赖 prerequisite_goal_id；"

@@ -15,6 +15,8 @@ from uuid import UUID, uuid4, uuid5
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, ValidationInfo, field_validator, model_validator
 from pydantic_core import to_jsonable_python
 
+from .ambient_events import AmbientEventRecord, AmbientEventResolvedEvent
+from .social_contact_settlement import SocialContactSettledEvent
 from .components import (
     COMPONENT_REGISTRY,
     COMPONENT_NAME,
@@ -312,6 +314,9 @@ class WorldState(ContractModel):
     knowledge: list[KnowledgeRecord] = Field(default_factory=list)
     goals: list[GoalRecord] = Field(default_factory=list)
     scheduled_events: list[ScheduledEventRecord] = Field(default_factory=list)
+    ambient_events: list[AmbientEventRecord] = Field(
+        default_factory=list, max_length=4096, exclude_if=lambda records: not records,
+    )
     story_reactions: list[StoryReaction] = Field(default_factory=list, max_length=128, exclude_if=lambda records: not records)
     story_followups: list[StoryFollowup] = Field(default_factory=list, max_length=128, exclude_if=lambda records: not records)
     story_milestones: list[StoryMilestone] = Field(default_factory=list, exclude_if=lambda records: not records)
@@ -1184,6 +1189,8 @@ type DomainEvent = Annotated[
     | LeadershipBallotChangedEvent
     | LeadershipVacancyReviewRecordedEvent
     | OrganizationStrategyReviewResolvedEvent
+    | AmbientEventResolvedEvent
+    | SocialContactSettledEvent
     | SafeConductChangedEvent
     | OrganizationMemberResignedEvent
     | ProductionQuotaRenewedEvent

@@ -18,7 +18,7 @@ from .promise_trust import (
     plan_promise_trust_effect, promise_trust_relation_id,
 )
 from .promise_trust_events import PromiseDeadlineBreachedWithTrustEvent, PromiseItemReturnedWithTrustEvent
-from .promise_trust_state import PromiseTrustProjection, apply_promise_trust_plan
+from .promise_trust_state import PromiseTrustBond, PromiseTrustProjection, apply_promise_trust_plan
 from .relationship_promises import PROMISE_TRUST_POLICY_ID, PromiseReviewReceipt, RelationshipPromise
 
 if TYPE_CHECKING:
@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 BaseSettlement = PromiseItemReturnedEvent | PromiseDeadlineBreachedEvent
 TrustedSettlement = PromiseItemReturnedWithTrustEvent | PromiseDeadlineBreachedWithTrustEvent | PromiseItemReturnedLateEvent
 PROMISE_TRUST_POLICY_KEY = "promise_trust_policy_id"
+SOCIAL_WORLD_POLICY_KEY = "social_world_v1"
 
 
 def configured_promise_trust_policy(state: WorldState) -> Literal["core.promise_trust.v1"] | None:
@@ -57,6 +58,14 @@ def build_trusted_promise_settlement(
     projection = _read_projection(state, event)
     relation_id = promise_trust_relation_id(event.world_id, promise.promisee_id, promise.promisor_id)
     bond = projection.bonds.get(relation_id)
+    relationship_curve_enabled = state.metadata.get(SOCIAL_WORLD_POLICY_KEY) is True
+    routine_occurrence = None
+    if (
+        relationship_curve_enabled
+        and isinstance(event, PromiseItemReturnedEvent)
+        and source_breach_event_id is None
+    ):
+        routine_occurrence = _ordinary_return_routine_occurrence(state, promise, bond, projection)
     snapshot = None if bond is None else PromiseTrustBondSnapshot(
         relation_id=bond.id, from_id=bond.from_id, to_id=bond.to_id, revision=bond.revision,
         trust=bond.trust, budget_policy_id=bond.policy_id,
@@ -103,6 +112,8 @@ def build_trusted_promise_settlement(
     trust = plan_promise_trust_effect(
         promise, evidence, snapshot, schedule, command, promise_policy_id=promise.trust_policy_id,
         prior_receipt=projection.receipts.get(promise.id),
+        relationship_curve_enabled=relationship_curve_enabled,
+        routine_occurrence=routine_occurrence,
     )
     if trust is None:
         raise InvalidEvent("A configured promise settlement requires its planned trust effect.")
@@ -113,6 +124,50 @@ def build_trusted_promise_settlement(
             )
         return PromiseItemReturnedWithTrustEvent(event_id=event.event_id, settlement=event, trust=trust)
     return PromiseDeadlineBreachedWithTrustEvent(event_id=event.event_id, settlement=event, trust=trust)
+
+
+def _ordinary_return_routine_occurrence(
+    state: WorldState,
+    promise: RelationshipPromise,
+    bond: PromiseTrustBond | None,
+    projection: PromiseTrustProjection,
+) -> int:
+    """Count equivalent fulfilled returns from verified receipts on this edge.
+
+    The routine class is a directed promisee-to-promisor bond plus identical
+    structured return terms (resource, quantity, recipient account). Different
+    terms do not dilute one another. Private wording and deadline can vary while
+    the exact same inventory return still counts as the same ordinary routine.
+    Receipts and their referenced bond events, rather than authored prose or
+    promise IDs alone, are the durable source of the ordinal.
+    """
+    if bond is None:
+        return 1
+    promises = {item.id: item for item in state.relationship_promises}
+    occurrences = 0
+    for receipt in projection.receipts.values():
+        if (
+            receipt.outcome != "on_time_fulfilled"
+            or receipt.policy_id != promise.trust_policy_id
+            or receipt.outcome_event_id not in bond.evidence_refs
+        ):
+            continue
+        prior = promises.get(receipt.promise_id)
+        if prior is None:
+            raise InvalidEvent("A fulfilled return trust receipt references a missing promise.")
+        if (
+            prior.status != "fulfilled"
+            or prior.outcome_event_id != receipt.outcome_event_id
+            or prior.trust_policy_id != promise.trust_policy_id
+        ):
+            raise InvalidEvent("A fulfilled return trust receipt does not match its registered promise.")
+        if (
+            prior.promisee_id == promise.promisee_id
+            and prior.promisor_id == promise.promisor_id
+            and prior.terms == promise.terms
+        ):
+            occurrences += 1
+    return occurrences + 1
 
 
 def _applicable_breach_review(state: WorldState, promise: RelationshipPromise) -> PromiseReviewReceipt | None:

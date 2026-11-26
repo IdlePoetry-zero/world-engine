@@ -8,6 +8,7 @@ from uuid import UUID, uuid5
 
 from .errors import InvalidEvent
 from .gameplay_events import (
+    AccusationRepairKeyReview,
     AccusationRepairOfferRecordedEvent,
     AccusationRepairResolvedEvent,
     AccusationRepairTrustProof,
@@ -17,9 +18,24 @@ from .gameplay_events import (
 from .investigation import entity_visible_to_actor
 from .investigation_cases import AccusationRepairOffer, RepairOperation
 from .models import WorldState
+from .relationship_policy import settle_relationship_change
 
 
 _UNAVAILABLE = "Accusation repair is unavailable."
+
+
+def accusation_recovery_delta(state: WorldState, current: Decimal, proof: AccusationRepairTrustProof,
+                              key_review: AccusationRepairKeyReview | None) -> int:
+    from_loss = int((proof.baseline_trust - proof.post_effect_trust) / 3)
+    to_baseline = max(0, int(proof.baseline_trust - current))
+    proposed = min(from_loss, to_baseline)
+    if state.metadata.get("social_world_v1") is not True:
+        if key_review is not None:
+            raise InvalidEvent(_UNAVAILABLE)
+        return proposed
+    if key_review is not None and (from_loss < 3 or current.copy_abs() < 76 or proposed == 0):
+        raise InvalidEvent(_UNAVAILABLE)
+    return int(settle_relationship_change(current, proposed, verified_key_evidence=key_review is not None).applied_delta)
 
 
 def plan_accusation_repair_offer(
@@ -109,6 +125,7 @@ def plan_accusation_repair_resolution(
     operation: RepairOperation,
     requested_by: UUID | None = None,
     trust_proof: AccusationRepairTrustProof | None = None,
+    key_review: AccusationRepairKeyReview | None = None,
 ) -> tuple[AccusationRepairResolvedEvent, RelationDimensionChangedEvent | None]:
     """Plan the target's explicit response and, on acceptance only, capped trust recovery."""
     if operation not in {"accept", "decline", "defer"}:
@@ -150,6 +167,8 @@ def plan_accusation_repair_resolution(
         "last_operation": operation,
     })
 
+    if key_review is not None and (requested_by is None or trust_proof is None):
+        raise InvalidEvent(_UNAVAILABLE)
     relation_event = None
     recovery = None
     if operation == "accept" and trust_proof is not None:
@@ -162,9 +181,7 @@ def plan_accusation_repair_resolution(
             relation = directed[0]
             expected_previous = relation.dimensions.get("trust")
             current_trust = expected_previous if expected_previous is not None else Decimal("0")
-            maximum_from_loss = int((trust_proof.baseline_trust - trust_proof.post_effect_trust) / 3)
-            maximum_to_baseline = max(0, int(trust_proof.baseline_trust - current_trust))
-            applied_delta = min(maximum_from_loss, maximum_to_baseline)
+            applied_delta = accusation_recovery_delta(state, current_trust, trust_proof, key_review)
             if applied_delta > 0:
                 next_trust = current_trust + Decimal(applied_delta)
                 relation_event = RelationDimensionChangedEvent(
@@ -185,6 +202,7 @@ def plan_accusation_repair_resolution(
         recovery = AccusationRepairTrustRecovery(
             proof=trust_proof,
             applied_delta=applied_delta,
+            key_review=key_review,
         )
 
     response = AccusationRepairResolvedEvent(

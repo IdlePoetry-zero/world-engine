@@ -2766,6 +2766,7 @@ class RuleEngine:
                     state, **provenance, offer_id=action.offer_id, expected_revision=action.expected_revision,
                     operation=action.operation, requested_by=context.accusation_repair_requested_by,
                     trust_proof=context.accusation_repair_trust_proof,
+                    key_review=context.accusation_repair_key_review,
                 )
                 events = [response] if relation is None else [response, relation]
         except DomainError:

@@ -88,6 +88,13 @@ def goal_condition_met(
         )
     if condition.kind == "entity_status":
         return bool(subject and subject.id == owner_id and subject.status == condition.status)
+    if condition.kind == "discuss_known_topic":
+        return condition.subject_id == owner_id and any(
+            memory.kind == "memory" and memory.owner_id == owner_id and memory.holder_id == condition.target_id
+            and memory.subject_id == owner_id and condition.evidence_id in memory.source_refs
+            and memory.visibility.policy == "subject_ids" and set(memory.visibility.subject_ids) == {owner_id, condition.target_id}
+            for memory in state.knowledge
+        )
     return any(
         prerequisite.id == condition.target_id and prerequisite.owner_id == owner_id
         and (prerequisite.status == "succeeded" or prerequisite.id in fulfilled)

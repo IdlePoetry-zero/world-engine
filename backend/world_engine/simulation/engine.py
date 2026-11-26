@@ -9,9 +9,17 @@ from uuid import UUID, uuid5
 
 from world_engine.agents import AgentPolicy, AmbiguousGoalPriority
 from world_engine.domain import DomainEvent, GovernanceSuccessionEvent, LifeEndedEvent, WorldState
+from world_engine.domain.ambient_events import (
+    AMBIENT_EVENT_HANDLER, AMBIENT_EVENT_VERSION, AmbientEventPolicy, AmbientEventResolvedEvent,
+    ambient_agenda_author_ids, ambient_event_id, ambient_participants, ambient_policy_result, ambient_roll,
+    validate_ambient_proposal,
+)
 from world_engine.domain.components import (
     GovernanceComponent, InventoryComponent, LifeComponent, NeedsComponent, ScheduledEventRecord,
     leadership_office_ids_held_by,
+)
+from world_engine.domain.social_contact_settlement import (
+    SOCIAL_CONTACT_HANDLER, SOCIAL_CONTACT_VERSION, plan_social_contact_settlement,
 )
 from world_engine.domain.gameplay_events import BackgroundNeedsAdvancedEvent, ComponentReplacedEvent
 from world_engine.domain.events import parse_event
@@ -35,7 +43,7 @@ from world_engine.domain.travel_journeys import (
     TRAVEL_RESOLUTION_HANDLER_ID, TRAVEL_RESOLUTION_HANDLER_VERSION, active_travel_journey, travel_resolution_schedule_id,
 )
 from world_engine.domain.travel_journey_events import TravelJourneyChangedEvent
-from world_engine.domain.reducers import apply_event, state_json, state_payload_hash
+from world_engine.domain.reducers import apply_event, state_hash, state_json, state_payload_hash
 from world_engine.rules.contracts import RuleContext, RuleOutcome, RuleResolution
 from world_engine.rules import BackgroundAgentChoice
 from world_engine.rules.engine import RULES_VERSION, RuleEngine, _observed_entities
@@ -2938,6 +2946,18 @@ class SimulationEngine:
         plan: SimulationPlan,
     ) -> SimulationResolution:
         self._reject_unconsumed_decisions(context)
+        if (scheduled.handler_id, scheduled.handler_version) == (SOCIAL_CONTACT_HANDLER, SOCIAL_CONTACT_VERSION):
+            event = plan_social_contact_settlement(
+                state, scheduled, context.world_id, context.branch_id, context.externally_controlled_actor_ids,
+            )
+            resolution = RuleResolution(
+                events=[event], elapsed_ticks=0, ruleset_version=context.ruleset_version,
+                outcome=RuleOutcome(status="succeeded", code="social_contact_settled", message="Scheduled NPC contacts were resolved."),
+            )
+            return self._resolved(
+                state, context, resolution, outcome="advanced", boundary="social_contact_settled",
+                interruption=None, continuation=self._continuation(plan, state.current_tick),
+            )
         if scheduled.handler_id == TRAVEL_RESOLUTION_HANDLER_ID and scheduled.handler_version == TRAVEL_RESOLUTION_HANDLER_VERSION:
             return self._resolve_scheduled_travel(state, scheduled, context, plan)
         # These typed events verify the persisted command ID at storage and replay boundaries.
@@ -3088,6 +3108,7 @@ class SimulationEngine:
             or (scheduled.handler_id == STORY_NODE_HANDLER and scheduled.handler_version == STORY_NODE_VERSION)
             or (scheduled.handler_id, scheduled.handler_version) == (MEETING_COMMITMENT_HANDLER, MEETING_COMMITMENT_VERSION)
             or (scheduled.handler_id, scheduled.handler_version) == ("organization.strategy_review", "1.0.0")
+            or (scheduled.handler_id, scheduled.handler_version) == (SOCIAL_CONTACT_HANDLER, SOCIAL_CONTACT_VERSION)
         )
 
     @staticmethod
@@ -3468,6 +3489,8 @@ class SimulationEngine:
         *,
         continuation: SimulationPlan | None = None,
     ) -> SimulationResolution:
+        if request.kind == AMBIENT_EVENT_HANDLER:
+            return self._ambient_decision_gate(state, context, request, continuation)
         response = self._matching_response(context, request)
         if request.kind == "npc.plan_review" and response is None:
             actor = state.entities.get(request.actor_id)
@@ -3513,6 +3536,51 @@ class SimulationEngine:
             reason="accepted_model_decision_requires_rule_resolution",
             interruption=Interruption(kind="rule_required", tick=request.at_tick, reason_code="accepted_model_decision_requires_rule_resolution", subject_id=request.actor_id, reference_id=request.request_id),
             accepted_decisions=(response,),
+        )
+
+    def _ambient_decision_gate(self, state, context, request, continuation):
+        schedule = next(item for item in state.scheduled_events if item.id == request.causal_subject_id)
+        policy = AmbientEventPolicy.model_validate(schedule.payload)
+        roll = ambient_roll(context.world_seed, context.branch_id, schedule)
+        outcome = ambient_policy_result(state, schedule, policy, roll)
+        response = self._matching_response(context, request)
+        if outcome is None and response is None:
+            if context.allow_npc_routine_mobility and ambient_participants(
+                state, policy, controlled=context.externally_controlled_actor_ids,
+            ):
+                return self._empty(
+                    state, context, outcome="decision_required", reason=request.reason_code,
+                    decision_requests=(request,),
+                )
+            outcome = "deferred"
+        proposal = None
+        model_call_id = None
+        if response is not None:
+            if outcome is not None or response.ambient_outcome is None or response.ambient_state_hash != state_hash(state):
+                raise StaleDecisionResponse("The ambient proposal does not match its current opportunity.")
+            outcome, proposal, model_call_id = response.ambient_outcome, response.ambient_proposal, response.ambient_model_call_id
+            if proposal is not None:
+                try:
+                    validate_ambient_proposal(
+                        proposal, ambient_participants(state, policy, controlled=context.externally_controlled_actor_ids),
+                        agenda_authors=ambient_agenda_author_ids(state, policy),
+                    )
+                except ValueError:
+                    outcome, proposal = "deferred", None
+        event = AmbientEventResolvedEvent(
+            event_id=ambient_event_id(schedule.id, context.branch_id, schedule.completed_runs),
+            world_id=context.world_id, branch_id=context.branch_id, schedule_id=schedule.id,
+            occurrence=schedule.completed_runs, checked_tick=state.current_tick, roll=roll, outcome=outcome,
+            model_call_id=model_call_id, proposal=proposal,
+        )
+        resolution = RuleResolution(
+            events=[event], elapsed_ticks=0, ruleset_version=context.ruleset_version,
+            outcome=RuleOutcome(status="succeeded", code="ambient_event_resolved", message="An ambient event opportunity was settled."),
+        )
+        return self._resolved(
+            state, context, resolution, outcome="advanced" if continuation is not None else "completed",
+            boundary="ambient_event_resolved", interruption=None, continuation=continuation,
+            accepted_decisions=(response,) if response is not None else (),
         )
 
     def _resolve_npc_plan_review(self, state, context, request, response, continuation, *, policy_reason=None):
@@ -3745,6 +3813,15 @@ class SimulationEngine:
         )
 
     def _scheduled_decision_request(self, state, context, scheduled):
+        if (scheduled.handler_id, scheduled.handler_version) == (AMBIENT_EVENT_HANDLER, AMBIENT_EVENT_VERSION):
+            request_id = self._event_id(context, state.current_tick, f"ambient-proposal:{scheduled.id}")
+            return DecisionRequest(
+                request_id=request_id, kind=AMBIENT_EVENT_HANDLER, causal_subject_id=scheduled.id,
+                at_tick=state.current_tick, state_version=context.state_version,
+                title="Review a regional event opportunity", reason_code="ambient_event_due",
+                options=(DecisionOption(option_id="ambient", label="Propose a compatible world situation"),),
+                evidence_ids=(scheduled.id,),
+            )
         if scheduled.handler_id == "npc.goal_review":
             from world_engine.domain.npc_plan_review import (
                 npc_plan_review_request_id, validate_npc_plan_review_schedule,

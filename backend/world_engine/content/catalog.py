@@ -19,9 +19,11 @@ from world_engine.domain.market_pricing import (
     PRICE_REVIEW_HANDLER_ID, PRICE_REVIEW_HANDLER_VERSION,
 )
 from world_engine.domain.models import NewWorld, WorldState
+from world_engine.domain.ambient_events import AmbientEventPolicy, build_ambient_event_schedule
 from world_engine.domain.population_seats import select_population_occupation_role
 from world_engine.domain.promise_trust_settlement import PROMISE_TRUST_POLICY_KEY
 from world_engine.domain.relationship_promises import PROMISE_TRUST_POLICY_ID
+from world_engine.domain.social_contact_settlement import build_social_contact_schedules
 
 from .definitions import (
     BACKGROUNDS,
@@ -67,8 +69,12 @@ _FEUDAL_OCCUPATION_PACK_VERSION_290 = "2.9.0"
 _MODERN_CIVIC_RECRUITMENT_PACK_VERSION_210 = "2.10.0"
 _CULTIVATION_OCCUPATION_PACK_VERSION_211 = CULTIVATION_OCCUPATION_PROFILES_211_VERSION
 _ORGANIZATION_STRATEGY_PACK_VERSION = "2.13.0"
+_SOCIAL_WORLD_PACK_VERSION = "2.14.0"
+_ORGANIZATION_STRATEGY_PACK_VERSIONS = {
+    _ORGANIZATION_STRATEGY_PACK_VERSION, _SOCIAL_WORLD_PACK_VERSION,
+}
 _PUBLIC_WAYPOINT_PACK_VERSIONS = {
-    _WAYPOINT_OPENING_PACK_VERSION, ROUTINE_OPENING_PACK_VERSION, _ORGANIZATION_STRATEGY_PACK_VERSION,
+    _WAYPOINT_OPENING_PACK_VERSION, ROUTINE_OPENING_PACK_VERSION, *_ORGANIZATION_STRATEGY_PACK_VERSIONS,
 }
 _MODERN_OCCUPATION_PROFILE_VERSIONS = {
     _MODERN_OCCUPATION_PACK_VERSION, _MODERN_OCCUPATION_260_PACK_VERSION, _MODERN_CIVIC_OCCUPATION_PACK_VERSION,
@@ -109,12 +115,20 @@ _OPENING_CHOICES = {
          "version": ROUTINE_OPENING_PACK_VERSION},
         {"title": "机构自治", "description": "地区机构会依据自身章程、人员和账本定期调整储备。",
          "version": _ORGANIZATION_STRATEGY_PACK_VERSION},
+        {"title": "日常往来", "description": "社区和机构的日常接触会逐步影响人物关系，工作与出行仍由你安排。",
+         "version": _SOCIAL_WORLD_PACK_VERSION},
     ),
     "low_magic_feudal": (
         {"title": "沿灰境林道出发", "description": "规划多段旅程。抵达林道驿点后，可赶路，也可停留核对过路抄表。",
          "version": _WAYPOINT_OPENING_PACK_VERSION},
         {"title": "找桥吏谈修桥摊派", "description": "从当地告示找到接待时段。你也可以等下一次会面，或先走自己的路。",
          "version": ROUTINE_OPENING_PACK_VERSION},
+        {"title": "集镇日常", "description": "集镇和领地会出现日常往来，人物关系随接触逐步变化。",
+         "version": _SOCIAL_WORLD_PACK_VERSION},
+    ),
+    "long_life_cultivation": (
+        {"title": "宗门与山行", "description": "驻地的日常接触会逐步影响人物关系，修行和旅行仍由你安排。",
+         "version": _SOCIAL_WORLD_PACK_VERSION},
     ),
 }
 
@@ -145,7 +159,7 @@ class ContentCatalog:
                 "version": _CASE_PACK_VERSION,
                 "available_versions": [
                     _CASE_PACK_VERSION, _TRUST_PACK_VERSION, _FAMILY_PACK_VERSION, _WAYPOINT_OPENING_PACK_VERSION,
-                    ROUTINE_OPENING_PACK_VERSION, _ORGANIZATION_STRATEGY_PACK_VERSION,
+                    ROUTINE_OPENING_PACK_VERSION, _ORGANIZATION_STRATEGY_PACK_VERSION, _SOCIAL_WORLD_PACK_VERSION,
                 ],
                 "sustained_available_versions": (
                     [
@@ -316,7 +330,7 @@ class ContentCatalog:
             generation_seed=seed,
             population_mode=population_mode,
         ).build()
-        if pack.version == _ORGANIZATION_STRATEGY_PACK_VERSION:
+        if pack.version in _ORGANIZATION_STRATEGY_PACK_VERSIONS:
             content = state.metadata["content_index"]
             for identifier in (content["country_ids"][0], content["organization_ids"][0]):
                 organization_id = UUID(identifier)
@@ -466,6 +480,31 @@ class _WorldSeedBuilder:
                 "metadata": metadata,
             }
         )
+        if self.pack.version == _SOCIAL_WORLD_PACK_VERSION:
+            content = state.metadata["content_index"]
+            day_seconds = state.calendar.day_seconds
+            social_schedules = build_social_contact_schedules(
+                state, uuid5(self.namespace, "social_contact_schedules"),
+            )
+            regional_policy = AmbientEventPolicy(
+                scope_kind="region", scope_id=UUID(content["region_ids"][0]),
+                check_every_days=7, chance_basis_points=1_500, cooldown_days=3, concurrent_limit=2,
+            )
+            institutional_policy = AmbientEventPolicy(
+                scope_kind="organization", scope_id=UUID(content["organization_ids"][0]),
+                check_every_days=14, chance_basis_points=1_200, cooldown_days=7, concurrent_limit=1,
+            )
+            ambient_schedules = (
+                build_ambient_event_schedule(
+                    state, regional_policy, first_tick=7 * day_seconds,
+                ),
+                build_ambient_event_schedule(
+                    state, institutional_policy, first_tick=14 * day_seconds,
+                ),
+            )
+            state = WorldState.model_validate(state.model_dump(mode="python") | {
+                "scheduled_events": [*state.scheduled_events, *social_schedules, *ambient_schedules],
+            })
         self._validate_built_capacity(state)
         return state
 
@@ -520,7 +559,7 @@ class _WorldSeedBuilder:
         }
         if self.generation_seed is not None:
             metadata["generation_seed"] = self.generation_seed
-        if self.pack.pack_id == "modern_city" and self.pack.version == _ORGANIZATION_STRATEGY_PACK_VERSION:
+        if self.pack.pack_id == "modern_city" and self.pack.version in _ORGANIZATION_STRATEGY_PACK_VERSIONS:
             investigation = {
                 "goal_id": str(self.entity_id("goal", "player")),
                 "destination_id": str(self.settlement_ids[1]),
@@ -540,6 +579,8 @@ class _WorldSeedBuilder:
             metadata[PRICE_REVIEW_CONFIG_KEY] = self._market_pricing_config()
         if self.pack.version in {_TRUST_PACK_VERSION, *_FAMILY_PACK_VERSIONS}:
             metadata[PROMISE_TRUST_POLICY_KEY] = PROMISE_TRUST_POLICY_ID
+        if self.pack.version == _SOCIAL_WORLD_PACK_VERSION:
+            metadata["social_world_v1"] = True
         return metadata
 
     def _seeded_int(self, key: str, minimum: int, maximum: int) -> int:

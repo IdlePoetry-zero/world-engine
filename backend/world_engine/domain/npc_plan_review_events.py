@@ -15,6 +15,7 @@ from .npc_plan_review import (
     NPC_PLAN_REVIEW_HANDLER_VERSION,
     NPC_PLAN_REVIEW_PHASE,
     NPC_MODEL_UNAVAILABLE_REASON,
+    NPC_MODEL_OUTPUT_DEFER_REASONS,
     build_npc_plan_review_schedule,
     build_npc_provider_unavailable_review,
     npc_plan_review_schedule_id,
@@ -193,6 +194,10 @@ class NpcPlanReviewResolvedEvent(NpcPlanReviewEventModel):
             self.source != "policy" or self.outcome != "defer"
         ):
             raise ValueError("Model unavailability must be recorded as a policy-sourced defer")
+        if self.reason in NPC_MODEL_OUTPUT_DEFER_REASONS and self.outcome == "defer" and (
+            self.source != "model" or self.model_call_id is None
+        ):
+            raise ValueError("An unusable model planning result must retain its model call as a defer")
         self.require_author_visibility()
         return self
 
@@ -322,7 +327,10 @@ def apply_npc_plan_review_resolved(
             from .npc_commitments import record_return_review
 
             updated = record_return_review(updated, parsed.actor_id, parsed.promise_choice, parsed.event_id)
-        if parsed.reason == NPC_MODEL_UNAVAILABLE_REASON:
+        if (
+            parsed.reason == NPC_MODEL_UNAVAILABLE_REASON
+            or parsed.outcome == "defer" and parsed.reason in NPC_MODEL_OUTPUT_DEFER_REASONS
+        ):
             retry = build_npc_provider_unavailable_review(updated, parsed.world_id, parsed.actor_id)
             if retry is not None:
                 from .models import WorldState as RuntimeWorldState

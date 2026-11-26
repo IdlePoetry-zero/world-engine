@@ -38,6 +38,7 @@ from world_engine.application.media_assets import MediaAssetStore
 from world_engine.application.media_authorization import RepositoryMediaAuthorizer
 from world_engine.application.media_jobs import MediaJobWorker
 from world_engine.application.simulation_jobs import SimulationJobs
+from world_engine.domain.ambient_events import AMBIENT_EVENT_HANDLER
 from world_engine.rules.contracts import ACTION_INTENT_ADAPTER, RuleContext
 from world_engine.rules.engine import RuleEngine
 from world_engine.domain.models import AccessScope
@@ -113,6 +114,10 @@ async def _invoke_worker_model_decision(operations, repository, scope, lease, jo
         from world_engine.application.model_decisions import invoke_npc_planning
 
         return await invoke_npc_planning(operations, repository, scope, lease, job, decision)
+    if decision.kind == AMBIENT_EVENT_HANDLER:
+        from world_engine.application.ambient_event_host import invoke_ambient_event
+
+        return await invoke_ambient_event(operations, repository, scope, lease, job, decision)
     if decision.kind == "npc.reflection":
         from world_engine.application.model_decisions import invoke_npc_reflection
 
@@ -232,10 +237,10 @@ def build_application(*, data_directory: Path | None = None, catalog=None, port:
                         pass
                     raise
 
-            async def advance_without_model(lease):
+            async def advance_simulation(lease, *, model_decision=None):
                 while True:
                     try:
-                        return await asyncio.to_thread(jobs.advance, identity, lease)
+                        return await asyncio.to_thread(jobs.advance, identity, lease, model_decision=model_decision)
                     except StorageBusy:
                         if stop.is_set():
                             raise
@@ -257,7 +262,7 @@ def build_application(*, data_directory: Path | None = None, catalog=None, port:
                             if renew_at is not None and time.monotonic() >= renew_at:
                                 lease = await asyncio.to_thread(worlds.repository.renew_job, lease, lease_seconds=120)
                                 renew_at = time.monotonic() + 60
-                            outcome = await advance_without_model(lease)
+                            outcome = await advance_simulation(lease)
                             pending = getattr(outcome, "decision_requests", ())
                             if (len(pending) == 1 and not outcome.events
                                 and pending[0].decision_owner == "model"
@@ -265,7 +270,7 @@ def build_application(*, data_directory: Path | None = None, catalog=None, port:
                                 lease = await asyncio.to_thread(worlds.repository.renew_job, lease, lease_seconds=120)
                                 renew_at = time.monotonic() + 60
                                 answer = await resolve_model_decision(lease, pending[0])
-                                outcome = await asyncio.to_thread(jobs.advance, identity, lease, model_decision=answer)
+                                outcome = await advance_simulation(lease, model_decision=answer)
                             if getattr(outcome, "outcome", None) != "advanced":
                                 break
                     except (Conflict, StorageBusy):

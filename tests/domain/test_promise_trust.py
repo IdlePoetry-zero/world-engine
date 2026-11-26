@@ -309,6 +309,164 @@ def test_trust_clamps_at_bounds_but_budget_is_not_bankable() -> None:
     )
 
 
+def test_social_world_promise_outcomes_stop_at_key_threshold_and_do_not_move_high_scores() -> None:
+    for index, (starting_trust, expected_trust) in enumerate(
+        (("79.5", Decimal("79.999999")), ("80", Decimal("80"))),
+        start=1,
+    ):
+        promise = make_promise(promise_id=uid(100 + index))
+        bond = bond_snapshot(
+            promise,
+            trust=starting_trust,
+            revision=3,
+            budget_policy_id=PROMISE_TRUST_POLICY_ID,
+        )
+        plan = plan_promise_trust_effect(
+            promise,
+            fulfillment_evidence(promise, bond, event_id=uid(110 + index)),
+            bond,
+            deadline_schedule(promise),
+            command_context(tick=150),
+            promise_policy_id=PROMISE_TRUST_POLICY_ID,
+            relationship_curve_enabled=True,
+            routine_occurrence=1,
+        )
+        assert plan is not None
+        assert plan.resulting_trust == expected_trust
+        assert plan.resulting_trust < Decimal("80") or starting_trust == "80"
+        assert plan.applied_delta == expected_trust - Decimal(starting_trust)
+
+    for index, (starting_trust, expected_trust) in enumerate(
+        (("-79.5", Decimal("-79.999999")), ("-80", Decimal("-80"))),
+        start=1,
+    ):
+        promise = make_promise(promise_id=uid(120 + index))
+        bond = bond_snapshot(
+            promise,
+            trust=starting_trust,
+            revision=3,
+            budget_policy_id=PROMISE_TRUST_POLICY_ID,
+        )
+        plan = plan_promise_trust_effect(
+            promise,
+            breach_evidence(promise, bond, event_id=uid(130 + index)),
+            bond,
+            deadline_schedule(promise),
+            command_context(actor_id=uid(99), command_id=uid(62), tick=201),
+            promise_policy_id=PROMISE_TRUST_POLICY_ID,
+            relationship_curve_enabled=True,
+        )
+        assert plan is not None
+        assert plan.resulting_trust == expected_trust
+        assert plan.applied_delta == expected_trust - Decimal(starting_trust)
+
+    for index, (starting_trust, expected_trust) in enumerate(
+        (("79.5", Decimal("79.999999")), ("80", Decimal("80"))),
+        start=1,
+    ):
+        breach_event_id = uid(140 + index)
+        promise = make_promise(
+            promise_id=uid(150 + index),
+            status="breached",
+            revision=2,
+            resolved_tick=201,
+            outcome_event_id=breach_event_id,
+        )
+        bond = bond_snapshot(
+            promise,
+            trust=starting_trust,
+            revision=4,
+            budget_policy_id=PROMISE_TRUST_POLICY_ID,
+            evidence_refs=(breach_event_id,),
+        )
+        prior_receipt = PromiseTrustReceipt(
+            policy_id=PROMISE_TRUST_POLICY_ID,
+            promise_id=promise.id,
+            outcome_event_id=breach_event_id,
+            outcome="breached",
+            applied_delta=Decimal("-8"),
+        )
+        late = PromiseLateReturnEvidence(
+            outcome="late_return",
+            world_id=WORLD_ID,
+            branch_id=BRANCH_ID,
+            command_id=uid(160 + index),
+            actor_id=PROMISOR_ID,
+            ruleset_version=RULESET,
+            event_id=uid(170 + index),
+            event_type=PROMISE_LATE_RETURN_EVENT_V1,
+            promise_id=promise.id,
+            expected_promise_revision=promise.revision,
+            promisor_id=PROMISOR_ID,
+            promisee_id=PROMISEE_ID,
+            effective_tick=205,
+            scheduled_event_id=promise.deadline_schedule_id,
+            expected_schedule_revision=2,
+            policy_id=PROMISE_TRUST_POLICY_ID,
+            trust_cas=cas_for(promise, bond),
+            source_owner_id=PROMISOR_ID,
+            recipient_owner_id=PROMISEE_ID,
+            resource_id=promise.terms.resource_id,
+            quantity=promise.terms.quantity,
+            source_breach_event_id=breach_event_id,
+        )
+        plan = plan_promise_trust_effect(
+            promise,
+            late,
+            bond,
+            deadline_schedule(promise, status="completed", revision=2),
+            command_context(command_id=uid(160 + index), tick=205),
+            promise_policy_id=PROMISE_TRUST_POLICY_ID,
+            prior_receipt=prior_receipt,
+            relationship_curve_enabled=True,
+        )
+        assert plan is not None
+        assert plan.resulting_trust == expected_trust
+        assert plan.applied_delta == expected_trust - Decimal(starting_trust)
+
+
+def test_repeated_routine_fulfillments_cannot_max_trust() -> None:
+    policy = PromiseTrustPolicy(on_time_reward="1", success_budget_cap="100")
+    bond = None
+    trust = Decimal("0")
+
+    for occurrence in range(1, 101):
+        promise = make_promise(promise_id=uid(200 + occurrence), trust_policy_id=policy.policy_id)
+        evidence = fulfillment_evidence(
+            promise,
+            bond,
+            event_id=uid(300 + occurrence),
+            command_id=uid(400 + occurrence),
+            policy_id=policy.policy_id,
+        )
+        plan = plan_promise_trust_effect(
+            promise,
+            evidence,
+            bond,
+            deadline_schedule(promise),
+            command_context(command_id=uid(400 + occurrence), tick=150),
+            promise_policy_id=policy.policy_id,
+            policy=policy,
+            relationship_curve_enabled=True,
+            routine_occurrence=occurrence,
+        )
+        assert plan is not None
+        assert plan.resulting_trust < Decimal("80")
+        trust = plan.resulting_trust
+        bond = PromiseTrustBondSnapshot(
+            relation_id=plan.relation_id,
+            from_id=plan.from_id,
+            to_id=plan.to_id,
+            revision=occurrence,
+            trust=plan.resulting_trust,
+            budget_policy_id=plan.next_budget_policy_id,
+            success_budget_spent=plan.next_success_budget_spent,
+            evidence_refs=(() if bond is None else bond.evidence_refs) + (evidence.event_id,),
+        )
+
+    assert Decimal("1.99") < trust < Decimal("2.01")
+
+
 def test_new_directed_bond_uses_stable_promisee_to_promisor_id() -> None:
     promise = make_promise()
     evidence = fulfillment_evidence(promise, None)

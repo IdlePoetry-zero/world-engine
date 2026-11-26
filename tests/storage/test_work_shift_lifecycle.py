@@ -223,8 +223,13 @@ def test_leased_shift_requires_the_authorized_occurrence(tmp_path):
             session = LocalSession(str(user_id), str(scope.tenant_id), frozenset({"http://testserver"}))
             with TestClient(create_app(application, session)) as client:
                 client.get("/api/v1/session").raise_for_status()
-                detail = client.get(f"/api/v1/jobs/{due.job_id}").raise_for_status().json()
-                assert detail.get("work_progress") == (progress if user_id == scope.user_id else None)
+                detail = client.get(f"/api/v1/jobs/{due.job_id}")
+                if user_id == scope.user_id:
+                    assert detail.raise_for_status().json()["work_progress"] == progress
+                else:
+                    assert detail.status_code == 404
+                    listed = client.get(f"/api/v1/worlds/{world_id}/jobs", params={"branch_id": str(branch_id)}).raise_for_status().json()
+                    assert listed["items"] == []
         assert repository.replay(scope, world_id, branch_id, from_genesis=True).state_hash == after.state_hash
     finally:
         database.dispose()

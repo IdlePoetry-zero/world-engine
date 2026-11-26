@@ -818,6 +818,7 @@ class RelationRecord(ComponentModel):
     label: str = Field(default="", max_length=240)
     obligations: list[RelationObligation] = Field(default_factory=list, max_length=1024)
     evidence_refs: list[UUID] = Field(default_factory=list, max_length=10_000)
+    routine_social_contacts: StrictInt = Field(default=0, ge=0, le=29, exclude_if=lambda value: value == 0)
     updated_tick: Tick = 0
     visibility: VisibilityScope = Field(default_factory=VisibilityScope)
 
@@ -957,6 +958,7 @@ class GoalCondition(ComponentModel):
         "relationship_dimension_minimum",
         "entity_status",
         "goal_completed",
+        "discuss_known_topic",
     ]
     subject_id: UUID | None = None
     target_id: UUID | None = None
@@ -965,6 +967,7 @@ class GoalCondition(ComponentModel):
     dimension: ResourceName | None = None
     threshold: SignedRelationValue | None = None
     status: str | None = Field(default=None, max_length=64)
+    evidence_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def condition_has_required_fields(self) -> GoalCondition:
@@ -982,6 +985,10 @@ class GoalCondition(ComponentModel):
             raise ValueError("entity_status requires subject_id and status")
         if self.kind == "goal_completed" and self.target_id is None:
             raise ValueError("goal_completed requires target_id")
+        if self.kind == "discuss_known_topic" and (
+            self.subject_id is None or self.target_id is None or self.evidence_id is None
+        ):
+            raise ValueError("discuss_known_topic requires a speaker, listener, and known topic")
         return self
 
 

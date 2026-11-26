@@ -1,0 +1,291 @@
+[
+  {
+    "opening": "mountain-shrine",
+    "mode": "quiet",
+    "world_pack_version": "1.6.0",
+    "calendar": {
+      "day_seconds": 86400,
+      "year_days": 360
+    },
+    "duration_requested_seconds": 518400,
+    "start_tick": 0,
+    "end_tick": 518400,
+    "elapsed_world_days": 6.0,
+    "target_reached": true,
+    "replay_equal": true,
+    "replay_from_genesis": true,
+    "replay_seconds": null,
+    "wall_seconds": 545.38693,
+    "job_states": [
+      "succeeded",
+      "succeeded",
+      "succeeded"
+    ],
+    "last_sequence": 685,
+    "committed_commands": 589,
+    "private_npc_memory_records": 14,
+    "reciprocal_reply_records": 1,
+    "autonomous_npc_participants": 18,
+    "player_dialogue_committed": false,
+    "events": {
+      "core.time_advanced.v1": 189,
+      "core.npc_plan_created.v1": 35,
+      "core.npc_plan_review_resolved.v1": 41,
+      "core.travel_journey_changed.v1": 256,
+      "core.npc_plan_revised.v1": 112,
+      "core.knowledge_acquired.v1": 16,
+      "core.story_milestone_resolved.v1": 2,
+      "core.relation_established.v1": 2,
+      "core.relation_dimension_changed.v1": 2,
+      "core.ambient_event_resolved.v1": 16,
+      "core.social_contact_settled.v1": 12,
+      "core.organization_strategy_review_resolved.v1": 2
+    },
+    "events_by_period": {
+      "0": {
+        "core.time_advanced.v1": 189,
+        "core.npc_plan_created.v1": 35,
+        "core.npc_plan_review_resolved.v1": 41,
+        "core.travel_journey_changed.v1": 256,
+        "core.npc_plan_revised.v1": 112,
+        "core.knowledge_acquired.v1": 16,
+        "core.story_milestone_resolved.v1": 2,
+        "core.relation_established.v1": 2,
+        "core.relation_dimension_changed.v1": 2,
+        "core.ambient_event_resolved.v1": 16,
+        "ambient.accepted": 4,
+        "ambient.kind.local_observation": 4,
+        "ambient.missed": 9,
+        "core.social_contact_settled.v1": 12,
+        "ambient.empty_scope": 1,
+        "core.organization_strategy_review_resolved.v1": 2,
+        "ambient.unavailable": 2
+      }
+    },
+    "terminal_tick_by_period": {},
+    "npc_participants_by_period": {},
+    "ambient_topic_followups": {},
+    "storage_timings": {},
+    "initial_hash": "386fce76ff84ef8e56ef9931dcfc20c9929624e2565c58bc9b6e22d7e7ceb0b7",
+    "final_hash": "b57192f4e1b6275ba588efeacbb602df9a67ded161acd03142bc159b8ff5d1c1",
+    "model_evidence": {
+      "provider": "DeepSeek",
+      "status_by_role": {
+        "npc_decision.success": 45,
+        "npc_decision.truncated": 2,
+        "npc_plan_review.success": 35
+      },
+      "used_cloud": true,
+      "used_local_model": false,
+      "successful_calls": 80,
+      "accepted_ambient_calls": 4,
+      "usage": {
+        "input_tokens": 217677,
+        "cached_input_tokens": 182014,
+        "non_cached_input_tokens": 35663,
+        "output_tokens": 31125,
+        "reasoning_tokens": 23733,
+        "total_tokens": 248802
+      },
+      "unpriced_calls": 0,
+      "estimated_cost": {
+        "USD": "0.024570492"
+      },
+      "remote_seconds_by_role": {},
+      "attributed_activity_by_period": {}
+    }
+  },
+  {
+    "opening": "mountain-shrine",
+    "mode": "rest",
+    "world_pack_version": "1.6.0",
+    "calendar": {
+      "day_seconds": 86400,
+      "year_days": 360
+    },
+    "duration_requested_seconds": 518400,
+    "start_tick": 0,
+    "end_tick": 518400,
+    "elapsed_world_days": 6.0,
+    "target_reached": true,
+    "replay_equal": true,
+    "replay_from_genesis": true,
+    "replay_seconds": null,
+    "wall_seconds": 546.733262,
+    "job_states": [
+      "succeeded"
+    ],
+    "last_sequence": 646,
+    "committed_commands": 548,
+    "private_npc_memory_records": 13,
+    "reciprocal_reply_records": 2,
+    "autonomous_npc_participants": 19,
+    "player_dialogue_committed": false,
+    "events": {
+      "core.time_advanced.v1": 167,
+      "core.npc_plan_created.v1": 37,
+      "core.npc_plan_review_resolved.v1": 44,
+      "core.travel_journey_changed.v1": 258,
+      "core.npc_plan_revised.v1": 88,
+      "core.knowledge_acquired.v1": 14,
+      "core.story_milestone_resolved.v1": 2,
+      "core.relation_established.v1": 2,
+      "core.relation_dimension_changed.v1": 4,
+      "core.ambient_event_resolved.v1": 16,
+      "core.social_contact_settled.v1": 12,
+      "core.organization_strategy_review_resolved.v1": 2
+    },
+    "events_by_period": {
+      "0": {
+        "core.time_advanced.v1": 167,
+        "core.npc_plan_created.v1": 37,
+        "core.npc_plan_review_resolved.v1": 44,
+        "core.travel_journey_changed.v1": 258,
+        "core.npc_plan_revised.v1": 88,
+        "core.knowledge_acquired.v1": 14,
+        "core.story_milestone_resolved.v1": 2,
+        "core.relation_established.v1": 2,
+        "core.relation_dimension_changed.v1": 4,
+        "core.ambient_event_resolved.v1": 16,
+        "ambient.missed": 10,
+        "core.social_contact_settled.v1": 12,
+        "ambient.accepted": 4,
+        "ambient.kind.local_observation": 2,
+        "core.organization_strategy_review_resolved.v1": 2,
+        "ambient.kind.organization_agenda": 2,
+        "ambient.unavailable": 2
+      }
+    },
+    "terminal_tick_by_period": {},
+    "npc_participants_by_period": {},
+    "ambient_topic_followups": {},
+    "storage_timings": {},
+    "initial_hash": "a7035ae613b49eaf6efaded4576c1fbe91ec60189fbe938fc9612d2712ec1dcb",
+    "final_hash": "b35847042c213685db38fadac92346ad31b989ba0b2c2e96c93272a1286bb46c",
+    "model_evidence": {
+      "provider": "DeepSeek",
+      "status_by_role": {
+        "npc_plan_review.success": 37,
+        "npc_decision.success": 49,
+        "npc_decision.truncated": 1,
+        "npc_plan_review.truncated": 1
+      },
+      "used_cloud": true,
+      "used_local_model": false,
+      "successful_calls": 86,
+      "accepted_ambient_calls": 4,
+      "usage": {
+        "input_tokens": 235211,
+        "cached_input_tokens": 182270,
+        "non_cached_input_tokens": 52941,
+        "output_tokens": 34936,
+        "reasoning_tokens": 26815,
+        "total_tokens": 270147
+      },
+      "unpriced_calls": 0,
+      "estimated_cost": {
+        "USD": "0.029449560"
+      },
+      "remote_seconds_by_role": {},
+      "attributed_activity_by_period": {}
+    }
+  },
+  {
+    "opening": "mountain-shrine",
+    "mode": "intervention",
+    "world_pack_version": "1.6.0",
+    "calendar": {
+      "day_seconds": 86400,
+      "year_days": 360
+    },
+    "duration_requested_seconds": 518400,
+    "start_tick": 0,
+    "end_tick": 518400,
+    "elapsed_world_days": 6.0,
+    "target_reached": true,
+    "replay_equal": true,
+    "replay_from_genesis": true,
+    "replay_seconds": null,
+    "wall_seconds": 620.192459,
+    "job_states": [
+      "succeeded",
+      "succeeded"
+    ],
+    "last_sequence": 728,
+    "committed_commands": 613,
+    "private_npc_memory_records": 18,
+    "reciprocal_reply_records": 2,
+    "autonomous_npc_participants": 22,
+    "player_dialogue_committed": true,
+    "events": {
+      "core.time_advanced.v1": 197,
+      "core.npc_plan_created.v1": 39,
+      "core.npc_plan_review_resolved.v1": 45,
+      "core.travel_journey_changed.v1": 256,
+      "core.npc_plan_revised.v1": 127,
+      "core.knowledge_acquired.v1": 22,
+      "core.story_milestone_resolved.v1": 2,
+      "core.relation_established.v1": 4,
+      "core.relation_dimension_changed.v1": 6,
+      "core.ambient_event_resolved.v1": 16,
+      "core.social_contact_settled.v1": 12,
+      "core.organization_strategy_review_resolved.v1": 2
+    },
+    "events_by_period": {
+      "0": {
+        "core.time_advanced.v1": 197,
+        "core.npc_plan_created.v1": 39,
+        "core.npc_plan_review_resolved.v1": 45,
+        "core.travel_journey_changed.v1": 256,
+        "core.npc_plan_revised.v1": 127,
+        "core.knowledge_acquired.v1": 22,
+        "core.story_milestone_resolved.v1": 2,
+        "core.relation_established.v1": 4,
+        "core.relation_dimension_changed.v1": 6,
+        "core.ambient_event_resolved.v1": 16,
+        "ambient.missed": 10,
+        "core.social_contact_settled.v1": 12,
+        "ambient.accepted": 5,
+        "ambient.kind.local_observation": 2,
+        "ambient.unavailable": 1,
+        "core.organization_strategy_review_resolved.v1": 2,
+        "ambient.kind.organization_agenda": 2,
+        "ambient.kind.invitation": 1
+      }
+    },
+    "terminal_tick_by_period": {},
+    "npc_participants_by_period": {},
+    "ambient_topic_followups": {},
+    "storage_timings": {},
+    "initial_hash": "d5ca25de4cdd53aedeab3101c09c419c13af1e7ad618753ca5915f0fd7e02969",
+    "final_hash": "3e1b9629a3c3bbddbb3493dca73bb823b9f594eb1d754eec0880851f049a47f6",
+    "model_evidence": {
+      "provider": "DeepSeek",
+      "status_by_role": {
+        "npc_plan_review.success": 39,
+        "npc_decision.success": 50,
+        "social_adjudication.success": 1,
+        "intent.success": 1,
+        "npc_decision.truncated": 1
+      },
+      "used_cloud": true,
+      "used_local_model": false,
+      "successful_calls": 91,
+      "accepted_ambient_calls": 5,
+      "usage": {
+        "input_tokens": 245654,
+        "cached_input_tokens": 188158,
+        "non_cached_input_tokens": 57496,
+        "output_tokens": 37742,
+        "reasoning_tokens": 28706,
+        "total_tokens": 283396
+      },
+      "unpriced_calls": 0,
+      "estimated_cost": {
+        "USD": "0.031834074"
+      },
+      "remote_seconds_by_role": {},
+      "attributed_activity_by_period": {}
+    }
+  }
+]

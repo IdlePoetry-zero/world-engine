@@ -14,8 +14,10 @@ import { OccupationsPanel } from '../components/OccupationsPanel'
 import { PlaySceneCard, type PlaySceneStage, type SceneDraftSource } from '../components/PlaySceneCard'
 import { RelationshipInvitationsPanel } from '../components/RelationshipInvitationsPanel'
 import { RelationshipPartnershipsPanel } from '../components/RelationshipPartnershipsPanel'
+import { RuntimeProfileStatus } from '../components/RuntimeProfileStatus'
 import { SafeConductPanel } from '../components/SafeConductPanel'
 import { ShipmentReliefPanel } from '../components/ShipmentReliefPanel'
+import { canEditFailedMessage, canRetryFailedMessageFromReceipt, conversationErrorCode, isBranchBusyConflict, MESSAGE_RECEIPT_AUTO_POLL_LIMIT, shouldContinueMessageReceiptPolling } from '../components/messageRecovery'
 import type { Notice, Page } from '../App'
 import { errorMessage, FOREGROUND_STATUS_POLL_INTERVAL_MS, jobReasonLabel } from '../utils'
 import { formatWorldDuration, formatWorldRelativeTick } from '../worldTime'
@@ -67,20 +69,24 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
   const [conversationAttempt, setConversationAttempt] = useState(0)
   const [sendingRequest, setSendingRequest] = useState<MessageRequest | null>(null)
   const sending = sendingRequest !== null
-  const [receiptError, setReceiptError] = useState('')
+  const [receiptRecovery, setReceiptRecovery] = useState<{ key: string; status: 'polling' | 'stalled' | 'error'; polls: number; error?: string } | null>(null)
   const [receiptAttempt, setReceiptAttempt] = useState(0)
   const [checkingDelivery, setCheckingDelivery] = useState(false)
   const [failedRequest, setFailedRequest] = useState<MessageRequest | null>(null)
   const [job, setJob] = useState<PlayChatJob | null>(null)
-  const [profile, setProfile] = useState<Pick<Settings, 'speed' | 'depth'> | null>(null)
-  const [profileLoading, setProfileLoading] = useState(true)
-  const [profileError, setProfileError] = useState<string | null>(null)
+  const [profileLoad, setProfileLoad] = useState<{ key: string; profile?: Pick<Settings, 'speed' | 'depth'>; error?: string } | null>(null)
+  const [profileAttempt, setProfileAttempt] = useState(0)
   const [continuationLoad, setContinuationLoad] = useState<{ key: string; status: 'ready' | 'error' | 'hidden'; options?: PlayerContinuationOptions; error?: string } | null>(null)
   const [continuationAttempt, setContinuationAttempt] = useState(0)
   const [selectedContinuation, setSelectedContinuation] = useState<{ key: string; actorId: string } | null>(null)
   const [continuationSubmitting, setContinuationSubmitting] = useState(false)
   const [continuationSubmitState, setContinuationSubmitState] = useState<{ key: string; error: string; failedRequest: { key: string; body: { branch_id: string; previous_player_id: string; new_player_id: string; expected_state_version: string } } } | null>(null)
   const worldId = world?.world_id
+  const profileRequestKey = `${worldId ?? ''}:${profileAttempt}`
+  const currentProfileLoad = profileLoad?.key === profileRequestKey ? profileLoad : null
+  const profile = currentProfileLoad?.profile ?? null
+  const profileLoading = currentProfileLoad === null
+  const profileError = currentProfileLoad?.error ?? null
   const conversationRequestKey = `${worldId ?? ''}:${branchId ?? ''}:${conversationAttempt}`
   const conversationState = conversationLoad?.key === conversationRequestKey ? conversationLoad : null
   const conversation = conversationState?.conversation ?? null
@@ -140,10 +146,11 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
   const modeForActor = characterCanAct ? mode : 'ask_gm'
   const playerPlaceId = typeof player?.location_id === 'string' ? player.location_id : null
   const recoveredPending = conversation?.items.find((item) => item.status === 'running')?.request_id
+  const receiptRecoveryKey = `${worldId ?? ''}:${branchId ?? ''}:${conversationSessionId ?? ''}:${recoveredPending ?? ''}`
   const awaitingReply = sending || Boolean(recoveredPending) || Boolean(failedRequest)
   const hasUnsentSpeech = modeForActor === 'roleplay' && Boolean(input.trim())
   const departureHeld = awaitingReply || hasUnsentSpeech
-  const composerReady = Boolean(branchId && playerId && conversation?.actor_id === playerId && profile && !conversationLoading && !conversationError && !loading && !viewError && !awaitingReply)
+  const composerReady = Boolean(branchId && playerId && conversation?.actor_id === playerId && profile && !profileLoading && !conversationLoading && !conversationError && !loading && !viewError && !awaitingReply)
   const canPrepareQuery = composerReady && input.length === 0
   const canPrepareAction = canPrepareQuery && characterCanAct
   const canPrepareSceneDraft = modeForActor !== 'author'
@@ -188,25 +195,41 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
     if (!recoveredPending || !worldId || !branchId || !conversationSessionId) return
     let active = true
     let timer: number
+    let polls = 0
+    let inFlight = false
     const poll = async () => {
+      if (!active || inFlight) return
+      inFlight = true
+      polls += 1
+      setReceiptRecovery({ key: receiptRecoveryKey, status: 'polling', polls })
       try {
         const result = await api.conversation(worldId, branchId)
-        if (!active || result.session_id !== conversationSessionId) return
-        setReceiptError('')
-        setConversationLoad({ key: conversationRequestKey, conversation: result })
-        setMessages(messagesFromConversation(result.items))
-        if (!result.items.some((item) => item.status === 'running')) {
-          onRefresh()
+        if (!active) return
+        if (result.session_id !== conversationSessionId || result.actor_id !== conversation?.actor_id) {
+          setReceiptRecovery({ key: receiptRecoveryKey, status: 'error', polls, error: '当前会话身份已变化，请重新读取对话记录。' })
           return
         }
-        timer = window.setTimeout(() => { void poll() }, FOREGROUND_STATUS_POLL_INTERVAL_MS)
+        setConversationLoad({ key: conversationRequestKey, conversation: result })
+        setMessages(messagesFromConversation(result.items))
+        if (!result.items.some((item) => item.request_id === recoveredPending && item.status === 'running')) {
+          onRefresh()
+          setReceiptRecovery(null)
+          return
+        }
+        if (shouldContinueMessageReceiptPolling('running', polls)) {
+          timer = window.setTimeout(() => { void poll() }, FOREGROUND_STATUS_POLL_INTERVAL_MS)
+        } else {
+          setReceiptRecovery({ key: receiptRecoveryKey, status: 'stalled', polls })
+        }
       } catch (reason) {
-        if (active) setReceiptError(errorMessage(reason))
+        if (active) setReceiptRecovery({ key: receiptRecoveryKey, status: 'error', polls, error: errorMessage(reason) })
+      } finally {
+        inFlight = false
       }
     }
     void poll()
     return () => { active = false; window.clearTimeout(timer) }
-  }, [recoveredPending, receiptAttempt, worldId, branchId, conversationSessionId, conversationRequestKey, onRefresh])
+  }, [recoveredPending, receiptAttempt, worldId, branchId, conversationSessionId, conversation?.actor_id, conversationRequestKey, receiptRecoveryKey, onRefresh])
 
   useEffect(() => {
     if (!worldId || !branchId || !playerId || !playerDead) {
@@ -233,9 +256,14 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
 
   useEffect(() => {
     let active = true
-    void api.getSettings().then((settings) => { if (active) setProfile({ speed: settings.speed, depth: settings.depth }) }).catch((reason) => { if (active) setProfileError(errorMessage(reason)) }).finally(() => { if (active) setProfileLoading(false) })
+    const key = profileRequestKey
+    void api.getSettings().then((settings) => {
+      if (active) setProfileLoad({ key, profile: { speed: settings.speed, depth: settings.depth } })
+    }).catch((reason) => {
+      if (active) setProfileLoad({ key, error: errorMessage(reason) })
+    })
     return () => { active = false }
-  }, [world?.world_id])
+  }, [profileRequestKey])
   useEffect(() => {
     if (job?.jobId || !job?.commandId || !['queued', 'running', 'waiting_input'].includes(job.status)) return
     const commandId = job.commandId
@@ -351,14 +379,15 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
     } catch (reason) {
       if (sendScope !== sendScopeRevision.current) return
       const invalidDialogueReply = reason instanceof ApiError && reason.code === 'INVALID_DIALOGUE_REPLY'
+      const branchBusy = isBranchBusyConflict(reason)
       if (invalidDialogueReply) {
         setFailedRequest(null)
         setInput((current) => current || request.text)
       } else {
-        setFailedRequest(!(reason instanceof ApiError) || reason.retryable || reason.code === 'REQUEST_IN_PROGRESS' ? request : null)
+        setFailedRequest(branchBusy ? null : !(reason instanceof ApiError) || reason.retryable || reason.code === 'REQUEST_IN_PROGRESS' ? request : null)
       }
       const content = invalidDialogueReply ? `${errorMessage(reason)} 模型调用可能产生费用。` : errorMessage(reason)
-      setMessages((current) => [...current.filter((message) => message.id !== `error-${request.request_id}`), { id: `error-${request.request_id}`, role: 'error', content, source: 'api' }])
+      setMessages((current) => [...current.filter((message) => message.id !== `error-${request.request_id}`), { id: `error-${request.request_id}`, role: 'error', content, source: 'api', errorCode: reason instanceof ApiError ? reason.code : undefined }])
       setMessages((current) => current.map((message) => message.id === `local-${request.request_id}` ? { ...message, delivery: 'failed' } : message))
     } finally { setSendingRequest((current) => current?.request_id === request.request_id ? null : current) }
   }
@@ -439,9 +468,7 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
       }
       setConversationLoad({ key: conversationRequestKey, conversation: result })
       setMessages(messagesFromConversation(result.items))
-      const retryCanRecover = row.status === 'failed' && (
-        row.result?.error === 'PROCESS_INTERRUPTED' || row.result?.error === 'STORAGE_BUSY'
-      )
+      const retryCanRecover = canRetryFailedMessageFromReceipt(row)
       if (!retryCanRecover) setFailedRequest(null)
       if (row.status !== 'running') onRefresh()
     } catch (reason) {
@@ -633,10 +660,13 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
                   || state?.case_files?.some((file) => file.id === id)
                   || state?.own_accusation_repair_offers?.some((offer) => offer.offer_id === id)).map((id) =>
                   <button className="text-button" type="button" key={id} onClick={() => linkInvestigation(id)}>查看关联调查记录</button>)}
-                {message.role === 'player' && message.delivery === 'failed' && !failedRequest && <button type="button" className="text-button"
+                {message.role === 'player' && canEditFailedMessage(message.delivery, Boolean(failedRequest)) && <button type="button" className="text-button"
                   disabled={!composerReady || Boolean(input.trim())}
                   onClick={() => { setSceneDraft(null); setInput(message.content); composer.current?.focus() }}>取回原话并编辑</button>}
                 {message.jobId && <button type="button" className="text-button" onClick={openJourneyStatus}>查看行动进度和可用选项</button>}
+                {message.role === 'error' && message.errorCode === 'BRANCH_BUSY' && (
+                  <button type="button" className="text-button" onClick={openJourneyStatus}>查看现有长行动进度</button>
+                )}
                 {message.role === 'error' && failedRequest?.request_id && message.id === `error-${failedRequest.request_id}` && (
                   <><button className="retry-send" onClick={() => void checkDelivery()} disabled={sending || checkingDelivery}>{checkingDelivery ? '正在核对…' : '核对回执'}</button>
                     <button className="retry-send" onClick={retryFailedRequest} disabled={sending || checkingDelivery}><Icon name="refresh" size={13} />使用相同请求重试</button></>
@@ -645,9 +675,11 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
             </article>
           ))}
           {sendingRequest && <div role="status" className="typing-indicator"><span /><span /><span /><em>{sendingRequest.scene_observation ? '正在读取角色可见的场景' : sendingRequest.case_anchor_id ? '正在登记私人案卷' : '已发送，正在等待引擎回执'}。刷新后可在本分支查看进度。</em></div>}
-          {recoveredPending && <div className="scene-receipt-status" role="status">{receiptError
-            ? <>{receiptError} <button type="button" className="text-button" onClick={() => setReceiptAttempt((current) => current + 1)}>重新核对回执</button></>
-            : '正在核对上次发送的消息，收到回执后会更新此处。'}</div>}
+          {recoveredPending && <div className="scene-receipt-status" role="status">{receiptRecovery?.key === receiptRecoveryKey && receiptRecovery.status === 'error'
+            ? <>{receiptRecovery.error} <button type="button" className="text-button" onClick={() => setReceiptAttempt((current) => current + 1)}>手动核对状态</button></>
+            : receiptRecovery?.key === receiptRecoveryKey && receiptRecovery.status === 'stalled'
+              ? <>请求仍在处理中，自动核对已暂停。<button type="button" className="text-button" onClick={() => setReceiptAttempt((current) => current + 1)}>手动核对状态</button></>
+              : `正在核对上次发送的消息（${receiptRecovery?.key === receiptRecoveryKey ? receiptRecovery.polls : 0}/${MESSAGE_RECEIPT_AUTO_POLL_LIMIT}），收到回执后会更新此处。`}</div>}
           {job && <div className="job-strip"><span className="job-pulse" /><span>后台任务 {job.jobId?.slice(0, 8) ?? job.commandId?.slice(0, 8) ?? ''}</span><strong>{jobStatusLabel(job.status)}</strong></div>}
         </div>
         <div className="composer-wrap">
@@ -695,7 +727,7 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
             <span>原场景入口已失效。请清除草稿，再从当前场景选择。</span>
             <button type="button" className="text-button" onClick={() => { setInput(''); setSceneDraft(null); composer.current?.focus() }}>清除草稿</button>
           </div>}
-          <div className="composer-note"><Icon name="shield" size={12} /><span>{failedRequest ? '发送状态未确认；请重试同一请求，以避免重复执行。' : conversationLoading ? '正在从后端恢复会话。' : conversationError ? '对话状态不可用；重新读取前不会发送请求。' : playerDead ? '旧角色已去世：你仍可使用 GM 查询，行动与角色对话不可用。' : '查询与假设不会推进世界时间；行动结果以提交后的状态为准。'}</span><span className="profile-chip">{profileLoading ? '读取配置…' : profile ? `${profile.speed} · ${profile.depth}` : `发送已停用 · ${profileError ?? '无法读取运行配置'}`}</span></div>
+          <div className="composer-note"><Icon name="shield" size={12} /><span>{failedRequest ? '发送状态未确认；请先核对回执，再使用相同请求恢复。' : conversationLoading ? '正在从后端恢复会话。' : conversationError ? '对话状态不可用；重新读取前不会发送请求。' : playerDead ? '旧角色已去世：你仍可使用 GM 查询，行动与角色对话不可用。' : '查询与假设不会推进世界时间；行动结果以提交后的状态为准。'}</span><RuntimeProfileStatus profile={profile} loading={profileLoading} error={profileError} onRetry={() => setProfileAttempt((attempt) => attempt + 1)} /></div>
         </div>
       </section>
     </div>
@@ -1458,6 +1490,7 @@ function messagesFromConversation(items: ConversationItem[]): GameMessage[] {
         role: 'error',
         content: item.result?.message ?? errorMessageValue ?? '此请求未确认完成。请先核对世界历史与调用记录。',
         source: 'api',
+        errorCode: conversationErrorCode(item),
       })
     }
     return messages

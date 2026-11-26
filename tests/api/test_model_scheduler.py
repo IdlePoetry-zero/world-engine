@@ -21,6 +21,7 @@ from world_engine.adapters.models.contracts import (
     ProviderUsage,
     RoleTask,
     SpeedProfile,
+    TimeoutPolicy,
     utc_now,
 )
 from world_engine.adapters.models.errors import ProviderError, ProviderErrorCode
@@ -203,6 +204,116 @@ async def test_operation_records_queue_time_for_failures_and_cancellations(failu
 
     assert len(store.traces) == 1
     assert store.traces[0].queue_seconds is not None
+
+
+@pytest.mark.asyncio
+async def test_operation_deadline_expires_in_queue_without_dispatch_and_records_wait():
+    config = _config("p", ProviderKind.DEEPSEEK, "https://model.example")
+
+    class Store:
+        traces = []
+
+        def settings(self, _scope):
+            return {"routes": {"npc_decision": {"provider_id": "p"}}, "local_only": False}
+
+        def provider(self, _scope, _provider_id):
+            return config.public_dict() | {"enabled": True}
+
+        def config(self, _document):
+            return config
+
+        def record_trace(self, _scope, trace):
+            self.traces.append(trace)
+
+    class Gateway:
+        calls = 0
+
+        async def generate(self, _config, _request):
+            self.calls += 1
+            return _result(config.provider_id, config.kind)
+
+    store, gateway = Store(), Gateway()
+    scheduler = EndpointAdmissionScheduler(cloud_capacity=1)
+    operations = ModelOperations(store, gateway, scheduler=scheduler)
+    scope = AccessScope(tenant_id=uuid4(), user_id=uuid4())
+    request = ModelRequest(
+        role_task=RoleTask.NPC_DECISION,
+        messages=(ChatMessage("user", "Choose one."),),
+        timeout_policy=TimeoutPolicy(deadline_seconds=0.03),
+    )
+
+    async with scheduler.slot(config, SpeedProfile.BALANCED):
+        call = asyncio.create_task(operations.generate(scope, request))
+        for _ in range(100):
+            with scheduler._lock:
+                state = scheduler._endpoints[scheduler.endpoint_key(config)]
+                queued = sum(len(queue) for queue in state.queues.values())
+            if queued:
+                break
+            await asyncio.sleep(0.001)
+        with pytest.raises(ProviderError) as caught:
+            await call
+
+    assert caught.value.code is ProviderErrorCode.TIMEOUT
+    assert caught.value.retryable is False
+    assert gateway.calls == 0
+    trace, = store.traces
+    assert trace.error_code == ProviderErrorCode.TIMEOUT.value
+    assert trace.end_reason == "deadline_exceeded"
+    assert trace.attempts == ()
+    assert trace.queue_seconds >= 0.02
+
+
+@pytest.mark.asyncio
+async def test_operation_carries_one_absolute_deadline_through_route_fallbacks():
+    configs = {
+        "first": _config("first", ProviderKind.DEEPSEEK, "https://first.example"),
+        "second": _config("second", ProviderKind.DEEPSEEK, "https://second.example"),
+    }
+
+    class Store:
+        traces = []
+
+        def settings(self, _scope):
+            return {"routes": {"npc_decision": {
+                "provider_id": "first", "fallbacks": [{"provider_id": "second"}],
+            }}, "local_only": False}
+
+        def provider(self, _scope, provider_id):
+            return configs[provider_id].public_dict() | {"enabled": True}
+
+        def config(self, document):
+            return configs[document["provider_id"]]
+
+        def record_trace(self, _scope, trace):
+            self.traces.append(trace)
+
+    class Gateway:
+        requests = []
+
+        async def generate(self, config, request):
+            self.requests.append((config.provider_id, request.timeout_policy.deadline_at))
+            if config.provider_id == "first":
+                await asyncio.sleep(0.01)
+                raise ProviderError(ProviderErrorCode.NETWORK, "temporary failure", retryable=True)
+            return _result(config.provider_id, config.kind)
+
+    store, gateway = Store(), Gateway()
+    operations = ModelOperations(store, gateway, scheduler=EndpointAdmissionScheduler())
+    request = ModelRequest(
+        role_task=RoleTask.NPC_DECISION,
+        messages=(ChatMessage("user", "Choose one."),),
+        timeout_policy=TimeoutPolicy(deadline_seconds=0.2),
+    )
+
+    result = await operations.generate(
+        AccessScope(tenant_id=uuid4(), user_id=uuid4()), request,
+    )
+
+    assert result.requested_model == "test-model"
+    assert [provider for provider, _deadline in gateway.requests] == ["first", "second"]
+    assert gateway.requests[0][1] == gateway.requests[1][1]
+    assert gateway.requests[0][1] is not None
 
 
 @pytest.mark.asyncio

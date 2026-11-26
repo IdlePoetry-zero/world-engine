@@ -18,8 +18,11 @@ from sqlalchemy import Engine, Text, and_, cast, delete, event as sqlalchemy_eve
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, aliased, defer
 
+from world_engine.domain.ambient_events import AmbientEventResolvedEvent
+from world_engine.domain.social_contact_settlement import SocialContactSettledEvent
 from world_engine.domain.errors import (
     AccessDenied,
+    BranchBusy,
     Conflict,
     IdempotencyConflict,
     InsufficientStorage,
@@ -442,6 +445,8 @@ class WorldRepository:
         state = WorldState.model_validate(state_json(state))
         if state.story_milestones:
             raise InvalidEvent("A new world cannot seed story outcomes without committed milestone events.")
+        if state.ambient_events:
+            raise InvalidEvent("A new world cannot seed ambient event outcomes without committed events.")
         if state.challenge_attempts:
             raise InvalidEvent("A new world cannot seed challenge receipts without committed attempts.")
         if any(record.speech_reply_to is not None for record in state.knowledge):
@@ -2121,6 +2126,13 @@ class WorldRepository:
             lease is None or command.command_type != "simulation.window"
         ):
             raise AccessDenied("A supplied story milestone requires its simulation worker lease.")
+        autonomous_events = [event for event in typed_events if isinstance(event, (AmbientEventResolvedEvent, SocialContactSettledEvent))]
+        if autonomous_events and (
+            lease is None or command.command_type != "simulation.window"
+            or len(autonomous_events) != 1 or len(typed_events) != 1
+            or (autonomous_events[0].world_id, autonomous_events[0].branch_id) != (world_id, branch_id)
+        ):
+            raise AccessDenied("An autonomous event requires its exact simulation branch and worker lease.")
         validate_story_arrival_world(typed_events, world_id)
         event_ids = [event.event_id for event in typed_events]
         if len(set(event_ids)) != len(event_ids):
@@ -2368,6 +2380,26 @@ class WorldRepository:
                     raise StaleVersion(command.expected_state_version, branch.state_version)
                 if lease is not None:
                     leased_job = self._validate_worker_lease(session, lease, world_id, branch_id)
+                    if autonomous_events:
+                        if (
+                            leased_job.job_type not in {"simulation.world_advance", "simulation.long_action"}
+                            or role != MembershipRole.OWNER or scope.user_id != world.owner_id
+                        ):
+                            raise AccessDenied("Autonomous events require a world owner's simulation job.")
+                        autonomous_event = autonomous_events[0]
+                        if isinstance(autonomous_event, SocialContactSettledEvent):
+                            current_controls = tuple(sorted(set(session.scalars(select(ActorControlRow.actor_id).where(
+                                ActorControlRow.world_id == world_id,
+                            ))), key=str))
+                            if autonomous_event.checked_actor_control_ids != current_controls:
+                                raise AccessDenied("The social contact actor exclusions do not match current controls.")
+                        proposal = autonomous_event.proposal if isinstance(autonomous_event, AmbientEventResolvedEvent) else None
+                        if proposal is not None and session.scalar(select(ActorControlRow.actor_id).where(
+                            ActorControlRow.world_id == world_id, ActorControlRow.actor_id.in_(
+                                (proposal.initiator_id, *proposal.participant_ids),
+                            ),
+                        ).limit(1)) is not None:
+                            raise AccessDenied("Ambient proposals cannot act on behalf of a controlled character.")
                     if credit_maturity and leased_job.job_type not in {"simulation.world_advance", "simulation.long_action"}:
                         raise InvalidLease("Institutional credit maturity requires a simulation job.")
                     if (capture_history_candidate_requested
@@ -3776,12 +3808,12 @@ class WorldRepository:
 
     def find_job_by_key(self, scope, world_id, branch_id, key):
         with self._transaction() as session:
-            self._require_membership(session, scope, world_id)
+            _, role = self._require_membership(session, scope, world_id)
             row = session.scalar(select(JobRow).where(
                 JobRow.world_id == world_id, JobRow.branch_id == branch_id,
-                JobRow.idempotency_key == key,
+                JobRow.idempotency_key == key, self._job_read_filter(session, scope, world_id, role),
             ))
-            return self._job_record(row) if row is not None and self._job_visible_to(row, scope) else None
+            return self._job_record(row) if row is not None else None
 
     def enqueue_job(self, scope: AccessScope, new_job: NewJob, *, expected_state_version: int | None = None) -> JobRecord:
         if new_job.job_type == MEDIA_JOB_TYPE and new_job.payload.get("submitted_by") != str(scope.user_id):
@@ -3810,7 +3842,10 @@ class WorldRepository:
                     )
                 )
                 if existing is not None:
-                    if existing.request_hash != request_hash:
+                    if (existing.request_hash != request_hash
+                        or (role == MembershipRole.PLAYER and existing.payload_json.get("submitted_by") not in (
+                            None, str(scope.user_id),
+                        )) or not self._job_visible_to(existing, scope)):
                         raise IdempotencyConflict("Job idempotency key was reused with a different payload.")
                     return self._job_record(existing)
                 if expected_state_version is not None and branch.state_version != expected_state_version:
@@ -4104,6 +4139,8 @@ class WorldRepository:
             if not self._job_visible_to(job, scope):
                 raise NotFound("Job does not exist.")
             if role == MembershipRole.PLAYER and job.job_type == "simulation.long_action":
+                if job.payload_json.get("submitted_by") not in (None, str(scope.user_id)):
+                    raise NotFound("Job does not exist.")
                 plan_payload = job.payload_json.get("plan") if isinstance(job.payload_json, dict) else None
                 if not isinstance(plan_payload, dict):
                     raise AccessDenied("The long action plan is not valid for player control.")
@@ -4305,8 +4342,12 @@ class WorldRepository:
             job = session.get(JobRow, job_id)
             if job is None:
                 raise NotFound("Job does not exist.")
-            self._require_membership(session, scope, job.world_id)
-            if not self._job_visible_to(job, scope):
+            _, role = self._require_membership(session, scope, job.world_id)
+            visible_id = session.scalar(select(JobRow.job_id).where(
+                JobRow.job_id == job_id,
+                self._job_read_filter(session, scope, job.world_id, role),
+            ))
+            if visible_id is None:
                 raise NotFound("Job does not exist.")
             return self._job_record(job)
 
@@ -4552,15 +4593,34 @@ class WorldRepository:
 
     def list_jobs(self, scope: AccessScope, world_id: UUID, branch_id: UUID) -> list[JobRecord]:
         with self._transaction() as session:
-            self._require_membership(session, scope, world_id)
+            _, role = self._require_membership(session, scope, world_id)
             self._get_branch(session, world_id, branch_id)
             rows = session.scalars(
                 select(JobRow).where(JobRow.world_id == world_id, JobRow.branch_id == branch_id)
-                .where(or_(JobRow.job_type != MEDIA_JOB_TYPE,
-                           JobRow.payload_json["submitted_by"].as_string() == str(scope.user_id)))
+                .where(self._job_read_filter(session, scope, world_id, role))
                 .order_by(JobRow.updated_at.desc(), JobRow.job_id.desc()).limit(40)
             ).all()
             return [self._job_record(row) for row in rows]
+
+    @staticmethod
+    def _job_read_filter(session: Session, scope: AccessScope, world_id: UUID, role: MembershipRole):
+        submitter = JobRow.payload_json["submitted_by"].as_string()
+        own_media = and_(JobRow.job_type == MEDIA_JOB_TYPE, submitter == str(scope.user_id))
+        if role in AUTHOR_ROLES:
+            return or_(own_media, JobRow.job_type != MEDIA_JOB_TYPE)
+        if role != MembershipRole.PLAYER:
+            return own_media
+        actor_ids = [str(actor_id) for actor_id in session.scalars(
+            select(ActorControlRow.actor_id).where(
+                ActorControlRow.world_id == world_id, ActorControlRow.user_id == scope.user_id,
+            )
+        )]
+        legacy_actor = JobRow.payload_json["plan"]["actor_id"].as_string()
+        own_action = and_(
+            JobRow.job_type == "simulation.long_action",
+            or_(submitter == str(scope.user_id), and_(submitter.is_(None), legacy_actor.in_(actor_ids))),
+        )
+        return or_(own_media, own_action)
 
     @staticmethod
     def _job_visible_to(job: JobRow, scope: AccessScope) -> bool:
@@ -4830,12 +4890,24 @@ class WorldRepository:
         branch, raw_state_json = row
         return branch, raw_state_json
 
+    def assert_branch_can_accept_write(self, scope: AccessScope, world_id: UUID, branch_id: UUID) -> None:
+        """Check for an existing writer before costly interpretation."""
+        with self._transaction() as session:
+            _, role = self._require_membership(session, scope, world_id)
+            self._require_mutation_role(role)
+            self._get_branch(session, world_id, branch_id, defer_state_json=True, defer_initial_state_json=True)
+            expires_at = session.scalar(
+                select(BranchLeaseRow.lease_expires_at).where(BranchLeaseRow.branch_id == branch_id)
+            )
+            if expires_at is not None and normalize_datetime(expires_at) > utc_now():
+                raise BranchBusy("Branch has an active writer lease; pause or finish its job before writing.")
+
     def _ensure_no_active_branch_lease(self, session: Session, branch_id: UUID, now: datetime) -> None:
         lease = session.scalar(
             select(BranchLeaseRow).where(BranchLeaseRow.branch_id == branch_id).with_for_update()
         )
         if lease is not None and normalize_datetime(lease.lease_expires_at) > normalize_datetime(now):
-            raise Conflict("Branch has an active writer lease; pause or finish its job before writing.")
+            raise BranchBusy("Branch has an active writer lease; pause or finish its job before writing.")
 
     def _validate_causation(
         self, session: Session, world_id: UUID, branch: BranchRow, causation_ids: Sequence[UUID]
@@ -5828,6 +5900,11 @@ class WorldRepository:
                     **read_event_payload(row, prefetched_sidecar=sidecar),
                 }) for row, sidecar in prefetched_batch]
                 validate_story_arrival_world(stored_events, world_id)
+                for row, event in zip(batch, stored_events, strict=True):
+                    if isinstance(event, (AmbientEventResolvedEvent, SocialContactSettledEvent)) and (
+                        len(batch) != 1 or (event.world_id, event.branch_id) != (row.world_id, row.branch_id)
+                    ):
+                        raise InvalidEvent("Stored autonomous event does not match its originating branch window.")
                 events = validate_persisted_death_vacancies(
                     state, stored_events, world_id=world_id, branch_id=branch.branch_id,
                     command_id=batch[0].command_id, actor_id=batch[0].actor_id,

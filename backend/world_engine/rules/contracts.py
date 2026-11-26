@@ -19,7 +19,7 @@ from pydantic import (
 )
 
 from world_engine.domain.components import ExactDecimal, ResourceName
-from world_engine.domain.gameplay_events import AccusationRepairTrustProof
+from world_engine.domain.gameplay_events import AccusationRepairKeyReview, AccusationRepairTrustProof
 from world_engine.domain.investigation import WorldTick
 from world_engine.domain.institutional_credit import MAX_INSTITUTIONAL_CREDIT_MINOR
 from world_engine.domain.json_types import JsonObject
@@ -67,13 +67,17 @@ class SpeakIntent(IntentModel):
         default=None, exclude_if=lambda value: value is None,
         description="A known private utterance from the named recipient. A first reciprocal reply increases familiarity.",
     )
+    topic_record_id: UUID | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+        description="An active known topic explicitly included in the speaker's goals and already known to both participants.",
+    )
 
     @model_validator(mode="after")
     def recipients_are_unique(self) -> SpeakIntent:
         if len(self.target_ids) != len(set(self.target_ids)):
             raise ValueError("speech recipients must be unique")
-        if self.reply_to_memory_id is not None and len(self.target_ids) != 1:
-            raise ValueError("a private reply must name only the original speaker")
+        if (self.reply_to_memory_id is not None or self.topic_record_id is not None) and len(self.target_ids) != 1:
+            raise ValueError("a private reply or topic must name exactly one recipient")
         return self
 
 
@@ -684,6 +688,7 @@ class RuleContext(ContractModel):
     background_choices: list[BackgroundAgentChoice] = Field(default_factory=list, max_length=100_000)
     accusation_repair_requested_by: UUID | None = None
     accusation_repair_trust_proof: AccusationRepairTrustProof | None = None
+    accusation_repair_key_review: AccusationRepairKeyReview | None = None
     simulation_command_id: UUID | None = None
     travelling_window: bool = False
     continuous_training: bool = False

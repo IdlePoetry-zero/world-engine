@@ -6,6 +6,7 @@ import asyncio
 import json
 from collections.abc import Mapping
 from dataclasses import replace
+import re
 from types import SimpleNamespace
 from time import monotonic
 from typing import Any, Protocol
@@ -24,6 +25,7 @@ from world_engine.adapters.models.contracts import (
 )
 from world_engine.adapters.models.errors import ProviderError, ProviderErrorCode
 from world_engine.domain.models import AccessScope, JobLease, JobRecord
+from world_engine.domain.npc_plan_review import NPC_MODEL_OUTPUT_DEFER_REASONS
 from world_engine.simulation.contracts import DecisionRequest, DecisionResponse
 
 
@@ -79,6 +81,13 @@ async def invoke_npc_planning(operations, repository, scope, lease, job, decisio
             ), timeout=MODEL_DECISION_TIMEOUT_SECONDS,
         )
     except ProviderError as error:
+        if _is_structured_output_failure(error):
+            return _npc_model_output_deferred_decision(
+                decision,
+                view.state,
+                call_id=_provider_error_call_id(error),
+                rejection="invalid_npc_plan_output",
+            )
         if error.code not in {
             ProviderErrorCode.AUTHENTICATION,
             ProviderErrorCode.RATE_LIMITED,
@@ -96,6 +105,13 @@ async def invoke_npc_planning(operations, repository, scope, lease, job, decisio
         # completed, so record a policy deferral and let the scheduled review
         # retry under its persisted cooldown instead of pausing the whole job.
         return _npc_model_unavailable_decision(decision, view.state)
+    if proposal.status == "invalid" and proposal.error_code in NPC_MODEL_OUTPUT_DEFER_REASONS:
+        return _npc_model_output_deferred_decision(
+            decision,
+            view.state,
+            call_id=getattr(proposal, "model_call_id", None),
+            rejection=proposal.error_code,
+        )
     call_id = getattr(proposal, "model_call_id", None)
     return DecisionResponse(
         request_id=decision.request_id, state_version=decision.state_version, at_tick=decision.at_tick,
@@ -122,6 +138,71 @@ def _npc_model_unavailable_decision(decision: DecisionRequest, state) -> Decisio
         npc_planning_policy_reason=NPC_MODEL_UNAVAILABLE_REASON,
         npc_plan_state_hash=state_hash(state),
     )
+
+
+def _npc_model_output_deferred_decision(
+    decision: DecisionRequest,
+    state,
+    *,
+    call_id: object,
+    rejection: str,
+) -> DecisionResponse:
+    """Defer unusable structured model output with its call receipt when safe."""
+    if rejection not in NPC_MODEL_OUTPUT_DEFER_REASONS:
+        raise ValueError("Only registered structured-output failures may be deferred here.")
+    from world_engine.domain.reducers import state_hash
+
+    safe_call_id = _safe_model_call_id(call_id)
+    if safe_call_id is None:
+        return _npc_model_unavailable_decision(decision, state)
+    return DecisionResponse(
+        request_id=decision.request_id,
+        state_version=decision.state_version,
+        at_tick=decision.at_tick,
+        source="model",
+        option_id="plan",
+        npc_planning_status="defer",
+        npc_planning_rejection=rejection,
+        npc_plan_state_hash=state_hash(state),
+        npc_model_call_id=safe_call_id,
+    )
+
+
+def _is_structured_output_failure(error: ProviderError) -> bool:
+    """Recognize completed provider output failures, not preflight/config errors."""
+    if error.code is ProviderErrorCode.TRUNCATED:
+        return True
+    if error.code is not ProviderErrorCode.INVALID_OUTPUT:
+        return False
+    trace = error.call_trace
+    return trace is not None and any(
+        getattr(attempt, "outcome", None) == "response_received"
+        for attempt in getattr(trace, "attempts", ())
+    )
+
+
+def _provider_error_call_id(error: ProviderError) -> str | None:
+    trace = error.call_trace
+    if trace is None:
+        return None
+    if error.code is ProviderErrorCode.TRUNCATED and getattr(trace, "finish_reason", None) not in {
+        FinishReason.LENGTH, FinishReason.LENGTH.value,
+    }:
+        return None
+    if error.code is ProviderErrorCode.INVALID_OUTPUT and not any(
+        getattr(attempt, "outcome", None) == "response_received"
+        for attempt in getattr(trace, "attempts", ())
+    ):
+        return None
+    return _safe_model_call_id(getattr(trace, "request_id", None))
+
+
+def _safe_model_call_id(value: object) -> str | None:
+    if not isinstance(value, str) or len(value) > 128:
+        return None
+    if not re.fullmatch(r"[a-zA-Z0-9_.:-]+", value):
+        return None
+    return value
 
 
 async def invoke_npc_reflection(operations, repository, scope, lease, job, decision) -> None:

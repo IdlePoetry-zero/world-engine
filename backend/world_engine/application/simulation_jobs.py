@@ -79,19 +79,14 @@ class SimulationJobs:
                 payload["max_steady_macro_days"] = existing.payload["max_steady_macro_days"]
             elif profile is not None:
                 payload["max_steady_macro_days"] = profile.max_steady_macro_days
-        if isinstance(plan, LongActionPlan) and (
-            plan.activity in {"work", "explore"} or plan.travel_itinerary is not None
-        ):
+        # A preexisting unstamped job keeps the original idempotency payload.
+        if isinstance(plan, LongActionPlan) and (existing is None or "submitted_by" in existing.payload):
             payload["submitted_by"] = str(scope.user_id)
         if isinstance(plan, LongActionPlan) and plan.activity == "work":
             if existing is None:
                 payload["work_calendar"] = view.state.calendar.model_dump(mode="json")
             elif "work_calendar" in existing.payload:
                 payload["work_calendar"] = existing.payload["work_calendar"]
-        if isinstance(plan, LongActionPlan) and plan.activity == "study":
-            # A preexisting unstamped job must retain the payload used for its idempotency hash.
-            if existing is None or "submitted_by" in existing.payload:
-                payload["submitted_by"] = str(scope.user_id)
         return self.repository.enqueue_job(scope, NewJob(
             world_id=world_id, branch_id=branch_id, job_type=job_type,
             idempotency_key=idempotency_key,

@@ -25,6 +25,10 @@ class Conflict(DomainError):
     """A state or uniqueness conflict prevents the requested operation."""
 
 
+class BranchBusy(Conflict):
+    """An active simulation writer currently owns the branch."""
+
+
 class StaleVersion(Conflict):
     """The caller's expected branch version no longer matches."""
 

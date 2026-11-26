@@ -115,6 +115,8 @@ class EndpointAdmissionScheduler:
         self,
         config: ProviderConfig,
         speed: SpeedProfile,
+        *,
+        deadline_at: float | None = None,
     ) -> AsyncIterator[float]:
         """Admit one call and yield its measured queue time in seconds."""
         if not isinstance(speed, SpeedProfile):
@@ -140,8 +142,13 @@ class EndpointAdmissionScheduler:
 
         if future is not None and waiter is not None:
             try:
-                queue_seconds = await future
-            except asyncio.CancelledError:
+                remaining = None if deadline_at is None else deadline_at - time.perf_counter()
+                if remaining is not None and remaining <= 0:
+                    raise TimeoutError
+                queue_seconds = await future if remaining is None else await asyncio.wait_for(future, timeout=remaining)
+            except (asyncio.CancelledError, TimeoutError):
+                if not future.done():
+                    future.cancel()
                 with self._lock:
                     state = self._endpoints.get(key)
                     if state is not None:

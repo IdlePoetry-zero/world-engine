@@ -84,6 +84,7 @@ export function PlaySceneCard({ state, loading, viewError, stage, canPrepareActi
   )) : []
   const exits = place ? state?.travel_options ?? [] : []
   const opportunities = state?.scene_opportunities ?? []
+  const localObservations = place ? state?.local_ambient_observations ?? [] : []
   const anchors = place ? state?.available_case_anchors ?? [] : []
   const goals = (state?.goals ?? []).filter(isCurrentGoal)
   const caseFiles = state?.case_files ?? []
@@ -132,11 +133,20 @@ export function PlaySceneCard({ state, loading, viewError, stage, canPrepareActi
         {cast.length > 0 && <button type="button" className="play-scene-observe mobile-cast-jump" onClick={showPeople}>在场人物 · {cast.length}</button>}
       </div>}
       {available && player && <button type="button" className="scene-mobile-toggle" aria-expanded={expanded} aria-controls={detailsId} onClick={() => setExpanded(!expanded)}>
-        <span>{expanded ? '收起场景详情' : opportunities[0]?.title || anchors[0]?.title || '线索、人物与路线'}</span>
+        <span>{expanded ? '收起场景详情' : opportunities[0]?.title || localObservations[0]?.title || anchors[0]?.title || '线索、人物与路线'}</span>
         <span>{expanded ? '收起' : '展开'} <Icon name="chevron" size={14} /></span>
       </button>}
       <div id={detailsId} className={'play-scene-detail' + (expanded ? ' is-expanded' : '')}>
         {available && description && <p className="play-scene-description">{description}</p>}
+        {available && localObservations.length > 0 && <section className="play-scene-section" aria-label="当地近况">
+          <h3><Icon name="eye" size={16} />当地近况</h3>
+          <SceneList label="可观察的变化" items={localObservations} render={(item) => (
+            <article key={item.id} className="play-scene-opportunity">
+              <div className="play-scene-opportunity-title"><strong>{item.title}</strong></div>
+              <p>{item.description}</p>
+            </article>
+          )} />
+        </section>}
         {available && player && <section className="play-scene-section play-scene-opportunities" aria-label="眼下可做">
           <h3><Icon name="compass" size={16} />眼下可做</h3>
           {opportunities.length > 0 && <SceneList label="机会" items={opportunities} render={(opportunity) => (

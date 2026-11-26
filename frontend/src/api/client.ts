@@ -628,6 +628,7 @@ export type WorldState = {
   world_book_entries?: WorldBookEntry[] | null
   story_milestones?: { record_id: string; title: string; summary: string; resolved_tick: string }[]
   scene_opportunities?: SceneOpportunity[]
+  local_ambient_observations?: { id: string; title: string; description: string; start_tick: string }[]
   scene_npc_readback?: Record<string, {
     public_schedule: { activity: string; place_name: string; start_second: number; duration_seconds: number; every_days: number }[]
     known_changes: { claim: string; received_tick: string }[]
@@ -909,6 +910,7 @@ export type GameMessage = {
   references?: string[]
   jobId?: string
   rewriteSource?: { requestId: string; rewrites?: NarrativeRewrites }
+  errorCode?: string
 }
 export type ConversationItem = {
   request_id: string

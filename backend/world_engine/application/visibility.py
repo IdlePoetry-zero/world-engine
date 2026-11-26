@@ -590,6 +590,19 @@ def project_player_state(state: dict[str, Any], actor_id: str) -> dict[str, Any]
         ) if key in state.get("metadata", {})},
     }
     traveling = result["own_active_travel"] is not None
+    if not traveling and location in projected_entities and state.get("ambient_events"):
+        local_observations = [
+            {
+                "id": item["event_id"], "title": item["proposal"]["title"],
+                "description": item["proposal"]["description"], "start_tick": item["start_tick"],
+            }
+            for item in state["ambient_events"]
+            if item["proposal"]["kind"] == "local_observation"
+            and item["proposal"]["place_id"] == location
+            and item["start_tick"] <= tick < item["end_tick"]
+        ]
+        if local_observations:
+            result["local_ambient_observations"] = local_observations[-8:]
     opportunities = _scene_opportunities(state, projected_entities, actor_id, tick, traveling=traveling)
     if opportunities:
         result["scene_opportunities"] = opportunities

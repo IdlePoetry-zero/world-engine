@@ -90,6 +90,36 @@ def create_sample_world(repository: WorldRepository):
     return scope, created, player_id, npc_id, source_account, target_account
 
 
+def test_job_history_is_scoped_to_its_submitter_and_legacy_actor(world_repo):
+    owner, created, player_id, npc_id, *_ = create_sample_world(world_repo)
+    world_id, branch_id = created.world.world_id, created.branch.branch_id
+    player = AccessScope(tenant_id=owner.tenant_id, user_id=uuid4())
+    observer = AccessScope(tenant_id=owner.tenant_id, user_id=uuid4())
+    world_repo.grant_membership(owner, world_id, player.user_id, MembershipRole.PLAYER,
+                                controlled_actor_ids=[npc_id])
+    world_repo.grant_membership(owner, world_id, observer.user_id, MembershipRole.OBSERVER)
+
+    def enqueue(key, job_type, payload):
+        return world_repo.enqueue_job(owner, NewJob(
+            world_id=world_id, branch_id=branch_id, job_type=job_type, idempotency_key=key, payload=payload,
+        ))
+
+    hidden = enqueue("owner-rest", "simulation.long_action",
+                     {"plan": {"actor_id": str(player_id)}, "submitted_by": str(owner.user_id)})
+    own_legacy = enqueue("legacy-rest", "simulation.long_action", {"plan": {"actor_id": str(npc_id)}})
+    global_job = enqueue("advance-all", "simulation.world_advance", {"plan": {"target_tick": 400}})
+
+    assert [job.job_id for job in world_repo.list_jobs(player, world_id, branch_id)] == [own_legacy.job_id]
+    assert world_repo.read_job(player, own_legacy.job_id).job_id == own_legacy.job_id
+    assert world_repo.list_jobs(observer, world_id, branch_id) == []
+    for denied in (hidden, global_job):
+        with pytest.raises(NotFound):
+            world_repo.read_job(player, denied.job_id)
+    with pytest.raises(NotFound):
+        world_repo.read_job(observer, own_legacy.job_id)
+    assert len(world_repo.list_jobs(owner, world_id, branch_id)) == 3
+
+
 def test_branch_json_columns_are_deferred_for_world_reads_and_event_pages(world_repo):
     scope, created, player_id, *_ = create_sample_world(world_repo)
     world_id, branch_id = created.world.world_id, created.branch.branch_id

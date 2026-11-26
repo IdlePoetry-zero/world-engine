@@ -24,15 +24,21 @@ def main() -> None:
     mode.add_argument("--station-demo", action="store_true", help="Build the original science-fiction example.")
     mode.add_argument("--character-cards", type=Path, help="Build using the author’s recovered character cards.")
     mode.add_argument("--playable-world", action="store_true", help="Build the canon-based playable world.")
+    mode.add_argument("--social-world", action="store_true", help="Build the playable world with ambient events.")
+    parser.add_argument("--ambient-settings", type=Path, help="Optional JSON overrides for named social-world scopes.")
     args = parser.parse_args()
+    if args.ambient_settings is not None and not args.social_world:
+        parser.error("--ambient-settings requires --social-world")
     if args.station_demo:
         name = f"distant-station-{distant_station_story.PACK_VERSION}.zip"
         archive = distant_station_story.build_archive()
-    elif args.playable_world:
+    elif args.playable_world or args.social_world:
         from world_engine.content import gensokyo_world
 
-        name = f"gensokyo-world-{gensokyo_world.PACK_VERSION}.zip"
-        archive = gensokyo_world.build_archive()
+        version = gensokyo_world.SOCIAL_PACK_VERSION if args.social_world else gensokyo_world.PACK_VERSION
+        name = f"gensokyo-world-{version}.zip"
+        settings = json.loads(args.ambient_settings.read_text(encoding="utf-8")) if args.ambient_settings else None
+        archive = gensokyo_world.build_archive(social_world=args.social_world, ambient_overrides=settings)
     elif args.character_cards:
         from world_engine.content.gensokyo_legacy_cast import CAST_VERSION, build_cast_archive
 
@@ -48,7 +54,7 @@ def main() -> None:
     print(f"SHA-256 {sha256(archive).hexdigest()}")
     if not args.station_demo:
         index = output.with_suffix(".index.json")
-        if args.playable_world:
+        if args.playable_world or args.social_world:
             with ZipFile(output) as package:
                 scenarios = json.loads(package.read("template.json"))["story_openings"]
             data = {

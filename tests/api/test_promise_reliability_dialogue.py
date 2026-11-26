@@ -171,6 +171,9 @@ async def test_dialogue_uses_only_target_to_speaker_reliability_and_keeps_it_pri
     operations = OperationsStore(tmp_path / "operations.db")
 
     class RepositoryFixture:
+        def assert_branch_can_accept_write(self, _scope, _world_id, _branch_id):
+            return None
+
         def commit_command(self, _scope, _world_id, _branch_id, command, _events):
             return SimpleNamespace(command_id=command.command_id, state_version=1)
 

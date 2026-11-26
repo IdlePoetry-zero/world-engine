@@ -30,6 +30,13 @@ _MAX_RUNS = 1_000_000
 NPC_FAILURE_REVIEW_POLICY = "npc_failure_review_v1"
 NPC_GOAL_FOLLOWUP_REVIEW_POLICY = "npc_goal_followup_review_v1"
 NPC_MODEL_UNAVAILABLE_REASON = "npc_model_unavailable"
+# These completed model calls did not produce an acceptable plan review. They
+# are recorded as model-sourced deferrals and rearmed through the same bounded,
+# registered schedule as a provider-unavailable result.
+NPC_MODEL_OUTPUT_DEFER_REASONS = frozenset({
+    "invalid_npc_plan_output",
+    "npc_plan_semantic_unavailable",
+})
 _AUTOMATIC_REVIEW_RUN_LIMIT = 13
 _PROVIDER_RETRY_DELAY_TICKS = 3_600
 
@@ -259,11 +266,12 @@ def build_npc_failure_review(state: WorldState, world_id: UUID, plan: NpcPlan) -
 def build_npc_provider_unavailable_review(
     state: WorldState, world_id: UUID, actor_id: UUID,
 ) -> ScheduledEventRecord | None:
-    """Schedule one bounded retry after a planner provider cannot answer.
+    """Schedule one bounded retry after a planner cannot produce a decision.
 
     Keep the next authored occurrence at its original time. After the authored
     schedule is exhausted, add one occurrence at a time with increasing delays
-    up to the shared automatic-review cap.
+    up to the shared automatic-review cap. Unusable structured output uses the
+    same registered cooldown and run limit as provider unavailability.
     """
     exhausted = _exhausted_npc_review(state, world_id, actor_id)
     if exhausted is None:

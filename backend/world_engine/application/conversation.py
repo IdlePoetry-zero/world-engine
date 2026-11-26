@@ -20,7 +20,7 @@ from world_engine.adapters.models import (
 from world_engine.adapters.models.errors import ProviderError, ProviderErrorCode
 from world_engine.agents import build_agent_knowledge
 from world_engine.domain.components import MAX_SKILL_LEVEL
-from world_engine.domain.errors import Conflict, InvalidEvent, NotFound, StaleVersion, StorageBusy
+from world_engine.domain.errors import BranchBusy, Conflict, InvalidEvent, NotFound, StaleVersion, StorageBusy
 from world_engine.domain.models import AccessScope, MembershipRole
 from world_engine.rules.contracts import OpenInvestigationCaseIntent
 from .action_drafts import ActionDraft, ActionDraftStore
@@ -33,7 +33,7 @@ from .worlds import WorldApplication
 from .visibility import meeting_local_time, present_dialogue_targets, project_event, project_player_state, project_sent_relationship_disclosures
 from .errors import (
     ApplicationFailure, InvalidDialogueReply, MODEL_OUTPUT_TRUNCATED_MESSAGE, OLLAMA_CONTEXT_LIMIT_MESSAGE,
-    STORAGE_BUSY_CODE, STORAGE_BUSY_MESSAGE,
+    BRANCH_BUSY_CODE, BRANCH_BUSY_MESSAGE, STORAGE_BUSY_CODE, STORAGE_BUSY_MESSAGE,
 )
 from .quoted_speech_guard import match_quoted_speech_frame
 from .relationship_decisions import (
@@ -98,11 +98,16 @@ def _compact_gm_context(context, question):
     player = context["state"]
     actor_id = player["player_id"]
     actor = player["entities"][actor_id]
-    essential_ids = [actor_id, actor.get("location_id")]
+    question_key = unicodedata.normalize("NFKC", question).casefold()
+    named_ids = [
+        ident for ident, row in player["entities"].items()
+        if any(
+            isinstance(value, str) and value and unicodedata.normalize("NFKC", value).casefold() in question_key
+            for value in (row.get("name"), ident if ident in context["reference_ids"] else None)
+        )
+    ]
+    essential_ids = [actor_id, actor.get("location_id"), *named_ids]
     essential_ids.extend(row["id"] for row in context["present_dialogue_targets"][:8])
-    for ident, row in player["entities"].items():
-        if row.get("name") and row["name"] in question:
-            essential_ids.append(ident)
     visible = {
         ident: {key: row[key] for key in ("id", "name", "kind", "location_id", "status") if key in row} | {
             "description": str(row.get("components", {}).get("public_description") or "")[:180],
@@ -122,11 +127,12 @@ def _compact_gm_context(context, question):
             "travel_options": context.get("action_context", {}).get("travel_options", [])[:8],
         },
     }
+    if player.get("local_ambient_observations"):
+        compact["state"]["local_ambient_observations"] = player["local_ambient_observations"][-3:]
     if any(word in question for word in ("修习", "学习", "练", "技能", "魔法", "考核")):
         compact["state"]["own_study_skills"] = player.get("own_study_skills", [])[:10]
         compact["state"]["local_challenges"] = player.get("local_challenges", [])[:4]
     case_files = player.get("case_files", [])
-    question_key = unicodedata.normalize("NFKC", question).casefold()
     named_cases = [
         case for case in case_files
         if any(
@@ -656,6 +662,7 @@ class ConversationApplication:
             if (anchor_id := getattr(request, "case_anchor_id", None)) is not None:
                 if self.actions is None:
                     raise ApplicationFailure("ACTION_SERVICE_UNAVAILABLE", "行动处理服务尚未就绪。", status_code=503)
+                await self._check_branch_writer(scope, request)
                 result = await self.actions.execute(
                     scope, view, request, "action", approved_action=OpenInvestigationCaseIntent(
                         kind="open_investigation_case", anchor_id=anchor_id,
@@ -708,6 +715,8 @@ class ConversationApplication:
             else:
                 if self.actions is None:
                     raise ApplicationFailure("ACTION_SERVICE_UNAVAILABLE", "行动处理服务尚未就绪，本次未推进世界。", status_code=503)
+                if intent in {"action", "dialogue"}:
+                    await self._check_branch_writer(scope, request)
                 result = await self.actions.execute(scope, view, request, intent)
             self.store.finish(scope, request.request_id, result, succeeded=True)
             return result
@@ -728,6 +737,11 @@ class ConversationApplication:
                 "world_effect": False,
             }, succeeded=False)
             raise
+        except BranchBusy:
+            self.store.finish(scope, request.request_id, {
+                "error": BRANCH_BUSY_CODE, "message": BRANCH_BUSY_MESSAGE, "world_effect": False,
+            }, succeeded=False)
+            raise
         except StorageBusy:
             self.store.finish(scope, request.request_id, {"error": STORAGE_BUSY_CODE, "message": STORAGE_BUSY_MESSAGE},
                               succeeded=False)
@@ -744,6 +758,11 @@ class ConversationApplication:
             }
             self.store.finish(scope, request.request_id, result, succeeded=False)
             raise
+
+    async def _check_branch_writer(self, scope, request):
+        await asyncio.to_thread(
+            self.worlds.repository.assert_branch_can_accept_write, scope, request.world_id, request.branch_id,
+        )
 
     async def _handle_action_draft(self, scope, view, request):
         control = request.draft
@@ -767,11 +786,12 @@ class ConversationApplication:
                 return self._response(request, "clarification", "这份草稿缺少明确条件，或场景已变化。请先更新并核对草稿。", False)
             if int(request.expected_state_version) != view.branch.state_version:
                 raise StaleVersion(int(request.expected_state_version), view.branch.state_version)
+            await self._check_branch_writer(scope, request)
             self.store.drafts.claim(scope, request, previous)
             sealed_request = request.model_copy(update={"text": previous.source_text})
             try:
                 result = await self.actions.execute(scope, view, sealed_request, "action", approved_action=previous.action)
-            except (StaleVersion, StorageBusy):
+            except (BranchBusy, StaleVersion, StorageBusy):
                 self.store.drafts.finish(scope, request, previous, committed=False)
                 raise
             committed = result.get("world_effect") is True

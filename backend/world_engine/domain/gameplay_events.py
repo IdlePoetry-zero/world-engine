@@ -949,6 +949,28 @@ class RelationDimensionChangedEvent(ContractModel):
     value: SignedRelationValue
     evidence_refs: list[UUID] = Field(default_factory=list, max_length=10_000)
     visibility: JsonObject = Field(default_factory=lambda: {"policy": "author_only"})
+    social_policy_id: Literal["social_world_v1"] | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+    speech_memory_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
+    routine_occurrence: StrictInt | None = Field(
+        default=None, ge=1, le=2**63 - 1, exclude_if=lambda value: value is None,
+    )
+
+    @model_validator(mode="after")
+    def social_speech_receipt_is_coherent(self) -> RelationDimensionChangedEvent:
+        fields = (self.social_policy_id, self.speech_memory_id, self.routine_occurrence)
+        if all(value is None for value in fields):
+            return self
+        if any(value is None for value in fields):
+            raise ValueError("social speech relationship receipt fields must be provided together")
+        if self.dimension != "familiarity":
+            raise ValueError("social speech receipts can only change familiarity")
+        if self.speech_memory_id is None or self.speech_memory_id.int == 0:
+            raise ValueError("social speech receipt requires a non-empty memory UUID")
+        if self.evidence_refs != [self.speech_memory_id]:
+            raise ValueError("social speech evidence must name exactly its source memory")
+        return self
 
 
 class GoalCreatedEvent(ContractModel):
@@ -1091,9 +1113,16 @@ class AccusationRepairTrustProof(ContractModel):
         return self
 
 
+class AccusationRepairKeyReview(ContractModel):
+    reason: Literal["relationship_repair"] = "relationship_repair"
+    evidence_event_ids: tuple[UUID, UUID]
+    model_call_id: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_.:-]+$")
+
+
 class AccusationRepairTrustRecovery(ContractModel):
     proof: AccusationRepairTrustProof
     applied_delta: StrictInt = Field(ge=0, le=100)
+    key_review: AccusationRepairKeyReview | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def bounded_to_a_fraction_of_the_proven_loss(self) -> AccusationRepairTrustRecovery:
@@ -1178,6 +1207,12 @@ class AccusationRepairResolvedEvent(ContractModel):
                 or proof.suspect_id != offer.suspect_id
             ):
                 raise ValueError("accusation repair trust recovery must match an accepted offer's source")
+            key_review = self.trust_recovery.key_review
+            if key_review is not None and (
+                self.requested_by is None
+                or key_review.evidence_event_ids != (offer.correction_event_id, offer.offer_id)
+            ):
+                raise ValueError("key review must bind the hosted response's correction and private offer")
         if self.visibility != {"policy": "author_only"}:
             raise ValueError("accusation repair response provenance must remain private")
         return self

@@ -136,7 +136,7 @@ class _RecordingScheduler:
         self.providers = []
 
     @asynccontextmanager
-    async def slot(self, config, speed):
+    async def slot(self, config, speed, *, deadline_at=None):
         self.providers.append(config.provider_id)
         yield 0.0
 

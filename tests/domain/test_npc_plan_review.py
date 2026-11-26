@@ -11,6 +11,7 @@ from world_engine.domain.errors import InvalidEvent
 from world_engine.domain.models import WorldEntity, WorldState
 from world_engine.domain.npc_plan_review import (
     NPC_FAILURE_REVIEW_POLICY,
+    NPC_MODEL_OUTPUT_DEFER_REASONS,
     NPC_MODEL_UNAVAILABLE_REASON,
     NPC_PLAN_REVIEW_HANDLER_ID,
     NPC_PLAN_REVIEW_HANDLER_VERSION,
@@ -193,6 +194,27 @@ def test_provider_unavailability_rearms_one_due_review_with_bounded_cadence():
     assert apply_event(state, event) == result
     with pytest.raises(InvalidEvent):
         apply_npc_plan_review_resolved(result, event)
+
+
+@pytest.mark.parametrize("reason", sorted(NPC_MODEL_OUTPUT_DEFER_REASONS))
+def test_unusable_model_output_defers_and_preserves_an_existing_registered_plan(reason):
+    world_id, actor_id, goal_id, base_state = _world(tick=100)
+    plan = _plan(actor_id, goal_id, plan_id=uuid4(), tick=base_state.current_tick)
+    state = base_state.model_copy(update={"npc_plans": [plan]})
+    schedule = _schedule(state, world_id, actor_id)
+    state = _state_with_schedule(state, schedule)
+    event = _event(
+        world_id, actor_id, schedule, outcome="defer", source="model",
+        model_call_id="call-structured-output", reason=reason,
+    )
+
+    result = apply_npc_plan_review_resolved(state, event)
+
+    assert result.npc_plans == [plan]
+    retry, = result.scheduled_events
+    assert retry.id == schedule.id
+    assert retry.status == "queued" and retry.due_tick == 100 + 3_600
+    assert retry.completed_runs == 1 and retry.max_runs == 2
 
 
 def test_provider_unavailability_respects_existing_schedule_and_total_retry_cap():

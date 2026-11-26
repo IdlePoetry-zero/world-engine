@@ -160,6 +160,9 @@ class _Repository:
     def read_world(self, _scope, _world_id, _branch_id):
         return self.view
 
+    def assert_branch_can_accept_write(self, scope, world_id, branch_id):
+        self.read_world(scope, world_id, branch_id)
+
     def authorize_hosted_npc(self, _scope, _world_id, actor_id):
         self.calls.append("authorize_hosted_npc")
         self.timeline.append("authorize_hosted_npc")

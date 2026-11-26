@@ -51,7 +51,7 @@ RESOURCE_ID = "core.herb"
 RULESET = "1.0.0"
 
 
-def _fixture_state():
+def _fixture_state(*, social_world_v1: bool = False):
     place_id, promisor_id, promisee_id = (uuid4() for _ in range(3))
     source_account_id, recipient_account_id = uuid4(), uuid4()
     first_lot_id, second_lot_id = uuid4(), uuid4()
@@ -117,7 +117,10 @@ def _fixture_state():
                 account_type="holder",
             ),
         },
-        metadata={"promise_trust_policy_id": TRUST_POLICY_ID},
+        metadata={
+            "promise_trust_policy_id": TRUST_POLICY_ID,
+            **({"social_world_v1": True} if social_world_v1 else {}),
+        },
     )
     return state, promisor_id, promisee_id, source_account_id, recipient_account_id, first_lot_id, second_lot_id
 
@@ -612,6 +615,69 @@ def test_trust_settlements_are_atomic_and_fork_local_with_legacy_v1_blocked(tmp_
             assert restored_late_record.causation_ids == [breach_record.event_id]
         finally:
             restored_database.dispose()
+    finally:
+        database.dispose()
+
+
+@pytest.mark.parametrize(
+    ("quantities", "expected_deltas"),
+    [
+        (("1", "1"), (Decimal("3"), Decimal("1.5"))),
+        (("1", "2.5"), (Decimal("3"), Decimal("3"))),
+    ],
+)
+def test_social_world_routine_ordinal_comes_from_same_edge_and_return_terms(
+    tmp_path, quantities, expected_deltas,
+):
+    state, promisor_id, promisee_id, *_ = _fixture_state(social_world_v1=True)
+    scope = AccessScope(tenant_id=uuid4(), user_id=uuid4())
+    database = Database(f"sqlite:///{(tmp_path / 'social-promise-trust.db').as_posix()}")
+    database.create_schema()
+    try:
+        repository = WorldRepository(database)
+        created = repository.create_world(scope, NewWorld(title="Social promise trust", state=state))
+        world_id, branch_id = created.world.world_id, created.branch.branch_id
+
+        returned = []
+        for index, (quantity, expected_delta) in enumerate(zip(quantities, expected_deltas, strict=True)):
+            _commit_action(
+                repository,
+                scope,
+                world_id,
+                branch_id,
+                promisor_id,
+                "record_return_promise",
+                {
+                    "promisee_id": str(promisee_id),
+                    "resource_id": RESOURCE_ID,
+                    "quantity": quantity,
+                    "deadline_tick": 50 + index,
+                    "private_text": f"I will return {quantity} herbs under wording {index}.",
+                },
+                key=f"social-record-{index}",
+            )
+            current = repository.read_world(scope, world_id, branch_id)
+            promise = current.state.relationship_promises[-1]
+            _, event = _commit_action(
+                repository,
+                scope,
+                world_id,
+                branch_id,
+                promisor_id,
+                "fulfill_return_promise",
+                {"promise_id": str(promise.id)},
+                key=f"social-fulfill-{index}",
+            )
+            assert isinstance(event, PromiseItemReturnedWithTrustEvent)
+            assert event.trust.applied_delta == expected_delta
+            returned.append(event)
+
+        final = repository.read_world(scope, world_id, branch_id)
+        projection, bond = _trust_for_pair(final.state, promisee_id, promisor_id, branch_id)
+        assert bond.trust == sum(expected_deltas, Decimal("0"))
+        assert bond.evidence_refs == tuple(event.settlement.event_id for event in returned)
+        assert [projection.receipts[event.trust.promise_id].applied_delta for event in returned] == list(expected_deltas)
+        assert repository.replay(scope, world_id, branch_id, from_genesis=True).state_hash == final.state_hash
     finally:
         database.dispose()
 

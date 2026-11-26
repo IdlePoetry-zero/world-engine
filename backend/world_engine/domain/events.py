@@ -14,6 +14,8 @@ from .adjudication import (
     historical_evidence_digest,
     source_text_digest,
 )
+from .ambient_events import AMBIENT_EVENT_RESOLVED, AmbientEventResolvedEvent
+from .social_contact_settlement import SOCIAL_CONTACT_SETTLED, SocialContactSettledEvent
 from .combat_truce import COMBAT_TRUCE_CHANGED_EVENT_TYPE, CombatTruceChangedEvent
 from .components import HistoricalEvidenceArtifact
 from .investigation import entity_visible_to_actor
@@ -194,6 +196,8 @@ EVENT_TYPES: dict[str, type] = {
     LEADERSHIP_BALLOT_CHANGED_EVENT_TYPE: LeadershipBallotChangedEvent,
     LEADERSHIP_VACANCY_REVIEW_RECORDED_EVENT_TYPE: LeadershipVacancyReviewRecordedEvent,
     ORGANIZATION_STRATEGY_REVIEW_EVENT_TYPE: OrganizationStrategyReviewResolvedEvent,
+    AMBIENT_EVENT_RESOLVED: AmbientEventResolvedEvent,
+    SOCIAL_CONTACT_SETTLED: SocialContactSettledEvent,
     SAFE_CONDUCT_CHANGED_EVENT_TYPE: SafeConductChangedEvent,
     "core.organization_member_resigned.v1": OrganizationMemberResignedEvent,
     "core.production_quota_renewed.v1": ProductionQuotaRenewedEvent,
@@ -1003,9 +1007,9 @@ def validate_accusation_repair_batch(
         relation = directed[0]
         expected_previous = relation.dimensions.get("trust")
         current_value = expected_previous if expected_previous is not None else Decimal("0")
-        maximum_from_loss = int((proof.baseline_trust - proof.post_effect_trust) / 3)
-        maximum_to_baseline = max(0, int(proof.baseline_trust - current_value))
-        expected_delta = min(maximum_from_loss, maximum_to_baseline)
+        from .accusation_repair import accusation_recovery_delta
+
+        expected_delta = accusation_recovery_delta(state, current_value, proof, recovery.key_review)
         relation_event = relation_events[0]
         participant_ids = sorted((str(current_offer.accuser_id), str(current_offer.suspect_id)))
         expected_relation_event_id = uuid5(

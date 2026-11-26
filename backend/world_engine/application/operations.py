@@ -351,6 +351,17 @@ class ModelOperations:
         self.store, self.gateway, self.scheduler = store, gateway, scheduler
 
     async def generate(self, scope: AccessScope, request: ModelRequest):
+        # This budget starts before route lookup and endpoint admission. Carry
+        # the absolute process-local deadline so queues, provider retries, and
+        # cross-provider fallbacks all spend the same allowance.
+        request_started = perf_counter()
+        request = replace(
+            request,
+            timeout_policy=replace(
+                request.timeout_policy,
+                deadline_at=request_started + request.timeout_policy.deadline_seconds,
+            ),
+        )
         settings = self.store.settings(scope)
         routes = settings["routes"]
         role_route_key = request.role_task.value
@@ -504,12 +515,22 @@ class ModelOperations:
 
     async def _generate_target(self, scope: AccessScope, request: ModelRequest, config: ProviderConfig):
         enqueued_at = perf_counter()
+        started_at = utc_now()
         queue_seconds = None
+        provider_started = False
         try:
-            async with self.scheduler.slot(config, request.profile.speed) as queue_seconds:
+            async with self.scheduler.slot(
+                config,
+                request.profile.speed,
+                deadline_at=request.timeout_policy.deadline_at,
+            ) as queue_seconds:
                 request = replace(request, data_policy=request.current_data_policy())
                 if not config.permits_data_policy(request.data_policy):
                     raise self._local_policy_error(config, request)
+                deadline_at = request.timeout_policy.deadline_at
+                if deadline_at is not None and perf_counter() >= deadline_at:
+                    raise TimeoutError
+                provider_started = True
                 result = await self.gateway.generate(config, request)
         except asyncio.CancelledError as error:
             trace = getattr(error, "call_trace", None)
@@ -526,6 +547,22 @@ class ModelOperations:
                 error.call_trace = replace(error.call_trace, queue_seconds=queue_seconds)
                 self.store.record_trace(scope, error.call_trace)
             raise
+        except TimeoutError:
+            # EndpointAdmissionScheduler uses TimeoutError only when the
+            # caller's absolute request deadline expires before admission.
+            # A provider gateway normally returns a traced ProviderError for
+            # its own deadline; this also covers a compatible gateway that
+            # raises the built-in timeout directly.
+            elapsed = max(0.0, perf_counter() - enqueued_at)
+            timed_out = self._deadline_timeout_error(
+                config,
+                request,
+                started_at=started_at,
+                queue_seconds=queue_seconds if queue_seconds is not None else elapsed,
+                possibly_billed=provider_started,
+            )
+            self.store.record_trace(scope, timed_out.call_trace)
+            raise timed_out from None
         result = replace(result, call_trace=replace(result.call_trace, queue_seconds=queue_seconds))
         self.store.record_trace(scope, result.call_trace)
         return result
@@ -543,6 +580,52 @@ class ModelOperations:
             first_token_seconds=None, validation_seconds=None, attempts=(), finish_reason=FinishReason.ABORTED,
             usage=ProviderUsage(), end_reason="cancelled", max_output_tokens=request.profile.max_output_tokens,
         )
+
+    @staticmethod
+    def _deadline_timeout_error(
+        config: ProviderConfig,
+        request: ModelRequest,
+        *,
+        started_at,
+        queue_seconds: float,
+        possibly_billed: bool,
+    ) -> ProviderError:
+        now = utc_now()
+        error = ProviderError(
+            ProviderErrorCode.TIMEOUT,
+            "Model request exceeded its end-to-end deadline",
+            retryable=False,
+            possibly_billed=possibly_billed,
+        )
+        context = request.trace_context
+        error.call_trace = CallTrace(
+            request_id=context.request_id,
+            parent_trace=context.parent_trace,
+            world_id=context.world_id,
+            branch_id=context.branch_id,
+            job_id=context.job_id,
+            role_task=request.role_task,
+            speed_profile=request.profile.speed,
+            depth_profile=request.profile.depth,
+            data_policy=request.data_policy,
+            provider_id=config.provider_id,
+            provider_kind=config.kind,
+            requested_model=request.model or config.default_model or "unknown",
+            reported_model=None,
+            started_at=started_at,
+            ended_at=now,
+            queue_seconds=queue_seconds,
+            first_token_seconds=None,
+            validation_seconds=None,
+            attempts=(),
+            finish_reason=None,
+            usage=ProviderUsage(),
+            error_code=error.code.value,
+            error_message=error.safe_message,
+            end_reason="deadline_exceeded",
+            max_output_tokens=request.profile.max_output_tokens,
+        )
+        return error
 
     async def discover(self, scope: AccessScope, provider_id: str):
         document = self.store.provider(scope, provider_id)

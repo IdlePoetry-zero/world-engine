@@ -23,6 +23,7 @@ from .relationship_promises import (
     PROMISE_TRUST_POLICY_ID,
     PromiseReviewReceipt, RelationshipPromise,
 )
+from .relationship_policy import settle_relationship_change
 
 
 PROMISE_RECORDED_EVENT_V1 = "core.relationship_promise_recorded.v1"
@@ -250,6 +251,8 @@ def plan_promise_trust_effect(
     promise_policy_id: str | None,
     policy: PromiseTrustPolicy = DEFAULT_PROMISE_TRUST_POLICY,
     prior_receipt: PromiseTrustReceipt | None = None,
+    relationship_curve_enabled: bool = False,
+    routine_occurrence: int | None = None,
 ) -> PromiseTrustPlan | None:
     """Plan one verified outcome effect without mutating promise or bond.
 
@@ -269,6 +272,14 @@ def plan_promise_trust_effect(
     if prior_receipt is not None:
         prior_receipt = PromiseTrustReceipt.model_validate(prior_receipt.model_dump(mode="python"))
     evidence = parse_promise_trust_outcome(outcome)
+    if type(relationship_curve_enabled) is not bool:
+        raise InvalidEvent("Promise trust relationship-curve activation must be explicit.")
+    if routine_occurrence is not None and (
+        not relationship_curve_enabled or evidence.outcome != "on_time_fulfilled"
+    ):
+        raise InvalidEvent("Only an enabled ordinary fulfillment may carry its verified routine ordinal.")
+    if relationship_curve_enabled and evidence.outcome == "on_time_fulfilled" and routine_occurrence is None:
+        raise InvalidEvent("Social-world promise fulfillment requires its receipt-derived routine ordinal.")
     _validate_context(evidence, context)
     _validate_promise_identity(promise, evidence)
     _validate_schedule(promise, evidence, schedule, promise_policy_id)
@@ -320,8 +331,11 @@ def plan_promise_trust_effect(
         budget_remaining = policy.success_budget_cap - snapshot.success_budget_spent
         budget_award = min(policy.on_time_reward, budget_remaining)
         trust_before = snapshot.trust if snapshot.trust is not None else Decimal("0")
-        resulting_trust = _clamp_relation(trust_before + budget_award)
-        applied_delta = resulting_trust - trust_before
+        resulting_trust, applied_delta = _settle_trust_delta(
+            trust_before, budget_award,
+            relationship_curve_enabled=relationship_curve_enabled,
+            routine_occurrence=routine_occurrence,
+        )
         next_budget = snapshot.success_budget_spent + budget_award
         receipt = PromiseTrustReceipt(
             policy_id=policy.policy_id,
@@ -337,8 +351,9 @@ def plan_promise_trust_effect(
         trust_before = snapshot.trust if snapshot.trust is not None else Decimal("0")
         choice = evidence.review_receipt.choice if evidence.review_receipt is not None else None
         penalty = max(policy.breach_penalty, Decimal("-2")) if choice == "blocked" else policy.breach_penalty
-        resulting_trust = _clamp_relation(trust_before + penalty)
-        applied_delta = resulting_trust - trust_before
+        resulting_trust, applied_delta = _settle_trust_delta(
+            trust_before, penalty, relationship_curve_enabled=relationship_curve_enabled,
+        )
         next_budget = snapshot.success_budget_spent
         receipt = PromiseTrustReceipt(
             policy_id=policy.policy_id,
@@ -367,8 +382,9 @@ def plan_promise_trust_effect(
         trust_before = snapshot.trust if snapshot.trust is not None else Decimal("0")
         prior_loss = max(Decimal("0"), prior_receipt.applied_delta.copy_negate())
         repair_ceiling = min(policy.late_return_repair, prior_loss)
-        resulting_trust = _clamp_relation(trust_before + repair_ceiling)
-        applied_delta = resulting_trust - trust_before
+        resulting_trust, applied_delta = _settle_trust_delta(
+            trust_before, repair_ceiling, relationship_curve_enabled=relationship_curve_enabled,
+        )
         next_budget = snapshot.success_budget_spent
         receipt = PromiseTrustReceipt.model_validate({
             **prior_receipt.model_dump(mode="python"),
@@ -408,6 +424,32 @@ def plan_promise_trust_effect(
         evidence_refs_to_append=references,
         receipt=receipt,
     )
+
+
+def _settle_trust_delta(
+    current: Decimal,
+    proposed_delta: Decimal,
+    *,
+    relationship_curve_enabled: bool,
+    routine_occurrence: int | None = None,
+) -> tuple[Decimal, Decimal]:
+    """Apply the social-world curve only when the world's pinned policy enables it.
+
+    Promise events have no independently verified key-event receipt, so their
+    ordinary rewards, sanctions, and repairs always pass through the symmetric
+    threshold gate when the curve is enabled. Legacy worlds retain their exact
+    pre-curve arithmetic.
+    """
+    if relationship_curve_enabled:
+        settled = settle_relationship_change(
+            current,
+            proposed_delta,
+            verified_key_evidence=False,
+            routine_occurrence=routine_occurrence,
+        )
+        return settled.resulting_score, settled.applied_delta
+    resulting = _clamp_relation(current + proposed_delta)
+    return resulting, resulting - current
 
 
 def promise_trust_relation_id(world_id: UUID, promisee_id: UUID, promisor_id: UUID) -> UUID:

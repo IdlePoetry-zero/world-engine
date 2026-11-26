@@ -1,0 +1,182 @@
+[
+  {
+    "opening": "modern_city",
+    "mode": "world",
+    "world_pack_version": "2.14.0",
+    "calendar": {
+      "day_seconds": 86400,
+      "year_days": 365
+    },
+    "duration_requested_seconds": 5184000,
+    "start_tick": 0,
+    "end_tick": 5184000,
+    "elapsed_world_days": 60.0,
+    "target_reached": true,
+    "replay_equal": true,
+    "replay_from_genesis": true,
+    "replay_seconds": 129.74436930000957,
+    "wall_seconds": 407.801757,
+    "job_states": [
+      "succeeded"
+    ],
+    "last_sequence": 443,
+    "committed_commands": 286,
+    "private_npc_memory_records": 9,
+    "reciprocal_reply_records": 0,
+    "autonomous_npc_participants": 272,
+    "player_dialogue_committed": false,
+    "events": {
+      "core.time_advanced.v1": 134,
+      "core.background_routine_advanced.v1": 134,
+      "core.social_contact_settled.v1": 120,
+      "core.organization_strategy_review_resolved.v1": 4,
+      "core.ambient_event_resolved.v1": 12,
+      "core.npc_plan_created.v1": 3,
+      "core.npc_plan_review_resolved.v1": 3,
+      "core.npc_plan_revised.v1": 18,
+      "core.knowledge_acquired.v1": 9,
+      "core.renewable_resource_harvested.v1": 2,
+      "core.scheduled_event_completed.v1": 2,
+      "core.market_price_review_resolved.v1": 2
+    },
+    "events_by_period": {
+      "0": {
+        "core.time_advanced.v1": 66,
+        "core.background_routine_advanced.v1": 66,
+        "core.social_contact_settled.v1": 60,
+        "social.contact.exchanged_words": 1733,
+        "social.contact.kept_to_self": 797,
+        "social.contact.acknowledged": 1310,
+        "social.contact_score_changes": 1211,
+        "core.organization_strategy_review_resolved.v1": 2,
+        "core.ambient_event_resolved.v1": 6,
+        "ambient.missed": 4,
+        "ambient.accepted": 2,
+        "ambient.kind.local_observation": 1,
+        "ambient.kind.organization_agenda": 1,
+        "core.npc_plan_created.v1": 1,
+        "core.npc_plan_review_resolved.v1": 1,
+        "core.npc_plan_revised.v1": 6,
+        "core.knowledge_acquired.v1": 3
+      },
+      "1": {
+        "core.time_advanced.v1": 68,
+        "core.background_routine_advanced.v1": 68,
+        "core.renewable_resource_harvested.v1": 2,
+        "core.scheduled_event_completed.v1": 2,
+        "core.market_price_review_resolved.v1": 2,
+        "core.social_contact_settled.v1": 60,
+        "social.contact.exchanged_words": 1733,
+        "social.contact.acknowledged": 1253,
+        "social.contact.kept_to_self": 854,
+        "social.contact_score_changes": 1119,
+        "core.npc_plan_created.v1": 2,
+        "core.npc_plan_review_resolved.v1": 2,
+        "core.npc_plan_revised.v1": 12,
+        "core.knowledge_acquired.v1": 6,
+        "core.organization_strategy_review_resolved.v1": 2,
+        "core.ambient_event_resolved.v1": 6,
+        "ambient.missed": 6
+      }
+    },
+    "terminal_tick_by_period": {
+      "0": 2574720,
+      "1": 5184000
+    },
+    "npc_participants_by_period": {
+      "0": 272,
+      "1": 272
+    },
+    "ambient_topic_followups": {},
+    "storage_timings": {
+      "canonical_state_serialization": {
+        "calls": 897,
+        "inclusive_seconds": 30.297709099875647
+      },
+      "command_commit": {
+        "calls": 286,
+        "inclusive_seconds": 247.54956420010421
+      },
+      "simulation_plan_window": {
+        "calls": 298,
+        "inclusive_seconds": 90.77808720001485
+      },
+      "sqlite_read_transaction": {
+        "calls": 1594,
+        "inclusive_seconds": 23.86801840001135
+      },
+      "sqlite_write_transaction": {
+        "calls": 320,
+        "inclusive_seconds": 244.36329330022272
+      },
+      "state_validation_in_reducer": {
+        "calls": 475,
+        "inclusive_seconds": 131.81830139979138
+      }
+    },
+    "initial_hash": "23961f0c4806fb5a54f6a4066883843278a69f2c624cdaa97e96129d57e9abab",
+    "final_hash": "510f931646bfccfecb206caad5f097a5ac0851acb994cdde1a546165d87024d5",
+    "model_evidence": {
+      "provider": "DeepSeek",
+      "status_by_role": {
+        "npc_plan_review.success": 3,
+        "npc_decision.success": 5
+      },
+      "used_cloud": true,
+      "used_local_model": false,
+      "successful_calls": 8,
+      "accepted_ambient_calls": 2,
+      "usage": {
+        "input_tokens": 27953,
+        "cached_input_tokens": 6912,
+        "non_cached_input_tokens": 21041,
+        "output_tokens": 7169,
+        "reasoning_tokens": 5737,
+        "total_tokens": 35122
+      },
+      "unpriced_calls": 0,
+      "estimated_cost": {
+        "USD": "0.007478286"
+      },
+      "remote_seconds_by_role": {
+        "npc_plan_review": 6.8935379999999995,
+        "npc_decision": 45.3654
+      },
+      "attributed_activity_by_period": {
+        "unattributed": {
+          "npc_plan_review.success": 3,
+          "remote_seconds": 6.8935379999999995,
+          "queue_seconds": 0.0,
+          "input_tokens": 2213,
+          "cached_input_tokens": 0,
+          "non_cached_input_tokens": 2213,
+          "output_tokens": 601,
+          "reasoning_tokens": 577,
+          "total_tokens": 2814
+        },
+        "1": {
+          "npc_decision.success": 2,
+          "remote_seconds": 18.248336000000002,
+          "queue_seconds": 0.0,
+          "input_tokens": 14830,
+          "cached_input_tokens": 6144,
+          "non_cached_input_tokens": 8686,
+          "output_tokens": 2506,
+          "reasoning_tokens": 1845,
+          "total_tokens": 17336
+        },
+        "0": {
+          "npc_decision.success": 3,
+          "remote_seconds": 27.117064,
+          "queue_seconds": 0.0,
+          "input_tokens": 10910,
+          "cached_input_tokens": 768,
+          "non_cached_input_tokens": 10142,
+          "output_tokens": 4062,
+          "reasoning_tokens": 3315,
+          "total_tokens": 14972
+        }
+      }
+    }
+  }
+]

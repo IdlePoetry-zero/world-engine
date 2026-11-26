@@ -109,7 +109,11 @@ class ModelGateway:
             exc.call_trace = trace
             raise
 
-        deadline = started_clock + request.timeout_policy.deadline_seconds
+        deadline = (
+            request.timeout_policy.deadline_at
+            if request.timeout_policy.deadline_at is not None
+            else started_clock + request.timeout_policy.deadline_seconds
+        )
         raw: RawModelResult | None = None
         final_error: ProviderError | None = None
         for attempt_number in range(1, config.max_retries + 2):
@@ -249,7 +253,11 @@ class ModelGateway:
             provider_id=config.provider_id,
             model=model,
         )
-        deadline = started_clock + request.timeout_policy.deadline_seconds
+        deadline = (
+            request.timeout_policy.deadline_at
+            if request.timeout_policy.deadline_at is not None
+            else started_clock + request.timeout_policy.deadline_seconds
+        )
         text_chunks: list[str] = []
         first_token_seconds: float | None = None
         usage = ProviderUsage()

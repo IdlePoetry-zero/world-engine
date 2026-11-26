@@ -140,6 +140,9 @@ class _RepositoryFixture:
     def read_world(self, _scope, _world_id, _branch_id):
         return self.view
 
+    def assert_branch_can_accept_write(self, scope, world_id, branch_id):
+        self.read_world(scope, world_id, branch_id)
+
     def find_public_accusation_closures(self, _scope, _world_id, _branch_id, actor_id, case_ids):
         assert isinstance(case_ids, tuple)
         assert all(isinstance(case_id, UUID) for case_id in case_ids)

@@ -27,10 +27,11 @@ from world_engine.application.conversation import (
 )
 from world_engine.application.actions import RulesActionDispatcher
 from world_engine.application.operations import ModelOperations, OperationsStore
+from world_engine.application.simulation_jobs import SimulationJobs
 from world_engine.application.visibility import meeting_local_time, project_player_state
 from world_engine.application.worlds import WorldApplication
 from world_engine.content import ContentCatalog
-from world_engine.domain.errors import AccessDenied, Conflict, InvalidEvent, StaleVersion
+from world_engine.domain.errors import AccessDenied, BranchBusy, Conflict, InvalidEvent, StaleVersion
 from world_engine.domain.components import HistoricalEvidenceArtifact, KnowledgeRecord, RelationRecord
 from world_engine.domain.gameplay_events import KnowledgeAcquiredEvent
 from world_engine.domain.investigation_cases import InvestigationCaseFile
@@ -40,6 +41,7 @@ from world_engine.storage.database import Database
 from world_engine.storage.repository import WorldRepository
 from world_engine.rules.contracts import ACTION_INTENT_ADAPTER, RuleContext
 from world_engine.rules.engine import RuleEngine
+from world_engine.simulation.contracts import WorldAdvancePlan
 
 
 @pytest.fixture
@@ -96,6 +98,53 @@ def test_compact_context_keeps_explicit_case_and_its_visible_evidence():
     assert compact["state"]["case_files"][0]["id"] == "case-4"
     assert compact["state"]["knowledge"][0]["id"] == "record-4"
     assert compact["reference_ids"] == ["case-4", "record-4"]
+
+
+def test_compact_context_keeps_named_entities_ahead_of_bystanders():
+    neighbors = [f"local-{index}" for index in range(8)]
+    named = [f"remote-{index}" for index in range(6)]
+    entities = {ident: {"id": ident, "name": ident} for ident in ["player", "place", *neighbors, *named]}
+    entities["player"]["location_id"] = "place"
+    compact = _compact_gm_context({
+        "state": {"player_id": "player", "entities": entities},
+        "current_tick": "0", "reference_ids": [*entities, "hidden"],
+        "skill_level_scale": {}, "tracked_personal_needs": {},
+        "present_dialogue_targets": [{"id": ident} for ident in neighbors],
+    }, "Compare " + ", ".join(named).upper() + " with hidden.")
+    assert set(named) <= compact["state"]["entities"].keys()
+    assert set(named) <= set(compact["reference_ids"])
+    assert "hidden" not in compact["reference_ids"]
+    assert len(compact["state"]["entities"]) == 14
+
+
+@pytest.mark.asyncio
+async def test_active_branch_writer_stops_chat_write_before_model_but_allows_questions(setup_conversation):
+    identity, repository, service, request, calls = setup_conversation
+    job = SimulationJobs(repository).enqueue_world_advance(
+        identity, request.world_id, request.branch_id, WorldAdvancePlan(started_tick=0, target_tick=60),
+        idempotency_key="writer-active", speed="fast", depth="standard",
+    )
+    assert repository.claim_job("writer", job_type="simulation.world_advance").job_id == job.job_id
+    executions = []
+
+    async def execute(_scope, _view, message, intent):
+        executions.append(intent)
+        return service._response(message, intent, "已处理", False)
+
+    service.actions = SimpleNamespace(execute=execute)
+    action = request.model_copy(update={"mode": "action", "text": "向邻居提出请求。"})
+    with pytest.raises(BranchBusy):
+        await service.send(identity, action)
+    assert not calls and not executions
+
+    question = request.model_copy(update={"request_id": uuid4(), "mode": "ask_gm"})
+    assert (await service.send(identity, question))["world_effect"] is False
+    assert len(calls) == 1 and not executions
+    assert repository.read_world(identity, request.world_id, request.branch_id).state.current_tick == 0
+
+    repository.control_job(identity, job.job_id, "pause")
+    await service.send(identity, action.model_copy(update={"request_id": uuid4()}))
+    assert executions == ["action"]
 
 
 def test_meeting_local_time_uses_the_calendar_day_boundary():
@@ -696,10 +745,16 @@ async def test_text_action_weighs_only_actor_known_typed_sources_and_replays(set
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("lock_traits", [False, True])
-async def test_dialogue_records_speaker_memories_without_advancing_time(setup_conversation, lock_traits):
+@pytest.mark.parametrize(("lock_traits", "social_world"), [(False, False), (True, False), (False, True)])
+async def test_dialogue_records_speaker_memories_without_advancing_time(setup_conversation, lock_traits, social_world):
     identity, repository, service, request, _ = setup_conversation
     before = repository.read_world(identity, request.world_id, request.branch_id)
+    if social_world:
+        created = repository.create_world(identity, NewWorld(
+            title="Social dialogue", state=before.state.model_copy(update={"metadata": {"social_world_v1": True}}),
+        ))
+        request = request.model_copy(update={"world_id": created.world.world_id, "branch_id": created.branch.branch_id})
+        before = repository.read_world(identity, request.world_id, request.branch_id)
     npc = next(entity for entity in before.state.entities.values() if entity.name == "Neighbor")
     if lock_traits:
         author = AuthoringApplication(repository, service.store.operations)
@@ -752,7 +807,8 @@ async def test_dialogue_records_speaker_memories_without_advancing_time(setup_co
     assert second_context["earlier_words_from_this_speaker"] == [exchange.text]
     later = repository.read_world(identity, request.world_id, request.branch_id)
     assert {relation.id for relation in later.state.relations} == {relation.id for relation in after.state.relations}
-    assert all(relation.dimensions["familiarity"] == 2 and len(relation.evidence_refs) == 2
+    expected_familiarity = Decimal("1.5") if social_world else 2
+    assert all(relation.dimensions["familiarity"] == expected_familiarity and len(relation.evidence_refs) == 2
                for relation in later.state.relations)
     assert repository.replay(identity, request.world_id, request.branch_id).state_hash == later.state_hash
 

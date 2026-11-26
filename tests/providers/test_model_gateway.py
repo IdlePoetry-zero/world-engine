@@ -437,6 +437,20 @@ def test_provider_config_refuses_embedded_credentials_and_arbitrary_secret_value
         ProviderConfig("bad", ProviderKind.OPENAI_COMPATIBLE, "http://example.test/v1")
 
 
+def test_bundled_deepseek_credential_stays_on_its_official_origin():
+    ref = "env:WORLD_ENGINE_DEEPSEEK_API_KEY"
+    official = ProviderConfig("deepseek", ProviderKind.DEEPSEEK, "https://api.deepseek.com:443", secret_ref=ref)
+    assert official.secret_ref == ref
+    for kind, endpoint in (
+        (ProviderKind.DEEPSEEK, "https://proxy.example.test"),
+        (ProviderKind.DEEPSEEK, "http://api.deepseek.com"),
+        (ProviderKind.DEEPSEEK, "https://api.deepseek.com:8443"),
+        (ProviderKind.OPENAI_COMPATIBLE, "https://api.deepseek.com"),
+    ):
+        with pytest.raises(ValueError, match="official HTTPS endpoint"):
+            ProviderConfig("alternate", kind, endpoint, secret_ref=ref, allow_insecure_http=True)
+
+
 @pytest.mark.asyncio
 async def test_loopback_provider_disables_environment_proxy_inheritance():
     local = ProviderConfig("ollama", ProviderKind.OLLAMA, "http://127.0.0.1:11434")

@@ -13,6 +13,9 @@ from uuid import UUID, uuid5
 from pydantic import TypeAdapter
 from pydantic_core import to_jsonable_python
 
+from .ambient_events import AmbientEventResolvedEvent, resolve_ambient_event_state
+from .social_contact_settlement import SocialContactSettledEvent, resolve_social_contact_state
+from .social_affection import partnership_affection_update, private_gift_affection_update
 from .errors import InsufficientResources, InvalidEvent
 from .challenges import ChallengeResolvedEvent, challenge_note, settle_challenge
 from .contests import ContestChangedEvent, plan_contest
@@ -329,7 +332,11 @@ def apply_event(state: WorldState, raw_event: DomainEvent | dict[str, object]) -
             "npc_meeting_attendance_decisions": [*state.npc_meeting_attendance_decisions, record],
         })
     if isinstance(event, PrivateGiftChangedEvent):
-        return _validated_state(state, apply_private_gift(state, event))
+        updates = apply_private_gift(state, event)
+        relations = private_gift_affection_update(state, event)
+        if relations is not None:
+            updates["relations"] = relations
+        return _validated_state(state, updates)
     if isinstance(event, MeetingReflectionRecordedEvent):
         reflection = plan_meeting_reflection(
             state, invitation_id=event.reflection.invitation_id,
@@ -356,7 +363,11 @@ def apply_event(state: WorldState, raw_event: DomainEvent | dict[str, object]) -
         updated = [*records, stored] if event.operation == "propose" else [
             stored if row.partnership_id == stored.partnership_id else row for row in records
         ]
-        return _validated_state(state, {"relationship_partnerships": updated})
+        updates = {"relationship_partnerships": updated}
+        relations = partnership_affection_update(state, event)
+        if relations is not None:
+            updates["relations"] = relations
+        return _validated_state(state, updates)
     if isinstance(event, RelationshipDisclosureRecordedEvent):
         receipt = event.record.relationship_disclosure
         if receipt is None:
@@ -505,6 +516,18 @@ def apply_event(state: WorldState, raw_event: DomainEvent | dict[str, object]) -
         return _apply_leadership_vacancy_review(state, event)
     if isinstance(event, OrganizationStrategyReviewResolvedEvent):
         return _apply_organization_strategy_review(state, event)
+    if isinstance(event, AmbientEventResolvedEvent):
+        try:
+            updates = resolve_ambient_event_state(state, event)
+        except ValueError as exc:
+            raise InvalidEvent(str(exc)) from exc
+        return _validated_state(state, updates)
+    if isinstance(event, SocialContactSettledEvent):
+        try:
+            updates = resolve_social_contact_state(state, event)
+        except ValueError as exc:
+            raise InvalidEvent(str(exc)) from exc
+        return _validated_state(state, updates)
     if isinstance(event, SafeConductChangedEvent):
         return _validated_state(state, {"safe_conduct_treaties": apply_safe_conduct(state, event)})
     if isinstance(event, NpcPlanCreatedEvent):
@@ -1582,6 +1605,25 @@ def apply_event(state: WorldState, raw_event: DomainEvent | dict[str, object]) -
         current_value = relation.dimensions.get(event.dimension)
         if current_value != event.expected_previous:
             raise InvalidEvent("Relation dimension expected_previous does not match stored value.")
+        if event.social_policy_id is not None:
+            from world_engine.rules.speech import SpeechRelationEvidenceError, speech_relation_evidence
+
+            try:
+                receipt = speech_relation_evidence(
+                    state, memory_id=event.speech_memory_id, observer_id=relation.from_id, counterpart_id=relation.to_id,
+                )
+            except SpeechRelationEvidenceError as exc:
+                raise InvalidEvent(str(exc)) from exc
+            expected_id = uuid5(
+                event.speech_memory_id, f"{event.social_policy_id}:familiarity:{relation.from_id}:{relation.to_id}",
+            )
+            if (
+                receipt is None or event.event_id != expected_id
+                or event.routine_occurrence != receipt.routine_occurrence
+                or event.value != receipt.settlement.resulting_score
+                or event.visibility != {"policy": "subject_ids", "subject_ids": sorted(map(str, (relation.from_id, relation.to_id)))}
+            ):
+                raise InvalidEvent("Social familiarity requires its canonical private speech settlement.")
         dimensions = {**relation.dimensions, event.dimension: event.value}
         evidence = list(dict.fromkeys([*relation.evidence_refs, *event.evidence_refs]))
         relations[index] = relation.model_copy(

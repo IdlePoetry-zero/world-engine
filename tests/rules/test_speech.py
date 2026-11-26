@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from uuid import UUID, uuid4
+from decimal import Decimal
+from uuid import UUID, uuid4, uuid5
 
 import pytest
 from pydantic import ValidationError
@@ -8,11 +9,16 @@ from pydantic import ValidationError
 from world_engine.agents.knowledge import build_agent_knowledge
 from world_engine.application.visibility import project_player_state
 from world_engine.content import ContentCatalog
-from world_engine.domain.gameplay_events import KnowledgeAcquiredEvent
+from world_engine.domain.gameplay_events import (
+    KnowledgeAcquiredEvent,
+    RelationDimensionChangedEvent,
+    RelationEstablishedEvent,
+)
 from world_engine.domain.models import TimeAdvancedEvent, WorldEntity, WorldState
 from world_engine.domain.reducers import apply_event, state_hash
 from world_engine.rules.contracts import ACTION_INTENT_ADAPTER, RuleContext, SpeakIntent
 from world_engine.rules.engine import RuleEngine
+from world_engine.rules.speech import SpeechRelationEvidenceError, speech_relation_evidence
 
 
 @pytest.fixture(scope="module")
@@ -152,3 +158,156 @@ def test_speech_never_creates_a_corroborated_fact_or_relation(full_state: WorldS
     assert memories[0].fact is None
     assert memories[0].assessment is None
     assert not any("The mayor resigned" in record.claim and record.kind == "fact" for record in state.knowledge)
+
+
+def _social_world_pair() -> tuple[WorldState, WorldEntity, WorldEntity, WorldEntity]:
+    first_room = WorldEntity(id=uuid4(), kind="place", name="First room")
+    second_room = WorldEntity(id=uuid4(), kind="place", name="Second room")
+    first = WorldEntity(id=uuid4(), kind="character", name="First", location_id=first_room.id)
+    second = WorldEntity(id=uuid4(), kind="character", name="Second", location_id=first_room.id)
+    state = WorldState(
+        entities={item.id: item for item in (first_room, second_room, first, second)},
+        metadata={"social_world_v1": True},
+    )
+    return state, first_room, second_room, first
+
+
+def _reply_events(
+    state: WorldState,
+    memory: KnowledgeAcquiredEvent,
+    *,
+    utterance: str,
+) -> tuple[object, ...]:
+    assert memory.record.owner_id is not None and memory.record.holder_id is not None
+    result = RuleEngine().evaluate(
+        state,
+        SpeakIntent(
+            target_ids=[memory.record.owner_id],
+            utterance=utterance,
+            reply_to_memory_id=memory.record.id,
+        ),
+        _context(memory.record.holder_id),
+    )
+    assert result.outcome.status == "succeeded"
+    return tuple(result.events)
+
+
+def _move_pair_to_room(
+    state: WorldState,
+    first_id: UUID,
+    second_id: UUID,
+    room_id: UUID,
+) -> WorldState:
+    entities = dict(state.entities)
+    entities[first_id] = entities[first_id].model_copy(update={"location_id": room_id})
+    entities[second_id] = entities[second_id].model_copy(update={"location_id": room_id})
+    return WorldState.model_validate(state.model_copy(update={"entities": entities}).model_dump(mode="python"))
+
+
+def test_social_world_reply_receipt_creates_separate_directed_familiarity_changes():
+    state, _first_room, _second_room, first = _social_world_pair()
+    second = next(entity for entity in state.entities.values() if entity.name == "Second")
+    greeting = RuleEngine().evaluate(
+        state,
+        SpeakIntent(target_ids=[second.id], utterance="Could we talk about the delivery?"),
+        _context(first.id),
+    )
+    assert len(greeting.events) == 1
+    assert isinstance(greeting.events[0], KnowledgeAcquiredEvent)
+    assert not any(isinstance(event, (RelationEstablishedEvent, RelationDimensionChangedEvent))
+                   for event in greeting.events)
+    state = _apply_all(state, greeting.events)
+
+    reply = _reply_events(
+        state,
+        greeting.events[0],
+        utterance="Yes. I have time to discuss it now.",
+    )
+    memory = next(event for event in reply if isinstance(event, KnowledgeAcquiredEvent))
+    created = [event for event in reply if isinstance(event, RelationEstablishedEvent)]
+    changes = [event for event in reply if isinstance(event, RelationDimensionChangedEvent)]
+    assert len(created) == 2
+    assert len(changes) == 2
+    assert {event.relation.from_id for event in created} == {first.id, second.id}
+    assert all(event.relation.dimensions == {"familiarity": 0} for event in created)
+    assert all(event.social_policy_id == "social_world_v1" for event in changes)
+    assert all(event.speech_memory_id == memory.record.id for event in changes)
+    assert all(event.routine_occurrence == 1 for event in changes)
+    assert all(event.evidence_refs == [memory.record.id] for event in changes)
+    assert all(event.value == 1 for event in changes)
+    for event in changes:
+        relation = next(row.relation for row in created if row.relation.id == event.relation_id)
+        assert event.event_id == uuid5(
+            memory.record.id,
+            f"social_world_v1:familiarity:{relation.from_id}:{relation.to_id}",
+        )
+        assert event.visibility == {
+            "policy": "subject_ids",
+            "subject_ids": sorted((str(first.id), str(second.id))),
+        }
+
+    settled = _apply_all(state, reply)
+    assert len(settled.relations) == 2
+    assert {(row.from_id, row.to_id, row.dimensions["familiarity"]) for row in settled.relations} == {
+        (first.id, second.id, 1),
+        (second.id, first.id, 1),
+    }
+
+
+def test_social_world_repeated_reply_pattern_survives_new_phrasing_and_room():
+    state, _first_room, second_room, first = _social_world_pair()
+    second = next(entity for entity in state.entities.values() if entity.name == "Second")
+    greeting = RuleEngine().evaluate(
+        state,
+        SpeakIntent(target_ids=[second.id], utterance="I wanted to ask about the schedule."),
+        _context(first.id),
+    )
+    state = _apply_all(state, greeting.events)
+    last_memory = greeting.events[0]
+    assert isinstance(last_memory, KnowledgeAcquiredEvent)
+
+    observed = []
+    for ordinal in range(1, 26):
+        if ordinal == 8:
+            state = _move_pair_to_room(state, first.id, second.id, second_room.id)
+        reply = _reply_events(
+            state,
+            last_memory,
+            utterance=f"Fresh wording for receipt {ordinal}.",
+        )
+        receipt_memory = next(event for event in reply if isinstance(event, KnowledgeAcquiredEvent))
+        changes = [event for event in reply if isinstance(event, RelationDimensionChangedEvent)]
+        assert len(changes) == 2
+        assert {event.routine_occurrence for event in changes} == {ordinal}
+        observed.append(changes[0].value - (changes[0].expected_previous or 0))
+        state = _apply_all(state, reply)
+        last_memory = receipt_memory
+
+    assert observed[:4] == [Decimal("1.000000"), Decimal("0.500000"), Decimal("0.250000"), Decimal("0.125000")]
+    assert observed[-1] == 0
+    assert len(state.relations) == 2
+    assert all(row.dimensions["familiarity"] == Decimal("1.999999") for row in state.relations)
+    assert all(len(row.evidence_refs) == 25 for row in state.relations)
+
+
+def test_social_world_speech_evidence_rejects_a_receipt_already_used_for_that_direction():
+    state, _first_room, _second_room, first = _social_world_pair()
+    second = next(entity for entity in state.entities.values() if entity.name == "Second")
+    greeting = RuleEngine().evaluate(
+        state,
+        SpeakIntent(target_ids=[second.id], utterance="A first note."),
+        _context(first.id),
+    )
+    state = _apply_all(state, greeting.events)
+    reply = _reply_events(state, greeting.events[0], utterance="An answer.")
+    state = _apply_all(state, reply)
+    memory = next(event for event in reply if isinstance(event, KnowledgeAcquiredEvent))
+
+    relation = next(row for row in state.relations if row.from_id == first.id)
+    with pytest.raises(SpeechRelationEvidenceError, match="already settled"):
+        speech_relation_evidence(
+            state,
+            memory_id=memory.record.id,
+            observer_id=relation.from_id,
+            counterpart_id=relation.to_id,
+        )

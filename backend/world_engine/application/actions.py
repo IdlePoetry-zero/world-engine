@@ -9,16 +9,16 @@ from uuid import UUID, uuid5
 from pydantic import ValidationError
 from pydantic.json_schema import GenerateJsonSchema
 
-from world_engine.adapters.models import ChatMessage, RoleTask
+from world_engine.adapters.models import ChatMessage, RoleTask, TraceContext
 from world_engine.adapters.models.errors import ProviderError, ProviderErrorCode
 from world_engine.agents import build_agent_knowledge
 from world_engine.domain.errors import InvalidEvent, StaleVersion
 from world_engine.domain.components import (
-    HealthComponent, InventoryComponent, KnowledgeRecord, PersonalityComponent, PlaceRoute, ProvenanceReference,
+    HealthComponent, InventoryComponent, KnowledgeRecord, PersonalityComponent, PlaceRoute, ProvenanceReference, VisibilityScope,
     RelationRecord, SkillsComponent,
 )
 from world_engine.domain.gameplay_events import (
-    AccusationRepairOfferRecordedEvent, AccusationRepairResolvedEvent,
+    AccusationRepairKeyReview, AccusationRepairOfferRecordedEvent, AccusationRepairResolvedEvent,
     EntityDiscoveredEvent, ImprovisedCheckResolvedEvent, KnowledgeAcquiredEvent, MarketTradeExecutedEvent, RelationDimensionChangedEvent,
     RelationEstablishedEvent, InvestigationCaseOpenedEvent, InvestigationCaseEvidenceAttachedEvent,
     InvestigationCaseClosedEvent, HistoricalEvidenceDestroyedEvent,
@@ -1238,7 +1238,10 @@ class RulesActionDispatcher:
             proof = self.repository.find_accusation_repair_trust_proof(
                 scope, request.world_id, request.branch_id, offer.offer_id, offer.suspect_id, requested_by=requested_by,
             )
-            context = context.model_copy(update={"accusation_repair_trust_proof": proof})
+            review = await self._review_accusation_relationship(scope, view.state, request, offer, proof) if hosted else None
+            context = context.model_copy(update={
+                "accusation_repair_trust_proof": proof, "accusation_repair_key_review": review,
+            })
         resolution = self.engine.evaluate(view.state, intent | {"operation": operation}, context)
         if resolution.outcome.status != "succeeded":
             return reply(request, "action", "目前无法回应这次解释。", False) | {"action_status": "rejected"}
@@ -1258,6 +1261,40 @@ class RulesActionDispatcher:
             "action_status": "succeeded", "command_id": str(committed.command_id),
             "state_version": str(committed.state_version), "elapsed_ticks": "0", "references": [str(offer.offer_id)],
         }
+
+    async def _review_accusation_relationship(self, scope, state, request, offer, proof):
+        if proof is None or state.metadata.get("social_world_v1") is not True:
+            return None
+        relations = [row for row in state.relations
+                     if (row.from_id, row.to_id) == (offer.suspect_id, offer.accuser_id)]
+        if len(relations) != 1:
+            return None
+        current = relations[0].dimensions.get("trust", Decimal(0))
+        if (current.copy_abs() < 76 or proof.baseline_trust - current < 1
+            or proof.baseline_trust - proof.post_effect_trust < 9):
+            return None
+        from .social_relationship_decisions import ValidatedRelationshipFact, interpret_key_relationship_evidence
+
+        result = await interpret_key_relationship_evidence(
+            self.models, scope, state,
+            TraceContext(request_id=str(uuid5(request.request_id, "accusation-repair-key-review")),
+                         world_id=str(request.world_id), branch_id=str(request.branch_id)),
+            observer_id=offer.suspect_id, counterpart_id=offer.accuser_id, dimension="trust",
+            evidence=(
+                ValidatedRelationshipFact(
+                    offer.correction_event_id, offer.suspect_id, offer.accuser_id, "trust",
+                    "core.public_accusation_correction_recorded.v1",
+                    "对方已公开撤回一项被调查证据否定且确曾伤害信任的指认。",
+                ),
+                ValidatedRelationshipFact(
+                    offer.offer_id, offer.suspect_id, offer.accuser_id, "trust", "core.accusation_repair_offer_recorded.v1",
+                    f"对方在更正后私下给予当事人的解释：{offer.statement[:270]}",
+                ),
+            ),
+        )
+        if result.reason_class == "relationship_repair" and result.model_call_id is not None:
+            return AccusationRepairKeyReview(evidence_event_ids=result.evidence_event_ids, model_call_id=result.model_call_id)
+        return None
 
     async def _request_partnership_response(self, scope, view, request, action, version):
         reply = ConversationApplication._response
@@ -1883,22 +1920,37 @@ class RulesActionDispatcher:
             payload={"target_id": str(target.id)},
         )
         relations = []
-        for memory in memories:
-            holder_id, speaker_id = memory.record.holder_id, memory.record.subject_id
-            relation = directional_relations[holder_id, speaker_id]
-            if relation is None:
-                relations.append(RelationEstablishedEvent(relation=RelationRecord(
-                    id=uuid5(request.world_id, f"relation:{holder_id}:{speaker_id}"),
-                    from_id=holder_id, to_id=speaker_id, dimensions={"familiarity": "1"},
-                    updated_tick=state.current_tick, evidence_refs=[memory.event_id],
-                )))
-                continue
-            familiarity = relation.dimensions.get("familiarity")
-            if familiarity is None or familiarity < 100:
-                relations.append(RelationDimensionChangedEvent(
-                    relation_id=relation.id, dimension="familiarity", expected_previous=familiarity,
-                    value=min(100, (familiarity or 0) + 1), evidence_refs=[memory.event_id],
-                ))
+        if state.metadata.get("social_world_v1") is True:
+            from world_engine.rules.speech import build_social_familiarity_events
+
+            reply, opening = memories
+            visibility = VisibilityScope(policy="subject_ids", subject_ids=sorted((actor.id, target.id), key=str))
+            opening_record = KnowledgeRecord.model_validate(opening.record.model_dump(mode="python") | {
+                "owner_id": actor.id, "visibility": visibility,
+            })
+            reply_record = KnowledgeRecord.model_validate(reply.record.model_dump(mode="python") | {
+                "owner_id": target.id, "visibility": visibility, "speech_reply_to": opening_record.id,
+            })
+            memories = [opening.model_copy(update={"record": opening_record}), reply.model_copy(update={"record": reply_record})]
+            after_opening = state.model_copy(update={"knowledge": [*state.knowledge, opening_record]})
+            relations.extend(build_social_familiarity_events(after_opening, reply_record, request.world_id))
+        else:
+            for memory in memories:
+                holder_id, speaker_id = memory.record.holder_id, memory.record.subject_id
+                relation = directional_relations[holder_id, speaker_id]
+                if relation is None:
+                    relations.append(RelationEstablishedEvent(relation=RelationRecord(
+                        id=uuid5(request.world_id, f"relation:{holder_id}:{speaker_id}"),
+                        from_id=holder_id, to_id=speaker_id, dimensions={"familiarity": "1"},
+                        updated_tick=state.current_tick, evidence_refs=[memory.event_id],
+                    )))
+                    continue
+                familiarity = relation.dimensions.get("familiarity")
+                if familiarity is None or familiarity < 100:
+                    relations.append(RelationDimensionChangedEvent(
+                        relation_id=relation.id, dimension="familiarity", expected_previous=familiarity,
+                        value=min(100, (familiarity or 0) + 1), evidence_refs=[memory.event_id],
+                    ))
         committed = self.repository.commit_command(
             scope, request.world_id, request.branch_id, command, [*memories, *relations],
         )

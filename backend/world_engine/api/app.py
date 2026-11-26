@@ -34,7 +34,7 @@ from world_engine.application.credentials import CredentialService
 from world_engine.application.conversation import ConversationApplication
 from world_engine.application.errors import (
     ApplicationFailure, MODEL_OUTPUT_TRUNCATED_MESSAGE, OLLAMA_CONTEXT_LIMIT_MESSAGE,
-    STORAGE_BUSY_CODE, STORAGE_BUSY_MESSAGE,
+    BRANCH_BUSY_CODE, BRANCH_BUSY_MESSAGE, STORAGE_BUSY_CODE, STORAGE_BUSY_MESSAGE,
 )
 from world_engine.application.authoring import AuthoringApplication
 from world_engine.application.author_rule_checks import AuthorRuleConflict
@@ -47,7 +47,7 @@ from world_engine.application.media_authorization import RepositoryMediaAuthoriz
 from world_engine.application.media_jobs import MediaJobEnqueuer, MediaJobEnvelope
 from world_engine.adapters.models.errors import ProviderError, ProviderErrorCode
 from world_engine.adapters.credentials import CredentialStoreError
-from world_engine.domain.errors import AccessDenied, Conflict, DomainError, InsufficientStorage, NotFound, StaleVersion, StorageBusy
+from world_engine.domain.errors import AccessDenied, BranchBusy, Conflict, DomainError, InsufficientStorage, NotFound, StaleVersion, StorageBusy
 from world_engine.domain.components import NeedsComponent, PlaceComponent, SkillsComponent
 from world_engine.domain.models import MembershipRole
 from world_engine.domain.models import AccessScope
@@ -178,6 +178,8 @@ def create_app(
             status, code, message = 507, "INSUFFICIENT_STORAGE", "磁盘空间不足。请释放空间并核对世界状态后重试。"
         elif isinstance(error, StaleVersion):
             status, code, message = 409, "STALE_VERSION", "世界已发生变化，请刷新后重试。"
+        elif isinstance(error, BranchBusy):
+            status, code, message = 409, BRANCH_BUSY_CODE, BRANCH_BUSY_MESSAGE
         elif isinstance(error, Conflict):
             status, code, message = 409, "CONFLICT", "请求与已有记录冲突，请检查操作状态。"
         return JSONResponse({"error": {"code": code, "message": message, "retryable": False}}, status_code=status)

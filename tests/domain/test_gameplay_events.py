@@ -280,6 +280,60 @@ def test_relations_knowledge_and_goals_are_typed_revisioned_records() -> None:
     assert state.goals[0].evidence_refs == [evidence]
 
 
+def test_relation_change_social_receipt_fields_are_optional_and_closed_for_legacy_events() -> None:
+    relation_id, memory_id = uuid4(), uuid4()
+    legacy = RelationDimensionChangedEvent(
+        relation_id=relation_id,
+        dimension="trust",
+        expected_previous="0",
+        value="1",
+        evidence_refs=[uuid4()],
+    )
+    serialized = legacy.model_dump(mode="json")
+    assert "social_policy_id" not in serialized
+    assert "speech_memory_id" not in serialized
+    assert "routine_occurrence" not in serialized
+
+    receipt = RelationDimensionChangedEvent(
+        relation_id=relation_id,
+        dimension="familiarity",
+        expected_previous="0",
+        value="1",
+        evidence_refs=[memory_id],
+        social_policy_id="social_world_v1",
+        speech_memory_id=memory_id,
+        routine_occurrence=1,
+    )
+    assert receipt.speech_memory_id == memory_id
+    with pytest.raises(ValidationError, match="provided together"):
+        RelationDimensionChangedEvent(
+            relation_id=relation_id,
+            dimension="familiarity",
+            value="1",
+            social_policy_id="social_world_v1",
+        )
+    with pytest.raises(ValidationError, match="familiarity"):
+        RelationDimensionChangedEvent(
+            relation_id=relation_id,
+            dimension="trust",
+            value="1",
+            evidence_refs=[memory_id],
+            social_policy_id="social_world_v1",
+            speech_memory_id=memory_id,
+            routine_occurrence=1,
+        )
+    with pytest.raises(ValidationError, match="exactly its source memory"):
+        RelationDimensionChangedEvent(
+            relation_id=relation_id,
+            dimension="familiarity",
+            value="1",
+            evidence_refs=[uuid4()],
+            social_policy_id="social_world_v1",
+            speech_memory_id=memory_id,
+            routine_occurrence=1,
+        )
+
+
 def test_goal_dependencies_accept_forward_references_without_self_justifying_a_cycle() -> None:
     actor, first, second = uuid4(), uuid4(), uuid4()
     goals = [

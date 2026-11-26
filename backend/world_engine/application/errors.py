@@ -4,6 +4,8 @@ from world_engine.domain.errors import Conflict
 
 STORAGE_BUSY_CODE = "STORAGE_BUSY"
 STORAGE_BUSY_MESSAGE = "世界存档当前正忙，请稍后使用同一请求重试。"
+BRANCH_BUSY_CODE = "BRANCH_BUSY"
+BRANCH_BUSY_MESSAGE = "当前分支正在推进时间。可继续向 GM 查询；请在作业暂停或结束后重新提交行动。"
 
 
 MODEL_OUTPUT_TRUNCATED_MESSAGE = "模型回复被截断。请检查职责路由的输出 Token 上限，或缩短当前输入后重新提交。"

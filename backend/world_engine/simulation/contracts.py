@@ -7,6 +7,7 @@ from typing import Literal, TypeAlias
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, StrictBool, StrictInt, model_validator
+from world_engine.domain.ambient_events import AmbientEventProposal
 from world_engine.domain.components import ExactDecimal, ResourceName
 from world_engine.rules.contracts import ConsumeIntent, ExploreIntent, RuleResolution
 
@@ -224,13 +225,45 @@ class DecisionResponse(FrozenModel):
     promise_choice: PromiseReviewChoice | None = Field(default=None, exclude_if=lambda value: value is None)
     npc_model_call_id: str | None = Field(default=None, min_length=1, max_length=128,
                                            pattern=r"^[a-zA-Z0-9_.:-]+$", exclude_if=lambda value: value is None)
+    ambient_outcome: Literal["accepted", "deferred", "unavailable"] | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+    ambient_proposal: AmbientEventProposal | None = Field(default=None, exclude_if=lambda value: value is None)
+    ambient_state_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$", exclude_if=lambda value: value is None)
+    ambient_model_call_id: str | None = Field(default=None, min_length=1, max_length=128,
+                                               pattern=r"^[a-zA-Z0-9_.:-]+$", exclude_if=lambda value: value is None)
+
+    @model_validator(mode="after")
+    def ambient_response_is_complete(self):
+        if self.ambient_outcome is None:
+            if any(value is not None for value in (self.ambient_proposal, self.ambient_model_call_id, self.ambient_state_hash)):
+                raise ValueError("Ambient fields require a typed ambient outcome.")
+            return self
+        if self.npc_planning_status is not None or self.option_id != "ambient" or self.ambient_state_hash is None:
+            raise ValueError("An ambient outcome must belong to its own snapshot-bound decision.")
+        if self.source != ("model" if self.ambient_model_call_id is not None else "policy"):
+            raise ValueError("A model-sourced ambient outcome requires its actual call ID.")
+        if (self.ambient_outcome == "accepted") != (self.ambient_proposal is not None):
+            raise ValueError("Only accepted ambient outcomes contain a proposal.")
+        if self.ambient_outcome == "accepted" and self.ambient_model_call_id is None:
+            raise ValueError("Accepted ambient events require a real model call receipt.")
+        return self
 
     @model_validator(mode="after")
     def npc_planning_response_is_complete(self):
         if self.promise_choice is not None and self.npc_planning_status != "defer":
             raise ValueError("A promise choice requires a typed NPC deferral.")
         if self.npc_planning_rejection is not None and self.npc_planning_status != "invalid":
-            raise ValueError("Only invalid NPC planning responses can contain a rejection code.")
+            valid_deferred_output_failure = (
+                self.npc_planning_status == "defer"
+                and self.source == "model"
+                and self.npc_planning_rejection in {
+                    "invalid_npc_plan_output", "npc_plan_semantic_unavailable",
+                }
+                and self.npc_model_call_id is not None
+            )
+            if not valid_deferred_output_failure:
+                raise ValueError("Only invalid NPC planning responses or traced output-failure deferrals can contain a rejection code.")
         if self.npc_planning_policy_reason is not None and (
             self.npc_planning_status != "defer" or self.source != "policy"
         ):
@@ -241,8 +274,8 @@ class DecisionResponse(FrozenModel):
                 self.npc_planning_policy_reason,
             )):
                 raise ValueError("NPC planning fields require a typed planning status.")
-            if self.source == "policy":
-                raise ValueError("Policy responses are reserved for typed NPC planning reviews.")
+            if self.source == "policy" and self.ambient_outcome is None:
+                raise ValueError("Policy responses require a typed planning or ambient review.")
             return self
         if self.option_id != "plan" or self.source == "user" or self.npc_plan_state_hash is None:
             raise ValueError("NPC planning responses require a snapshot-bound planning option.")

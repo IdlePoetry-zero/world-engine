@@ -3,10 +3,12 @@
 from uuid import UUID
 
 from world_engine.application.world_packs import WorldPackManifest, write_world_pack
+from world_engine.domain.ambient_events import AmbientEventPolicy, build_ambient_event_schedule
 from world_engine.domain.challenges import ChallengeDefinition
 from world_engine.domain.components import GoalRecord, KnowledgeRecord, PlaceComponent, ProvenanceReference, RelationRecord
 from world_engine.domain.models import ResourceAccount, StoryArrival, WorldEntity, WorldState
 from world_engine.domain.npc_plan_review import build_npc_plan_review_schedule
+from world_engine.domain.social_contact_settlement import build_social_contact_schedules
 from world_engine.domain.story_nodes import StoryFollowup, StoryNode
 from world_engine.domain.travel_journeys import COMPACT_ROUTINE_JOURNEY_POLICY
 from world_engine.domain.world_books import WorldBookCitation, WorldBookEntry, WorldBookProvenance
@@ -32,7 +34,16 @@ from .strategy_examples import reserve_strategy
 
 PACK_ID = "author.gensokyo-world"
 PACK_VERSION = "1.5.0"
+SOCIAL_PACK_VERSION = "1.6.0"
 PACK_TITLE = "东方幻想乡·异变年代"
+
+_AMBIENT_PRESETS = (
+    ("region", "human-village", 1, 3500, 10),
+    ("region", "forest", 7, 4200, 14),
+    ("region", "shrine", 2, 3000, 12),
+    ("organization", "scarlet-household", 2, 3500, 16),
+    ("organization", "moriya-faith", 2, 3500, 18),
+)
 
 _PLAYER_PROFILES = (
     {"profile_id": "village-visitor", "title": "人里来客",
@@ -589,7 +600,8 @@ def _standing_goals(key: str, entities: dict[UUID, WorldEntity]) -> tuple[GoalRe
     ),)
 
 
-def build_opening(chapter: Chapter) -> dict:
+def build_opening(chapter: Chapter, *, social_world: bool = False,
+                  ambient_overrides: dict[str, dict[str, int]] | None = None) -> dict:
     references = build_reference_entries()
     history = {
         entry.source_key: entry for entry in references if entry.source_key in HISTORY_WORKS
@@ -675,20 +687,23 @@ def build_opening(chapter: Chapter) -> dict:
         story_reactions=permit_reactions,
         challenges=challenges, contest_definitions=contests,
         metadata={
-            "pack_id": PACK_ID, "pack_version": PACK_VERSION, "public_title": PACK_TITLE,
+            "pack_id": PACK_ID, "pack_version": SOCIAL_PACK_VERSION if social_world else PACK_VERSION,
+            "public_title": PACK_TITLE,
             "public_description": chapter.position + " 你可以自行访人、修习或旅行，也可让异变自行发展。"
             f"如要介入首轮调查，可在{entities[meeting].name}登记线索并联系{entities[actor_id(chapter.contact)].name}。"
             "铜钱用于自愿交易，公共救济口粮由地点保管。路程、日程、来客资格和调查后果为世界包的模拟配置。",
             "reference_incident": chapter.key,
             "resource_catalog": RESOURCE_LABELS,
             COMPACT_ROUTINE_JOURNEY_POLICY: True,
+            **({"social_world_v1": True} if social_world else {}),
         },
     )
     standing_actor_ids = {actor_id(key) for key in _STANDING_RELATIONSHIP_GOALS}
     reviews = [
         build_npc_plan_review_schedule(
             state, _id(f"world:reviews:{chapter.key}"), actor, _HOUR + index * 900,
-            **({"repeat_ticks": state.calendar.day_seconds * 90, "max_runs": 241}
+            **({"repeat_ticks": state.calendar.day_seconds * (14 if social_world else 90),
+                "max_runs": 20_000 if social_world else 241}
                if actor in standing_actor_ids else {}),
         )
         for index, actor in enumerate(dict.fromkeys(goal.owner_id for goal in goals))
@@ -697,6 +712,23 @@ def build_opening(chapter: Chapter) -> dict:
         "scheduled_events": [incident, *reviews],
     })
     state = _install_local_strategies(state)
+    if social_world:
+        scheduled = list(build_social_contact_schedules(state, _id(f"world:social-contacts:{chapter.key}")))
+        for kind, key, every, chance, hour in _AMBIENT_PRESETS:
+            prefix = "place" if kind == "region" else "organization"
+            scope_id = _id(f"{prefix}:{key}")
+            scope = state.entities.get(scope_id)
+            if scope is None or scope.status != "active":
+                continue
+            policy = AmbientEventPolicy.model_validate({
+                "scope_kind": kind, "scope_id": scope_id, "check_every_days": every,
+                "chance_basis_points": chance, "cooldown_days": 1, "concurrent_limit": 2,
+                **(ambient_overrides or {}).get(key, {}),
+            })
+            scheduled.append(build_ambient_event_schedule(
+                state, policy, first_tick=state.current_tick + hour * _HOUR,
+            ))
+        state = state.model_copy(update={"scheduled_events": [*state.scheduled_events, *scheduled]})
     past = [history[key].content for key in HISTORY_WORKS if key in known_history and key != chapter.key]
     return {
         "opening_id": chapter.key, "title": history[chapter.key].title,
@@ -706,8 +738,23 @@ def build_opening(chapter: Chapter) -> dict:
     }
 
 
-def build_archive() -> bytes:
+def build_archive(*, social_world: bool = False,
+                  ambient_overrides: dict[str, dict[str, int]] | None = None) -> bytes:
+    if ambient_overrides is not None:
+        allowed_keys = {"check_every_days", "chance_basis_points", "cooldown_days", "concurrent_limit"}
+        if not social_world or not isinstance(ambient_overrides, dict) or not set(ambient_overrides) <= {
+            key for _, key, *_ in _AMBIENT_PRESETS
+        }:
+            raise ValueError("Ambient overrides require a social world and registered region or group names.")
+        for values in ambient_overrides.values():
+            if not isinstance(values, dict) or not set(values) <= allowed_keys:
+                raise ValueError("Ambient overrides may only change frequency, chance, cooldown and concurrency.")
     return write_world_pack(
-        manifest=WorldPackManifest(pack_id=PACK_ID, version=PACK_VERSION, title=PACK_TITLE),
-        template={"story_openings": [build_opening(chapter) for chapter in CHAPTERS]},
+        manifest=WorldPackManifest(
+            pack_id=PACK_ID, version=SOCIAL_PACK_VERSION if social_world else PACK_VERSION, title=PACK_TITLE,
+        ),
+        template={"story_openings": [
+            build_opening(chapter, social_world=social_world, ambient_overrides=ambient_overrides)
+            for chapter in CHAPTERS
+        ]},
     )

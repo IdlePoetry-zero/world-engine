@@ -107,7 +107,7 @@ def pending_review_job(tmp_path):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("output", "outcome", "rejection"), [
     ({"kind": "defer", "reason": "No safe route yet."}, "defer", None),
-    ({"kind": "plan", "unexpected": "Private model text."}, "invalid", "invalid_npc_plan_output"),
+    ({"kind": "plan", "unexpected": "Private model text."}, "defer", "invalid_npc_plan_output"),
 ])
 async def test_leased_npc_planning_records_job_and_decision_trace_scope(pending_review_job, output, outcome, rejection):
     context = pending_review_job
@@ -145,12 +145,13 @@ async def test_leased_npc_planning_records_job_and_decision_trace_scope(pending_
 
 
 @pytest.mark.asyncio
-async def test_unavailable_npc_planner_records_policy_defer_and_bounded_retry(pending_review_job):
+@pytest.mark.parametrize("error_code", [ProviderErrorCode.NETWORK, ProviderErrorCode.AUTHENTICATION])
+async def test_unavailable_npc_planner_records_policy_defer_and_bounded_retry(pending_review_job, error_code):
     context = pending_review_job
 
     class OfflineProvider:
         async def generate(self, _scope, _request):
-            raise ProviderError(ProviderErrorCode.NETWORK, "provider is offline", retryable=True)
+            raise ProviderError(error_code, "provider is unavailable", retryable=True)
 
     response = await model_decisions.invoke_npc_planning(
         OfflineProvider(), context.repository, context.scope, context.lease,
@@ -176,6 +177,103 @@ async def test_unavailable_npc_planner_records_policy_defer_and_bounded_retry(pe
     assert context.repository.replay(
         context.scope, context.lease.world_id, context.lease.branch_id, from_genesis=True,
     ).state_hash == view.state_hash
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_code", "finish_reason", "attempts"),
+    [
+        (ProviderErrorCode.TRUNCATED, "length", (SimpleNamespace(outcome="response_received"),)),
+        (ProviderErrorCode.INVALID_OUTPUT, "stop", (SimpleNamespace(outcome="response_received"),)),
+    ],
+)
+async def test_unusable_structured_plan_output_defers_with_call_receipt_without_creating_plan(
+    pending_review_job, error_code, finish_reason, attempts,
+):
+    context = pending_review_job
+    trace = SimpleNamespace(
+        request_id="npc-structured-output-call",
+        finish_reason=finish_reason,
+        attempts=attempts,
+    )
+
+    class InvalidStructuredProvider:
+        async def generate(self, _scope, _request):
+            raise ProviderError(error_code, "The structured response could not be used.", call_trace=trace)
+
+    response = await model_decisions.invoke_npc_planning(
+        InvalidStructuredProvider(), context.repository, context.scope,
+        context.lease, context.job, context.decision,
+    )
+
+    assert response.source == "model"
+    assert response.npc_planning_status == "defer"
+    assert response.npc_planning_rejection == "invalid_npc_plan_output"
+    assert response.npc_model_call_id == "npc-structured-output-call"
+    resolution = context.jobs.advance(context.scope, context.lease, model_decision=response)
+    review, = [event for event in resolution.events if event.type == "core.npc_plan_review_resolved.v1"]
+    assert review.source == "model" and review.outcome == "defer"
+    assert review.reason == "invalid_npc_plan_output"
+    assert review.model_call_id == "npc-structured-output-call"
+
+    view = context.repository.read_world(context.scope, context.lease.world_id, context.lease.branch_id)
+    assert view.state.npc_plans == []
+    retry, = [item for item in view.state.scheduled_events if item.id == review.scheduled_event_id]
+    assert retry.status == "queued" and retry.due_tick == 3_600
+    assert retry.completed_runs == 1 and retry.max_runs == 2
+    assert context.repository.replay(
+        context.scope, context.lease.world_id, context.lease.branch_id, from_genesis=True,
+    ).state_hash == view.state_hash
+
+
+@pytest.mark.asyncio
+async def test_preflight_invalid_output_error_remains_distinct_from_model_output_failure(pending_review_job):
+    context = pending_review_job
+
+    class BrokenSchemaConfiguration:
+        async def generate(self, _scope, _request):
+            raise ProviderError(ProviderErrorCode.INVALID_OUTPUT, "The registered schema could not be resolved.")
+
+    with pytest.raises(ProviderError) as caught:
+        await model_decisions.invoke_npc_planning(
+            BrokenSchemaConfiguration(), context.repository, context.scope,
+            context.lease, context.job, context.decision,
+        )
+    assert caught.value.code is ProviderErrorCode.INVALID_OUTPUT
+
+
+@pytest.mark.asyncio
+async def test_truncated_output_without_safe_trace_uses_existing_policy_deferral(pending_review_job):
+    context = pending_review_job
+
+    class UntracedTruncatedProvider:
+        async def generate(self, _scope, _request):
+            raise ProviderError(ProviderErrorCode.TRUNCATED, "The provider response was truncated.")
+
+    response = await model_decisions.invoke_npc_planning(
+        UntracedTruncatedProvider(), context.repository, context.scope,
+        context.lease, context.job, context.decision,
+    )
+
+    assert response.source == "policy"
+    assert response.npc_planning_status == "defer"
+    assert response.npc_planning_policy_reason == NPC_MODEL_UNAVAILABLE_REASON
+    assert response.npc_model_call_id is None
+
+
+@pytest.mark.asyncio
+async def test_unexpected_planner_programming_error_propagates_unchanged(pending_review_job):
+    context = pending_review_job
+
+    class BrokenProvider:
+        async def generate(self, _scope, _request):
+            raise RuntimeError("unexpected adapter bug")
+
+    with pytest.raises(RuntimeError, match="unexpected adapter bug"):
+        await model_decisions.invoke_npc_planning(
+            BrokenProvider(), context.repository, context.scope,
+            context.lease, context.job, context.decision,
+        )
 
 
 @pytest.mark.asyncio
@@ -241,12 +339,10 @@ async def test_leased_ready_plan_semantic_review_is_bounded_and_records_typed_re
     )
     if review_outcome == "approved":
         expected_status, expected_rejection = "ready", None
+    elif review_outcome == "rejected":
+        expected_status, expected_rejection = "invalid", "npc_plan_semantic_rejected"
     else:
-        expected_status = "invalid"
-        expected_rejection = (
-            "npc_plan_semantic_rejected" if review_outcome == "rejected"
-            else "npc_plan_semantic_unavailable"
-        )
+        expected_status, expected_rejection = "defer", "npc_plan_semantic_unavailable"
     assert response.npc_planning_status == expected_status
     assert response.npc_planning_rejection == expected_rejection
     assert response.npc_model_call_id == "npc-original-proposal-call"
@@ -263,7 +359,7 @@ async def test_leased_ready_plan_semantic_review_is_bounded_and_records_typed_re
         assert receipt.outcome == "ready"
         assert receipt.plan_id is not None
     else:
-        assert receipt.outcome == "invalid"
+        assert receipt.outcome == expected_status
         assert receipt.plan_id is None
         assert resolution.outcome == "advanced"
         continued = context.jobs.advance(context.scope, context.lease)
@@ -272,6 +368,11 @@ async def test_leased_ready_plan_semantic_review_is_bounded_and_records_typed_re
         assert not any(plan.actor_id == context.actor_id for plan in context.repository.read_world(
             context.scope, context.lease.world_id, context.lease.branch_id,
         ).state.npc_plans)
+        if expected_status == "defer":
+            retry = next(row for row in context.repository.read_world(
+                context.scope, context.lease.world_id, context.lease.branch_id,
+            ).state.scheduled_events if row.id == receipt.scheduled_event_id)
+            assert retry.status == "queued" and retry.due_tick == 3_600
     replayed = context.repository.replay(context.scope, context.lease.world_id, context.lease.branch_id)
     assert replayed.state_hash == context.repository.read_world(
         context.scope, context.lease.world_id, context.lease.branch_id,
