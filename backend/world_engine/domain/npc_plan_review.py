@@ -29,7 +29,9 @@ _MAX_TICK = 2**63 - 1
 _MAX_RUNS = 1_000_000
 NPC_FAILURE_REVIEW_POLICY = "npc_failure_review_v1"
 NPC_GOAL_FOLLOWUP_REVIEW_POLICY = "npc_goal_followup_review_v1"
+NPC_MODEL_UNAVAILABLE_REASON = "npc_model_unavailable"
 _AUTOMATIC_REVIEW_RUN_LIMIT = 13
+_PROVIDER_RETRY_DELAY_TICKS = 3_600
 
 NpcPlanningRejection = Literal[
     "invalid_state_version",
@@ -50,6 +52,7 @@ NpcPlanningRejection = Literal[
     "npc_plan_semantic_unavailable",
 ]
 NPC_PLANNING_REJECTIONS = frozenset(get_args(NpcPlanningRejection))
+NpcPlanningPolicyReason = Literal["npc_model_unavailable"]
 
 
 def npc_plan_review_schedule_id(namespace_id: UUID, actor_id: UUID) -> UUID:
@@ -251,6 +254,34 @@ def build_npc_failure_review(state: WorldState, world_id: UUID, plan: NpcPlan) -
     ):
         return None
     return _rearm_npc_review(old, due_tick)
+
+
+def build_npc_provider_unavailable_review(
+    state: WorldState, world_id: UUID, actor_id: UUID,
+) -> ScheduledEventRecord | None:
+    """Schedule one bounded retry after a planner provider cannot answer.
+
+    Keep the next authored occurrence at its original time. After the authored
+    schedule is exhausted, add one occurrence at a time with increasing delays
+    up to the shared automatic-review cap.
+    """
+    exhausted = _exhausted_npc_review(state, world_id, actor_id)
+    if exhausted is None:
+        return None
+    interval = max(_PROVIDER_RETRY_DELAY_TICKS, state.calendar.day_seconds // 24)
+    backoff = 2 ** min(exhausted.completed_runs - 1, 5)
+    due_tick = state.current_tick + interval * backoff
+    if due_tick > _MAX_TICK:
+        return None
+    if not any(
+        goal.owner_id == actor_id and goal.status == "active"
+        and goal.created_tick <= state.current_tick
+        and (goal.deadline is None or goal.deadline >= due_tick)
+        for goal in state.goals
+    ):
+        return None
+
+    return _rearm_npc_review(exhausted, due_tick)
 
 
 def schedule_npc_commitment_review(

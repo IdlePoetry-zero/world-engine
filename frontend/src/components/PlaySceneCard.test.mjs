@@ -67,7 +67,7 @@ test('scene displays current cast, opportunities, investigation and goals with w
   const html = render(projection)
   for (const text of ['市集', '与店员交谈', '摊位打烊前询价', '准备交谈', '往返至少半小时',
     '可能在打烊前留下报价', '世界历第 1 年第 2 日 00:05:00', '未签名的便条',
-    '准备建立案卷', '找到失物', '车站', '1 日 10 分钟']) assert.ok(html.includes(text), text)
+    '建立私人案卷', '编辑调查行动', '找到失物', '车站', '1 日 10 分钟']) assert.ok(html.includes(text), text)
   assert.ok(!html.includes('远方的人'))
   assert.ok(!html.includes('归还借书'))
 })
@@ -75,15 +75,15 @@ test('scene displays current cast, opportunities, investigation and goals with w
 test('unavailable projection suppresses every actionable entry', () => {
   const html = render(projection, { viewError: true })
   assert.match(html, /当前分支的场景暂时无法读取/)
-  for (const text of ['市集', '准备建立案卷', '摊位打烊前询价', '找到失物', '车站']) assert.ok(!html.includes(text), text)
+  for (const text of ['市集', '建立私人案卷', '摊位打烊前询价', '找到失物', '车站']) assert.ok(!html.includes(text), text)
 })
 
 test('older projections have usable empty states, and projecting an existing case links to its journal', () => {
   const oldState = { ...projection, scene_opportunities: undefined, available_case_anchors: undefined, goals: [] }
-  assert.match(render(oldState), /眼前没有已知的机会.*观察周围.*目前没有进行中的个人目标/s)
+  assert.match(render(oldState), /观察周围.*眼前没有已知的机会.*目前没有进行中的个人目标/s)
   const filed = render({ ...projection, case_files: [{ case_id: 'case' }] })
   assert.match(filed, /查看调查日志/)
-  assert.doesNotMatch(filed, /准备建立案卷/)
+  assert.doesNotMatch(filed, /建立私人案卷/)
 })
 
 test('travel shows the known destination and arrival without showing previous local actions', () => {
@@ -94,7 +94,7 @@ test('travel shows the known destination and arrival without showing previous lo
   })
   assert.match(traveling, /前往车站.*世界历第 1 年第 2 日 00:10:00/s)
   assert.match(traveling, /查看行程进度/)
-  assert.doesNotMatch(traveling, /店员|准备建立案卷|可走路线/)
+  assert.doesNotMatch(traveling, /店员|建立私人案卷|可走路线/)
 })
 
 test('a present character shows public hours, the player’s own promises and dated known changes', () => {

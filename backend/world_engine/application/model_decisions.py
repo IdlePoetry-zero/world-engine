@@ -68,15 +68,34 @@ async def invoke_npc_planning(operations, repository, scope, lease, job, decisio
         DepthProfile(job.payload["depth"]),
     )
     review_deadline = monotonic() + MODEL_DECISION_TIMEOUT_SECONDS - NPC_PLAN_REVIEW_DEADLINE_RESERVE_SECONDS
-    proposal = await asyncio.wait_for(
-        NpcPlanningApplication(operations, registry=registry).propose(
-            scope, request, view.state, decision.actor_id,
-            state_version=view.branch.state_version, externally_controlled_actor_ids=controlled,
-            ruleset_version=view.world.ruleset_version,
-            semantic_review_rounds=profile.semantic_review_rounds,
-            semantic_review_deadline=review_deadline,
-        ), timeout=MODEL_DECISION_TIMEOUT_SECONDS,
-    )
+    try:
+        proposal = await asyncio.wait_for(
+            NpcPlanningApplication(operations, registry=registry).propose(
+                scope, request, view.state, decision.actor_id,
+                state_version=view.branch.state_version, externally_controlled_actor_ids=controlled,
+                ruleset_version=view.world.ruleset_version,
+                semantic_review_rounds=profile.semantic_review_rounds,
+                semantic_review_deadline=review_deadline,
+            ), timeout=MODEL_DECISION_TIMEOUT_SECONDS,
+        )
+    except ProviderError as error:
+        if error.code not in {
+            ProviderErrorCode.AUTHENTICATION,
+            ProviderErrorCode.RATE_LIMITED,
+            ProviderErrorCode.TIMEOUT,
+            ProviderErrorCode.NETWORK,
+            ProviderErrorCode.SERVER,
+            ProviderErrorCode.UNAVAILABLE,
+            ProviderErrorCode.UNSUPPORTED_CAPABILITY,
+            ProviderErrorCode.SECRET,
+        }:
+            raise
+        return _npc_model_unavailable_decision(decision, view.state)
+    except TimeoutError:
+        # This is the bounded planning wall-clock deadline. No plan proposal
+        # completed, so record a policy deferral and let the scheduled review
+        # retry under its persisted cooldown instead of pausing the whole job.
+        return _npc_model_unavailable_decision(decision, view.state)
     call_id = getattr(proposal, "model_call_id", None)
     return DecisionResponse(
         request_id=decision.request_id, state_version=decision.state_version, at_tick=decision.at_tick,
@@ -85,6 +104,23 @@ async def invoke_npc_planning(operations, repository, scope, lease, job, decisio
         npc_planning_status=proposal.status, npc_plan=proposal.plan,
         npc_plan_state_hash=proposal.state_hash, npc_model_call_id=call_id,
         promise_choice=getattr(proposal, "promise_choice", None),
+    )
+
+
+def _npc_model_unavailable_decision(decision: DecisionRequest, state) -> DecisionResponse:
+    """Build a snapshot-bound policy defer without inventing an NPC choice."""
+    from world_engine.domain.npc_plan_review import NPC_MODEL_UNAVAILABLE_REASON
+    from world_engine.domain.reducers import state_hash
+
+    return DecisionResponse(
+        request_id=decision.request_id,
+        state_version=decision.state_version,
+        at_tick=decision.at_tick,
+        source="policy",
+        option_id="plan",
+        npc_planning_status="defer",
+        npc_planning_policy_reason=NPC_MODEL_UNAVAILABLE_REASON,
+        npc_plan_state_hash=state_hash(state),
     )
 
 

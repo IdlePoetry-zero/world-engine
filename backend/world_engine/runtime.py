@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import sqlite3
 from threading import Lock
+import time
 from uuid import uuid4
 
 from alembic import command
@@ -251,18 +252,22 @@ def build_application(*, data_directory: Path | None = None, catalog=None, port:
                             worlds.repository.claim_job, worker_id,
                             job_types=("simulation.long_action", "simulation.world_advance"), lease_seconds=120,
                         )
+                        renew_at = time.monotonic() + 60 if lease is not None else None
                         while lease is not None and not stop.is_set():
+                            if renew_at is not None and time.monotonic() >= renew_at:
+                                lease = await asyncio.to_thread(worlds.repository.renew_job, lease, lease_seconds=120)
+                                renew_at = time.monotonic() + 60
                             outcome = await advance_without_model(lease)
                             pending = getattr(outcome, "decision_requests", ())
                             if (len(pending) == 1 and not outcome.events
                                 and pending[0].decision_owner == "model"
                                 and (pending[0].kind == "npc.plan_review" or pending[0].options)):
                                 lease = await asyncio.to_thread(worlds.repository.renew_job, lease, lease_seconds=120)
+                                renew_at = time.monotonic() + 60
                                 answer = await resolve_model_decision(lease, pending[0])
                                 outcome = await asyncio.to_thread(jobs.advance, identity, lease, model_decision=answer)
                             if getattr(outcome, "outcome", None) != "advanced":
                                 break
-                            lease = await asyncio.to_thread(worlds.repository.renew_job, lease, lease_seconds=120)
                     except (Conflict, StorageBusy):
                         pass
                     except Exception as error:

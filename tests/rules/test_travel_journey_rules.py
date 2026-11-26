@@ -10,10 +10,12 @@ from world_engine.domain.gameplay_events import DamageAppliedEvent
 from world_engine.domain.models import TimeAdvancedEvent, WorldEntity, WorldState
 from world_engine.domain.reducers import apply_event
 from world_engine.domain.travel_journey_events import (
+    RoutineJourneyChoice,
     TravelJourneyChangedEvent,
     travel_event_id,
     travel_journey_visibility,
 )
+from world_engine.domain.travel_journeys import COMPACT_ROUTINE_JOURNEY_POLICY
 from world_engine.rules import RuleContext, RuleEngine
 
 
@@ -100,6 +102,29 @@ def _state(
             components={"combat_encounter": opponent_encounter.model_dump(mode="json")},
         )
     return WorldState(current_tick=10, entities=entities, player_id=ACTOR_ID)
+
+
+@pytest.mark.parametrize("routine", [True, False])
+def test_old_routine_trips_move_out_of_live_state_without_changing_arrival(routine):
+    state = _state().model_copy(update={"player_id": None, "metadata": {COMPACT_ROUTINE_JOURNEY_POLICY: True}})
+    engine = RuleEngine()
+    departure, = engine.evaluate_travel_departure(state, ROUTE_ID, _context()).events
+    if routine:
+        departure = departure.model_copy(update={"routine_choice": RoutineJourneyChoice(
+            window_id=uuid4(), occurrence_tick=departure.journey.arrival_tick, reason="scheduled_destination",
+        )})
+    in_transit = apply_event(state, departure)
+    at_arrival = apply_event(in_transit, TimeAdvancedEvent(to_tick=departure.journey.arrival_tick))
+    arrival, = engine.evaluate_travel_resolution(
+        at_arrival, departure.journey.journey_id, _context(command_id=uuid4()),
+    ).events
+    arrived = apply_event(at_arrival, arrival)
+    assert arrived.travel_journeys[0].status == "arrived"
+    projected = apply_event(arrived, TimeAdvancedEvent(to_tick=arrived.current_tick + arrived.calendar.day_seconds + 1))
+    assert projected.entities[ACTOR_ID].location_id == DESTINATION_ID
+    assert bool(projected.travel_journeys) == (not routine)
+    assert bool(projected.scheduled_events) == (not routine)
+    assert arrival.journey.status == "arrived"
 
 
 def test_departure_emits_one_scoped_private_event_without_advancing_time() -> None:

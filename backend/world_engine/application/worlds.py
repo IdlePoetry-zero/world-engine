@@ -9,9 +9,10 @@ from threading import Lock
 from typing import Any, Literal, Protocol
 from uuid import UUID, uuid5
 
+from world_engine.application.modern_opening_goal import enrich_modern_opening_goal
 from world_engine.domain.components import PlaceComponent
 from world_engine.domain.errors import AccessDenied, Conflict, InvalidEvent, NotFound, StaleVersion
-from world_engine.domain.challenges import CHALLENGE_COMMAND, CHALLENGE_RESOLVED, open_challenges, settle_challenge
+from world_engine.domain.challenges import CHALLENGE_COMMAND, CHALLENGE_RESOLVED, open_challenges, own_report_receipts, settle_challenge
 from world_engine.domain.contests import CONTEST_CHANGED, CONTEST_COMMAND, ContestAction, ContestRecord, contest_view, describe_contest, plan_contest
 from world_engine.domain.leadership_ballots import leadership_ballot_is_invalidated
 from world_engine.domain.models import (
@@ -253,10 +254,13 @@ class WorldApplication:
     ) -> dict[str, Any]:
         state = view.state.model_dump(mode="json")
         projected = project_player_state(state, str(actor_id))
+        enrich_modern_opening_goal(self.repository, scope, view, actor_id, state, projected)
         if view.state.challenges:
             choices = open_challenges(view.state, actor_id)
             if choices:
                 projected["local_challenges"] = choices
+            if receipts := own_report_receipts(view.state, actor_id):
+                projected["own_report_receipts"] = receipts
         credit = institutional_credit_context(
             view.state, actor_id, visible_organization_ids=set(map(UUID, projected["entities"])),
         )

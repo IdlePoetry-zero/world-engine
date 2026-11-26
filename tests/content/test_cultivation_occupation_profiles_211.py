@@ -70,7 +70,7 @@ def test_2_11_is_sustained_cultivation_only_and_preserves_pack_defaults() -> Non
     assert CULTIVATION_OCCUPATION_PROFILES_211_VERSION == _PACK_VERSION
     assert listed["long_life_cultivation"]["version"] == "2.0.0"
     assert listed["long_life_cultivation"]["available_versions"] == [
-        "2.0.0", "2.2.0", "2.3.0", "2.8.0", "2.12.0",
+        "2.0.0", "2.2.0", "2.3.0", "2.8.0", "2.12.0", "2.13.0",
     ]
     assert listed["long_life_cultivation"]["sustained_available_versions"] == ["2.4.0", _PACK_VERSION]
     assert listed["modern_city"]["sustained_available_versions"] == [

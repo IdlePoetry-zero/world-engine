@@ -37,6 +37,7 @@ from world_engine.domain.waypoint_opportunity_events import (
     WAYPOINT_OPPORTUNITY_DECISION_RECORDED_EVENT_TYPE, WaypointOpportunityDecisionRecordedEvent,
 )
 from world_engine.domain.work_shift import WorkShiftTerms
+from .modern_opening_goal import project_modern_opening_goal
 
 PUBLIC_COMPONENTS = frozenset({"public_description", "appearance", "public_role"})
 SELF_COMPONENTS = PUBLIC_COMPONENTS | frozenset(
@@ -48,11 +49,11 @@ class ProjectionError(ValueError):
     pass
 
 
-def meeting_local_time(tick: int, current_tick: int) -> dict[str, int | str]:
-    day, seconds = divmod(tick, 86_400)
+def meeting_local_time(tick: int, current_tick: int, day_seconds: int) -> dict[str, int | str]:
+    day, seconds = divmod(tick, day_seconds)
     hour, remaining = divmod(seconds, 3600)
     minute, second = divmod(remaining, 60)
-    return {"day_offset_from_now": day - current_tick // 86_400,
+    return {"day_offset_from_now": day - current_tick // day_seconds,
             "clock": f"{hour:02d}:{minute:02d}:{second:02d}"}
 
 
@@ -231,6 +232,8 @@ def _scene_npc_readback(state, projected, actor_id, location, tick):
         return result
     observations = {}
     last_contacts = {}
+    day_seconds = int(state.get("calendar", {}).get("day_seconds", 86_400))
+    day, second = divmod(tick, day_seconds)
     for item in state.get("knowledge", ()):
         if not _owned_knowledge_is_eligible(item, actor_id, tick) or item.get("relationship_disclosure"):
             continue
@@ -248,16 +251,23 @@ def _scene_npc_readback(state, projected, actor_id, location, tick):
         components = state["entities"][npc_id].get("components", {})
         cadences = components.get("routine_mobility", {}).get("cadences", {})
         windows = []
+        schedule_difference = None
         for window in components.get("daily_routine", {}).get("windows", ()):
             place = projected.get(window.get("place_id"))
             if window.get("public") is not True or not place or not place.get("name"):
                 continue
             cadence = cadences.get(window["window_id"], {})
+            period = cadence.get("every_days", 1)
             windows.append({
                 "activity": window["activity"], "place_name": place["name"],
                 "start_second": window["start_second"], "duration_seconds": window["duration_seconds"],
-                "every_days": cadence.get("every_days", 1),
+                "every_days": period,
             })
+            if (schedule_difference is None and window["place_id"] != location
+                and day % period == cadence.get("phase_day", 0)
+                and window["start_second"] <= second < window["start_second"] + window["duration_seconds"]):
+                schedule_difference = {"usual_place_name": place["name"],
+                                       "current_place_name": projected.get(location, {}).get("name")}
         last_contact = last_contacts.get(npc_id)
         recent = (item for item in observations.get(npc_id, ())
                   if last_contact is None or int(item.get("received_tick", 0)) >= last_contact)
@@ -269,6 +279,8 @@ def _scene_npc_readback(state, projected, actor_id, location, tick):
             result[npc_id] = {"public_schedule": windows[:4], "known_changes": known_changes}
             if last_contact is not None:
                 result[npc_id]["last_contact_tick"] = str(last_contact)
+            if schedule_difference:
+                result[npc_id]["schedule_difference"] = schedule_difference
     return result
 
 
@@ -355,7 +367,7 @@ def project_player_state(state: dict[str, Any], actor_id: str) -> dict[str, Any]
     goals = [
         {key: deepcopy(item[key]) for key in (
             "id", "title", "description", "status", "deadline", "progress", "owner_id"
-        ) if key in item}
+        ) if key in item} | project_modern_opening_goal(state, actor_id, item, projected_entities)
         for item in state.get("goals", [])
         if _owned(item, actor_id)
     ]

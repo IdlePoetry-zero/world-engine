@@ -696,6 +696,117 @@ def test_branch_projection_reads_isolate_callers_and_check_database_payload(worl
         world_repo.read_world(scope, world_id, branch_id)
 
 
+def test_committed_head_is_reused_for_the_next_commit_and_replays_exactly(
+    world_repo: WorldRepository, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scope, created, player_id, *_ = create_sample_world(world_repo)
+    world_id, branch_id = created.world.world_id, created.branch.branch_id
+    first = world_repo.commit_command(
+        scope, world_id, branch_id,
+        CommandEnvelope(
+            actor_id=player_id, idempotency_key="cache-seed-1", expected_state_version=0,
+            command_type="core.time",
+        ),
+        [TimeAdvancedEvent(to_tick=60)],
+    )
+
+    def unexpected_validation(_payload):
+        raise AssertionError("the committed head should be authorized by its fresh DB fingerprint")
+
+    with monkeypatch.context() as cache_hit:
+        cache_hit.setattr(world_repo._branch_state_cache, "_validate_payload", unexpected_validation)
+        second = world_repo.commit_command(
+            scope, world_id, branch_id,
+            CommandEnvelope(
+                actor_id=player_id, idempotency_key="cache-seed-2", expected_state_version=1,
+                command_type="core.time",
+            ),
+            [TimeAdvancedEvent(to_tick=120)],
+        )
+
+    assert first.state_version == 1
+    assert second.state_version == 2
+    assert world_repo.replay(scope, world_id, branch_id).state_hash == second.state_hash
+
+    public_view = world_repo.read_world(scope, world_id, branch_id)
+    public_view.state.metadata["public_mutation"] = True
+    assert "public_mutation" not in world_repo.read_world(scope, world_id, branch_id).state.metadata
+
+
+def test_commit_cache_hit_still_rejects_a_freshly_tampered_database_projection(
+    world_repo: WorldRepository,
+) -> None:
+    scope, created, player_id, *_ = create_sample_world(world_repo)
+    world_id, branch_id = created.world.world_id, created.branch.branch_id
+    world_repo.commit_command(
+        scope, world_id, branch_id,
+        CommandEnvelope(
+            actor_id=player_id, idempotency_key="cache-tamper-seed", expected_state_version=0,
+            command_type="core.time",
+        ),
+        [TimeAdvancedEvent(to_tick=60)],
+    )
+    with world_repo._transaction(write=True) as session:
+        branch = session.get(BranchRow, branch_id)
+        tampered_payload = {**branch.state_json, "current_tick": 61}
+        session.execute(
+            BranchRow.__table__.update().where(BranchRow.branch_id == branch_id)
+            .values(state_json=tampered_payload),
+        )
+
+    with pytest.raises(Conflict, match="projection failed its integrity check"):
+        world_repo.commit_command(
+            scope, world_id, branch_id,
+            CommandEnvelope(
+                actor_id=player_id, idempotency_key="cache-tamper-reject", expected_state_version=1,
+                command_type="core.time",
+            ),
+            [TimeAdvancedEvent(to_tick=120)],
+        )
+    with world_repo._transaction() as session:
+        branch = session.get(BranchRow, branch_id)
+        assert branch.state_version == 1
+        assert branch.head_seq == 1
+
+
+def test_rolled_back_commit_does_not_publish_its_uncommitted_state(
+    world_repo: WorldRepository, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from world_engine.storage import repository as repository_module
+
+    scope, created, player_id, *_ = create_sample_world(world_repo)
+    world_id, branch_id = created.world.world_id, created.branch.branch_id
+    world_repo.commit_command(
+        scope, world_id, branch_id,
+        CommandEnvelope(
+            actor_id=player_id, idempotency_key="cache-rollback-seed", expected_state_version=0,
+            command_type="core.time",
+        ),
+        [TimeAdvancedEvent(to_tick=60)],
+    )
+
+    def fail_event_append(*_args, **_kwargs):
+        raise RuntimeError("injected failure before commit")
+
+    monkeypatch.setattr(repository_module, "append_event_row", fail_event_append)
+    with pytest.raises(RuntimeError, match="injected failure"):
+        world_repo.commit_command(
+            scope, world_id, branch_id,
+            CommandEnvelope(
+                actor_id=player_id, idempotency_key="cache-rollback-failure", expected_state_version=1,
+                command_type="core.time",
+            ),
+            [TimeAdvancedEvent(to_tick=120)],
+        )
+
+    cached = world_repo._branch_state_cache._entries[(world_id, branch_id)]
+    assert cached.state_version == 1
+    with world_repo._transaction() as session:
+        branch = session.get(BranchRow, branch_id)
+        assert branch.state_version == 1
+        assert branch.current_tick == 60
+
+
 def test_full_world_read_reuses_verified_text_head_and_returns_detached_state(
     world_repo: WorldRepository, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

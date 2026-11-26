@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { HistoryEvent, JobStatusRecord, MediaJobRequest, MediaManifest, MediaRequestMetadata, MediaSubscription } from '../api/client'
 import { api } from '../api/client'
 import { errorMessage } from '../utils'
+import { isTerminalMediaPollingError, mediaStatusRetryDelay, MEDIA_STATUS_RETRY_DELAYS_MS } from './mediaStatusPolling'
 import './HistoryMediaControl.css'
 
 type Props = {
@@ -18,6 +19,14 @@ type Audience = MediaJobRequest['audience']
 const ACTIVE_STATUSES = new Set(['queued', 'running'])
 const AUDIO_TYPES = new Set(['audio/wav', 'audio/mpeg', 'audio/ogg'])
 const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp'])
+
+type MediaPollingFailure = {
+  message: string
+  retryDelayMs?: number
+  retryNumber?: number
+  stopped: boolean
+  terminal: boolean
+}
 
 export function HistoryMediaControl({ worldId, branchId, event, manifests, initialJob }: Props) {
   const options = useMemo<MediaOption[]>(() => manifests.flatMap((manifest) =>
@@ -37,7 +46,8 @@ export function HistoryMediaControl({ worldId, branchId, event, manifests, initi
   const [submitError, setSubmitError] = useState('')
   const [job, setJob] = useState<JobStatusRecord | null>(initialJob ?? null)
   const [jobRequest, setJobRequest] = useState<MediaRequestMetadata | null>(initialJob?.media_request ?? null)
-  const [jobError, setJobError] = useState('')
+  const [jobPollingFailure, setJobPollingFailure] = useState<MediaPollingFailure | null>(null)
+  const [pollRetryEpoch, setPollRetryEpoch] = useState(0)
 
   const selectedOption = options.find((option) => optionKey === mediaOptionKey(option)) ?? options[0]
   const terminal = job && !ACTIVE_STATUSES.has(job.status)
@@ -63,17 +73,29 @@ export function HistoryMediaControl({ worldId, branchId, event, manifests, initi
     if (!pollingJobId || !pollingJobStatus || !ACTIVE_STATUSES.has(pollingJobStatus)) return
     let active = true
     let timer: ReturnType<typeof setTimeout> | undefined
+    let retriesUsed = 0
     const poll = async () => {
       try {
         const latest = await api.jobStatus(pollingJobId)
         if (!active) return
         setJob(latest)
-        setJobError('')
+        setJobPollingFailure(null)
+        retriesUsed = 0
         if (ACTIVE_STATUSES.has(latest.status)) timer = setTimeout(() => void poll(), 900)
       } catch (reason) {
         if (!active) return
-        setJobError(errorMessage(reason))
-        timer = setTimeout(() => void poll(), 1800)
+        const delay = mediaStatusRetryDelay(reason, retriesUsed)
+        const terminalError = isTerminalMediaPollingError(reason)
+        if (delay === null) {
+          setJobPollingFailure({ message: errorMessage(reason), stopped: true, terminal: terminalError })
+          return
+        }
+        retriesUsed += 1
+        setJobPollingFailure({
+          message: errorMessage(reason), retryDelayMs: delay, retryNumber: retriesUsed,
+          stopped: false, terminal: false,
+        })
+        timer = setTimeout(() => void poll(), delay)
       }
     }
     timer = setTimeout(() => void poll(), 500)
@@ -81,7 +103,7 @@ export function HistoryMediaControl({ worldId, branchId, event, manifests, initi
       active = false
       if (timer) clearTimeout(timer)
     }
-  }, [pollingJobId, pollingJobStatus, worldId, branchId, event.event_id])
+  }, [pollingJobId, pollingJobStatus, worldId, branchId, event.event_id, pollRetryEpoch])
 
   async function enqueue() {
     if (!selectedOption || !audiences.includes(audience) || (audience === 'participants' && !actorId)) return
@@ -89,7 +111,7 @@ export function HistoryMediaControl({ worldId, branchId, event, manifests, initi
     if (!trimmedDescription || trimmedDescription.length > 24_000) return
     setBusy(true)
     setSubmitError('')
-    setJobError('')
+    setJobPollingFailure(null)
     setJob(null)
     const metadata: MediaRequestMetadata = {
       source_event_id: event.event_id,
@@ -168,13 +190,24 @@ export function HistoryMediaControl({ worldId, branchId, event, manifests, initi
       <div className="history-media-job-heading">
         <strong>{jobStatusLabel(job.status)}</strong><small>{job.job_id.slice(0, 8)}</small>
       </div>
-      {jobError && <p className="history-media-error">正在重试读取任务状态：{jobError}</p>}
+      {jobPollingFailure && <>
+        <p className="history-media-error">
+          {jobPollingFailure.stopped
+            ? jobPollingFailure.terminal ? '任务已不可访问或当前账户无权读取，自动轮询已停止。' : '连续读取失败，自动轮询已暂停。'
+            : `暂时无法读取任务状态，将在 ${Math.ceil((jobPollingFailure.retryDelayMs ?? 0) / 1_000)} 秒后重试（${jobPollingFailure.retryNumber}/${MEDIA_STATUS_RETRY_DELAYS_MS.length}）。`}
+          {' '}{jobPollingFailure.message}
+        </p>
+        {jobPollingFailure.stopped && <button type="button" className="history-media-dismiss" onClick={() => {
+          setJobPollingFailure(null)
+          setPollRetryEpoch((value) => value + 1)
+        }}>手动重试读取状态</button>}
+      </>}
       {job.status === 'failed' && <p>媒体插件未能完成此任务。世界事件保持不变。</p>}
       {job.status === 'cancelled' && <p>媒体任务已取消。</p>}
       {job.status === 'succeeded' && !validAsset && <p>任务已完成，但返回的媒体类型或摘要无效，未显示文件。</p>}
       {validAsset && jobRequest?.kind === 'speech' && <audio controls preload="none" src={mediaUrl} />}
       {validAsset && jobRequest?.kind === 'image' && <img src={mediaUrl} alt={`事件 ${event.sequence} 的生成图片`} />}
-      {terminal && <button type="button" className="history-media-dismiss" onClick={() => { setJob(null); setJobRequest(null); setJobError('') }}>关闭结果</button>}
+      {terminal && <button type="button" className="history-media-dismiss" onClick={() => { setJob(null); setJobRequest(null); setJobPollingFailure(null) }}>关闭结果</button>}
     </div>}
   </div>
 }

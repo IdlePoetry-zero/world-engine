@@ -6,6 +6,7 @@ import { Icon } from '../components/Icon'
 import { InlineState, PageEmpty } from '../components/States'
 import { HistoryMediaControl } from '../components/HistoryMediaControl'
 import { TemplateUpdatePanel } from '../components/TemplateUpdatePanel'
+import { buildRestoreLaunchCommand } from './restoreLaunchCommand'
 
 export function BackupPreview() {
   const [summary, setSummary] = useState<RestorePreview | null>(null)
@@ -14,6 +15,7 @@ export function BackupPreview() {
   const [archive, setArchive] = useState<File | null>(null)
   const [targetVersion, setTargetVersion] = useState('')
   const [destination, setDestination] = useState('')
+  const [restorePort, setRestorePort] = useState('8001')
   const [restoredVersion, setRestoredVersion] = useState('')
   const [copyStatus, setCopyStatus] = useState('')
   const successRef = useRef<HTMLDivElement>(null)
@@ -26,15 +28,17 @@ export function BackupPreview() {
     if (destination) successRef.current?.focus()
   }, [destination])
 
-  const launchCommand = destination
-    ? `& ./.runtime/venv313/Scripts/python.exe -m world_engine.runtime --data-directory ${quotePowerShell(destination)} --port 8001`
-    : ''
+  const parsedRestorePort = Number(restorePort)
+  const validRestorePort = /^\d+$/.test(restorePort) && Number.isInteger(parsedRestorePort)
+    && parsedRestorePort >= 1 && parsedRestorePort <= 65535
+  const launchCommand = destination && validRestorePort ? buildRestoreLaunchCommand(destination, parsedRestorePort) : ''
 
   async function verify(file: File) {
     setSummary(null)
     setArchive(null)
     setTargetVersion('')
     setDestination('')
+    setRestorePort('8001')
     setRestoredVersion('')
     setCopyStatus('')
     setError('')
@@ -63,13 +67,14 @@ export function BackupPreview() {
     try {
       if (!navigator.clipboard?.writeText) throw new Error('clipboard_unavailable')
       await navigator.clipboard.writeText(launchCommand)
-      setCopyStatus('启动命令已复制。请在仓库根目录的 PowerShell 中粘贴并运行。')
+      setCopyStatus('启动命令已复制。请在仓库根目录的 PowerShell 中粘贴并运行；源数据库环境设置只对启动的子进程生效。')
     } catch {
       commandRef.current?.focus()
       commandRef.current?.select()
       setCopyStatus('无法访问剪贴板，命令已选中；请按 Ctrl+C 复制。')
     }
   }
+
   return <div>
     <label htmlFor="backup-preview-file">验证备份归档</label>
     <input id="backup-preview-file" type="file" accept=".webackup,application/zip" disabled={busy}
@@ -108,21 +113,23 @@ export function BackupPreview() {
       <div className="restore-directory"><span>数据目录</span><code>{destination}</code></div>
       <ol className="restore-launch-steps">
         <li>在仓库根目录打开 PowerShell。</li>
-        <li>复制并运行下方命令。它会在端口 <code>8001</code> 启动此独立副本。</li>
-        <li>在浏览器打开 <a href="http://127.0.0.1:8001" target="_blank" rel="noreferrer">http://127.0.0.1:8001</a>。</li>
+        <li>默认使用端口 <code>8001</code>；如果端口被占用，请改成未使用的端口，例如 <code>8002</code>，命令和地址会同步更新。</li>
+        <li>复制并运行下方命令。它会在独立 Python 子进程中清空 <code>WORLD_ENGINE_DATABASE_URL</code>，保留当前 PowerShell 的原设置。</li>
+        <li>在浏览器打开 {validRestorePort ? <a href={`http://127.0.0.1:${parsedRestorePort}`} target="_blank" rel="noreferrer">http://127.0.0.1:{parsedRestorePort}</a> : '有效端口对应的本地地址'}。</li>
       </ol>
+      <label className="restore-port-field" htmlFor="restore-copy-port">副本服务端口
+        <input id="restore-copy-port" type="number" min="1" max="65535" step="1" value={restorePort}
+          aria-invalid={!validRestorePort} onChange={(event) => setRestorePort(event.currentTarget.value)} />
+      </label>
+      {!validRestorePort && <p role="alert">请输入 1 到 65535 之间的整数端口。</p>}
       <label className="restore-command-label" htmlFor="restore-launch-command">PowerShell 启动命令</label>
-      <textarea id="restore-launch-command" ref={commandRef} className="restore-command" value={launchCommand} readOnly rows={3} onFocus={(event) => event.currentTarget.select()} />
-      <button type="button" className="button button-secondary button-small restore-copy-button" onClick={() => void copyLaunchCommand()}><Icon name="copy" size={14} />复制启动命令</button>
+      <textarea id="restore-launch-command" ref={commandRef} className="restore-command" value={launchCommand} readOnly rows={9} disabled={!validRestorePort} onFocus={(event) => event.currentTarget.select()} />
+      <button type="button" className="button button-secondary button-small restore-copy-button" onClick={() => void copyLaunchCommand()} disabled={!launchCommand}><Icon name="copy" size={14} />复制启动命令</button>
       <p className="restore-copy-status" role="status" aria-live="polite">{copyStatus}</p>
-      <p className="restore-port-note">该副本使用独立数据目录和 8001 端口，不会自动打开进程。</p>
+      <p className="restore-port-note">该副本使用独立数据目录和所选端口；启动进程会占用当前 PowerShell，停止时按 Ctrl+C。</p>
     </div>}
     {error && <p role="alert">{error}</p>}
   </div>
-}
-
-function quotePowerShell(value: string) {
-  return `'${value.replaceAll("'", "''")}'`
 }
 
 type ForkPoint = { branchId: string; sequence: string; source: string }

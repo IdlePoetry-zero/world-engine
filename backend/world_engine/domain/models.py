@@ -100,7 +100,8 @@ from .relationship_disclosure_events import RelationshipDisclosureRecordedEvent
 from .shipment import validate_shipment_state
 from .shipment_relief_events import ShipmentReliefDistributedEvent
 from .travel_journeys import (
-    TRAVEL_RESOLUTION_HANDLER_ID, TRAVEL_RESOLUTION_HANDLER_VERSION, TravelJourney, travel_resolution_schedule_id,
+    TRAVEL_RESOLUTION_HANDLER_ID, TRAVEL_RESOLUTION_HANDLER_VERSION, TravelJourney,
+    travel_resolution_payload_matches, travel_resolution_schedule_id,
 )
 from .travel_journey_events import TravelJourneyChangedEvent
 from .world_books import WorldBookEntry, WorldBookImportedEvent
@@ -108,6 +109,12 @@ from .story_nodes import StoryFollowup, StoryMilestone, StoryMilestoneResolvedEv
 from .challenges import ChallengeAttempt, ChallengeDefinition, ChallengeResolvedEvent, validate_challenge_state
 from .contests import ContestChangedEvent, ContestDefinition, ContestRecord, validate_contest_state
 from .waypoint_opportunity_events import WaypointOpportunityDecision, WaypointOpportunityDecisionRecordedEvent
+from .organization_strategy_events import OrganizationStrategyReviewResolvedEvent
+from .organization_strategy import (
+    OrganizationalStrategy,
+    OrganizationalStrategyReviewRecord,
+    validate_organization_strategy_state,
+)
 
 ResourceId = Annotated[str, Field(min_length=1, max_length=160, pattern=r"^[a-zA-Z][a-zA-Z0-9_.-]*$")]
 EntityKind = Annotated[str, Field(min_length=1, max_length=96, pattern=r"^[a-zA-Z][a-zA-Z0-9_.-]*$")]
@@ -350,6 +357,16 @@ class WorldState(ContractModel):
     )
     leadership_ballots: list[LeadershipBallot] = Field(default_factory=list, exclude_if=lambda records: not records)
     leadership_vacancy_reviews: dict[UUID, LeadershipVacancyReviewRecord] = Field(
+        default_factory=dict,
+        max_length=100_000,
+        exclude_if=lambda reviews: not reviews,
+    )
+    organizational_strategies: dict[UUID, OrganizationalStrategy] = Field(
+        default_factory=dict,
+        max_length=100_000,
+        exclude_if=lambda strategies: not strategies,
+    )
+    organizational_strategy_reviews: dict[UUID, OrganizationalStrategyReviewRecord] = Field(
         default_factory=dict,
         max_length=100_000,
         exclude_if=lambda reviews: not reviews,
@@ -639,6 +656,10 @@ class WorldState(ContractModel):
             seen_goal_ids.add(goal.id)
             if goal.owner_id not in self.entities:
                 raise ValueError(f"goal {goal.id} references a missing owner entity")
+            if goal.counterpart_id is not None and (
+                goal.counterpart_id == goal.owner_id or goal.counterpart_id not in self.entities
+            ):
+                raise ValueError(f"goal {goal.id} references an invalid counterpart")
             if goal.created_tick > self.current_tick or goal.updated_tick > self.current_tick:
                 raise ValueError(f"goal {goal.id} has a future tick")
             for condition in goal.conditions:
@@ -682,6 +703,7 @@ class WorldState(ContractModel):
         validate_npc_meeting_attendance_decisions_state(self)
         validate_meeting_commitment_schedules(self)
         validate_institutional_credit_state(self)
+        validate_organization_strategy_state(self)
         if self.private_gifts:
             gift_ids: set[UUID] = set()
             for gift in self.private_gifts:
@@ -760,7 +782,7 @@ class WorldState(ContractModel):
                 travellers.add(journey.actor_id)
             if (
                 schedule is None or schedule.handler_version != TRAVEL_RESOLUTION_HANDLER_VERSION or schedule.phase != "resolution"
-                or schedule.payload != {"journey_id": str(journey.journey_id)}
+                or not travel_resolution_payload_matches(schedule.payload, journey.journey_id)
                 or schedule.due_tick != (journey.hazard_tick if journey.hazard_tick is not None else journey.arrival_tick)
                 or schedule.status != ("queued" if journey.status == "in_transit" else "completed")
                 or (journey.status == "in_transit" and schedule.due_tick < self.current_tick)
@@ -1161,6 +1183,7 @@ type DomainEvent = Annotated[
     | GovernanceLeadershipHandedOverEvent
     | LeadershipBallotChangedEvent
     | LeadershipVacancyReviewRecordedEvent
+    | OrganizationStrategyReviewResolvedEvent
     | SafeConductChangedEvent
     | OrganizationMemberResignedEvent
     | ProductionQuotaRenewedEvent

@@ -1,4 +1,4 @@
-import { useId } from 'react'
+import { useId, useRef, useState } from 'react'
 import type { CharacterEntity, RelationView, SceneOpportunity, WorldState } from '../api/client'
 import { initials } from '../utils'
 import { formatWorldDuration, formatWorldRelativeTick } from '../worldTime'
@@ -44,7 +44,7 @@ const routineLabels: Record<string, string> = {
   rest: '休息', work: '工作', study: '学习', socialize: '社交',
 }
 
-export type SceneDraftSource = { kind: 'opportunity' | 'investigation'; id: string }
+export type SceneDraftSource = { kind: 'opportunity' | 'investigation' | 'person'; id: string }
 type SceneDraft = { mode: 'ask_gm' | 'roleplay' | 'action'; text: string; source?: SceneDraftSource }
 
 type PlaySceneCardProps = {
@@ -55,6 +55,9 @@ type PlaySceneCardProps = {
   canPrepareAction: boolean
   canPrepareQuery: boolean
   canPlanRoute: boolean
+  departureHint?: string
+  onObserve: () => void
+  onOpenCase: (anchorId: string, title: string) => void
   onPrepareDraft: (draft: SceneDraft) => void
   onPlanRoute: (routeId: string) => void
   onOpenInvestigation: () => void
@@ -62,8 +65,15 @@ type PlaySceneCardProps = {
   onOpenComposer: () => void
 }
 
-export function PlaySceneCard({ state, loading, viewError, stage, canPrepareAction, canPrepareQuery, canPlanRoute, onPrepareDraft, onPlanRoute, onOpenInvestigation, onOpenJourney, onOpenComposer }: PlaySceneCardProps) {
+export function PlaySceneCard({ state, loading, viewError, stage, canPrepareAction, canPrepareQuery, canPlanRoute, departureHint, onObserve, onOpenCase, onPrepareDraft, onPlanRoute, onOpenInvestigation, onOpenJourney, onOpenComposer }: PlaySceneCardProps) {
   const headingId = useId()
+  const detailsId = useId()
+  const [expanded, setExpanded] = useState(false)
+  const castSection = useRef<HTMLElement>(null)
+  const showPeople = () => {
+    setExpanded(true)
+    requestAnimationFrame(() => castSection.current?.focus())
+  }
   const player = state?.player_id ? state.entities[state.player_id] : undefined
   const currentPlace = player?.location_id ? state?.entities[player.location_id] : undefined
   const traveling = Boolean(state?.own_active_travel?.status === 'in_transit')
@@ -94,7 +104,7 @@ export function PlaySceneCard({ state, loading, viewError, stage, canPrepareActi
     ? state.entities[state.own_active_travel.to_place_id]?.name
     : undefined
 
-  return <aside className="play-scene-card" aria-labelledby={headingId}>
+  return <aside id="play-current-scene" tabIndex={-1} className="play-scene-card" aria-labelledby={headingId}>
     <div className="play-scene-hero">
       <SceneStage stage={available ? currentStage : undefined} people={byId} />
       <div className="play-scene-hero-caption">
@@ -116,62 +126,74 @@ export function PlaySceneCard({ state, loading, viewError, stage, canPrepareActi
         <p className="play-scene-empty">预计抵达 {formatDate(state?.own_active_travel?.arrival_tick) ?? '时间待确认'}</p>
         <button type="button" className="play-scene-observe" onClick={onOpenJourney}><Icon name="clock" size={16} />查看行程进度<Icon name="arrow-right" size={15} /></button>
       </div>}
-      {available && description && <p className="play-scene-description">{description}</p>}
-      {available && player && <section className="play-scene-section play-scene-opportunities" aria-label="眼下可做">
-        <h3><Icon name="compass" size={16} />眼下可做</h3>
-        {opportunities.length > 0 && <SceneList label="机会" items={opportunities} render={(opportunity) => (
-          <OpportunityCard key={opportunity.opportunity_id} opportunity={opportunity} formatDate={formatDate}
-            canPrepareAction={canPrepareAction} canPrepareQuery={canPrepareQuery} onPrepareDraft={onPrepareDraft} />
-        )} />}
-        {anchors.length > 0 && <SceneList label="调查线索" items={anchors} render={(anchor) => {
-          const existing = caseFiles.find((file) => file.case_id === anchor.case_id)
-          return <article key={anchor.anchor_id} className="play-scene-opportunity play-scene-clue">
-            <div className="play-scene-opportunity-title"><Icon name="eye" size={14} /><strong>{anchor.title}</strong></div>
-            {anchor.brief && <p>{anchor.brief}</p>}
-            {existing
-              ? <button type="button" className="play-scene-observe" onClick={onOpenInvestigation}>查看调查日志<Icon name="arrow-right" size={15} /></button>
-              : <button type="button" className="play-scene-observe" disabled={!canPrepareAction} onClick={() => onPrepareDraft({ mode: 'action', text: `请为线索「${anchor.title}」建立一份我的私人调查档案。`, source: { kind: 'investigation', id: anchor.anchor_id } })}>准备建立案卷<Icon name="arrow-right" size={15} /></button>}
-          </article>
-        }} />}
-        {opportunities.length === 0 && anchors.length === 0 && <p className="play-scene-empty">{traveling ? '途中尚无可介入的事。' : '眼前没有已知的机会。'}</p>}
-        <div className="play-scene-quick-actions">
-          <button type="button" className="play-scene-observe" disabled={!canPrepareQuery} onClick={() => onPrepareDraft({ mode: 'ask_gm', text: '从我的角色视角，看看此刻周围有什么值得留意的？' })}>
-            <Icon name="eye" size={16} />观察周围
-          </button>
-          {!traveling && <button type="button" className="play-scene-observe" disabled={!canPlanRoute} onClick={onOpenJourney}><Icon name="clock" size={16} />等待或长行动</button>}
-          <button type="button" className="play-scene-observe" onClick={onOpenComposer}><Icon name="message" size={16} />前往对话</button>
-        </div>
-      </section>}
-      {available && place && <div className="play-scene-local">
-        <div className="play-scene-section">
-          <h3><Icon name="users" size={16} />在场人物 <small>{cast.length}</small></h3>
-          {cast.length ? <SceneList label="人物" items={cast} render={(person) => <ScenePerson key={person.id} person={person}
-            relation={outgoingRelations.get(person.id)} state={state} formatDate={formatDate}
-            canTalk={canPrepareAction} onPrepareDraft={onPrepareDraft} />} /> : <p className="play-scene-empty">这里暂时没有其他可见人物。</p>}
-        </div>
-        <div className="play-scene-section">
-          <h3><Icon name="compass" size={16} />可走路线 <small>{exits.length}</small></h3>
-          {exits.length ? <SceneList label="路线" items={exits} render={(route) => {
-            const duration = exactTick(route.travel_ticks)
-            return <button type="button" className="play-scene-exit" key={route.route_id} disabled={!canPlanRoute || duration === null || duration <= 0n}
-              onClick={() => onPlanRoute(route.route_id)}>
-              <span><strong>{route.destination_name}</strong><small>{duration === null ? '耗时待确认' : formatWorldDuration(duration, daySeconds, yearDays)}</small></span><Icon name="arrow-up-right" size={15} />
-            </button>
-          }} /> : <p className="play-scene-empty">当前没有可用的出发路线。</p>}
-        </div>
+      {available && player && <div className="play-scene-entry">
+        <button type="button" className="play-scene-observe" disabled={!canPrepareQuery} onClick={onObserve}><Icon name="eye" size={16} />观察周围</button>
+        <button type="button" className="play-scene-observe" onClick={onOpenComposer}><Icon name="message" size={16} />前往对话</button>
+        {cast.length > 0 && <button type="button" className="play-scene-observe mobile-cast-jump" onClick={showPeople}>在场人物 · {cast.length}</button>}
       </div>}
-      {available && player && <section className="play-scene-section" aria-label="已知目标">
-        <h3><Icon name="crosshair" size={16} />已知目标</h3>
-        {goals.length ? <SceneList label="目标" items={goals} render={(goal) => {
-          const deadline = formatDate(goal.deadline)
-          return <article className="play-scene-goal" key={goal.id}>
-            <strong>{goal.title}</strong>
-            {goal.description && <p>{goal.description}</p>}
-            {deadline && <small>期限 {deadline}</small>}
-            <button type="button" className="play-scene-observe" disabled={!canPrepareQuery} onClick={() => onPrepareDraft({ mode: 'ask_gm', text: `根据我已掌握的情况，我可以怎样推进目标「${goal.title}」？` })}>询问进展</button>
-          </article>
-        }} /> : <p className="play-scene-empty">目前没有进行中的个人目标。</p>}
-      </section>}
+      {available && player && <button type="button" className="scene-mobile-toggle" aria-expanded={expanded} aria-controls={detailsId} onClick={() => setExpanded(!expanded)}>
+        <span>{expanded ? '收起场景详情' : opportunities[0]?.title || anchors[0]?.title || '线索、人物与路线'}</span>
+        <span>{expanded ? '收起' : '展开'} <Icon name="chevron" size={14} /></span>
+      </button>}
+      <div id={detailsId} className={'play-scene-detail' + (expanded ? ' is-expanded' : '')}>
+        {available && description && <p className="play-scene-description">{description}</p>}
+        {available && player && <section className="play-scene-section play-scene-opportunities" aria-label="眼下可做">
+          <h3><Icon name="compass" size={16} />眼下可做</h3>
+          {opportunities.length > 0 && <SceneList label="机会" items={opportunities} render={(opportunity) => (
+            <OpportunityCard key={opportunity.opportunity_id} opportunity={opportunity} formatDate={formatDate}
+              canPrepareAction={canPrepareAction} canPrepareQuery={canPrepareQuery} onPrepareDraft={onPrepareDraft} />
+          )} />}
+          {anchors.length > 0 && <SceneList label="调查线索" items={anchors} render={(anchor) => {
+            const existing = caseFiles.find((file) => file.case_id === anchor.case_id)
+            return <article key={anchor.anchor_id} className="play-scene-opportunity play-scene-clue">
+              <div className="play-scene-opportunity-title"><Icon name="eye" size={14} /><strong>{anchor.title}</strong></div>
+              {anchor.brief && <p>{anchor.brief}</p>}
+              {existing
+                ? <button type="button" className="play-scene-observe" onClick={onOpenInvestigation}>查看调查日志<Icon name="arrow-right" size={15} /></button>
+                : <><button type="button" className="play-scene-observe" disabled={!canPrepareAction} onClick={() => onOpenCase(anchor.anchor_id, anchor.title)}>建立私人案卷</button>
+                  <button type="button" className="play-scene-observe" disabled={!canPrepareAction} onClick={() => onPrepareDraft({ mode: 'action', text: `请为线索「${anchor.title}」建立一份我的私人调查档案。`, source: { kind: 'investigation', id: anchor.anchor_id } })}>编辑调查行动<Icon name="arrow-right" size={15} /></button></>}
+            </article>
+          }} />}
+          {opportunities.length === 0 && anchors.length === 0 && <p className="play-scene-empty">{traveling ? '途中尚无可介入的事。' : '眼前没有已知的机会。'}</p>}
+          <div className="play-scene-quick-actions">
+            <button type="button" className="play-scene-observe" disabled={!canPrepareQuery} onClick={() => onPrepareDraft({ mode: 'ask_gm', text: '从我的角色视角，看看此刻周围有什么值得留意的？' })}>
+              <Icon name="eye" size={16} />向 GM 自由提问
+            </button>
+            {!traveling && <button type="button" className="play-scene-observe" disabled={!canPlanRoute} onClick={onOpenJourney}><Icon name="clock" size={16} />等待或长行动</button>}
+          </div>
+        </section>}
+        {available && place && <div className="play-scene-local">
+          <section className="play-scene-section" tabIndex={-1} ref={castSection}>
+            <h3><Icon name="users" size={16} />在场人物 <small>{cast.length}</small></h3>
+            {cast.length ? <SceneList label="人物" items={cast} render={(person) => <ScenePerson key={person.id} person={person}
+              relation={outgoingRelations.get(person.id)} state={state} formatDate={formatDate}
+              canTalk={canPrepareAction} onPrepareDraft={onPrepareDraft} />} /> : <p className="play-scene-empty">这里暂时没有其他可见人物。</p>}
+          </section>
+          <div className="play-scene-section">
+            <h3><Icon name="compass" size={16} />可走路线 <small>{exits.length}</small></h3>
+            {departureHint && <p className="play-scene-empty">{departureHint}</p>}
+            {exits.length ? <SceneList label="路线" items={exits} render={(route) => {
+              const duration = exactTick(route.travel_ticks)
+              return <button type="button" className="play-scene-exit" key={route.route_id} disabled={!canPlanRoute || duration === null || duration <= 0n}
+                onClick={() => onPlanRoute(route.route_id)}>
+                <span><strong>{route.destination_name}</strong><small>{duration === null ? '耗时待确认' : formatWorldDuration(duration, daySeconds, yearDays)}</small></span><Icon name="arrow-up-right" size={15} />
+              </button>
+            }} /> : <p className="play-scene-empty">当前没有可用的出发路线。</p>}
+          </div>
+        </div>}
+        {available && player && <section className="play-scene-section" aria-label="已知目标">
+          <h3><Icon name="crosshair" size={16} />已知目标</h3>
+          {goals.length ? <SceneList label="目标" items={goals} render={(goal) => {
+            const deadline = formatDate(goal.deadline)
+            return <article className="play-scene-goal" key={goal.id}>
+              <strong>{goal.title}</strong>
+              {goal.description && <p>{goal.description}</p>}
+              {deadline && <small>期限 {deadline}</small>}
+              <button type="button" className="play-scene-observe" disabled={!canPrepareQuery} onClick={() => onPrepareDraft({ mode: 'ask_gm', text: `根据我已掌握的情况，我可以怎样推进目标「${goal.title}」？` })}>询问进展</button>
+            </article>
+          }} /> : <p className="play-scene-empty">目前没有进行中的个人目标。</p>}
+        </section>}
+      </div>
     </div>
   </aside>
 }
@@ -241,6 +263,7 @@ function ScenePerson({ person, relation, state, formatDate, canTalk, onPrepareDr
   const schedule = state?.scene_npc_readback?.[person.id]?.public_schedule ?? []
   const knownChanges = state?.scene_npc_readback?.[person.id]?.known_changes ?? []
   const lastContact = formatDate(state?.scene_npc_readback?.[person.id]?.last_contact_tick)
+  const scheduleDifference = state?.scene_npc_readback?.[person.id]?.schedule_difference
   const promises = (state?.own_promises ?? []).filter((promise) => promise.counterparty_id === person.id
     && promise.status === 'active' && Boolean(promise.text))
   const meetings = (state?.own_relationship_invitations ?? []).filter((invitation) => invitation.meeting
@@ -252,11 +275,12 @@ function ScenePerson({ person, relation, state, formatDate, canTalk, onPrepareDr
     <div className="play-scene-person-row">
       <span className="play-scene-initial" aria-hidden="true">{initials(name ?? '未')}</span>
       <span><strong>{name || '未命名人物'}</strong>{role && <small>{role}</small>}</span>
-      {name && person.status === 'active' && <button type="button" className="play-scene-talk" aria-label={`与${name}交谈`} disabled={!canTalk} onClick={() => onPrepareDraft({ mode: 'roleplay', text: `我向「${name}」开口：“你好。”` })}><Icon name="message" size={15} />交谈</button>}
+      {name && person.status === 'active' && <button type="button" className="play-scene-talk" aria-label={`与${name}交谈`} disabled={!canTalk} onClick={() => onPrepareDraft({ mode: 'roleplay', text: `我向「${name}」开口：“你好。”`, source: { kind: 'person', id: person.id } })}><Icon name="message" size={15} />交谈</button>}
     </div>
     {(schedule.length > 0 || knownChanges.length > 0 || promises.length > 0 || meetings.length > 0 || lastContact) && <details className="play-scene-relation play-scene-person-readback">
       <summary>作息、约定与近况</summary>
       {lastContact && <p>上次交谈 · {lastContact}</p>}
+      {scheduleDifference && <p>这个时段通常在{scheduleDifference.usual_place_name}，此刻在{scheduleDifference.current_place_name ?? '这里'}。可当面询问安排有何变化。</p>}
       {schedule.length > 0 && <>
         <strong>通常的公开作息</strong>
         <ul>{schedule.map((window, index) => <li key={index}>

@@ -71,8 +71,9 @@ from .relationship_disclosure_events import RelationshipDisclosureRecordedEvent,
 from .shipment_relief import plan_shipment_relief
 from .shipment_relief_events import ShipmentReliefDistributedEvent
 from .travel_journeys import (
-    TRAVEL_RESOLUTION_HANDLER_ID, TRAVEL_RESOLUTION_HANDLER_VERSION,
-    delay_travel_journey, plan_travel_departure, plan_travel_resolution, travel_resolution_schedule_id,
+    COMPACT_ROUTINE_JOURNEY_POLICY, TRAVEL_RESOLUTION_HANDLER_ID, TRAVEL_RESOLUTION_HANDLER_VERSION,
+    delay_travel_journey, plan_travel_departure, plan_travel_resolution, travel_resolution_payload_matches,
+    travel_resolution_schedule_id,
 )
 from .travel_journey_events import TravelJourneyChangedEvent
 from .waypoint_opportunity_events import WaypointOpportunityDecisionRecordedEvent
@@ -88,6 +89,13 @@ from .autonomous_vacancy_events import (
 )
 from .autonomous_vacancy import vacancy_opportunity
 from .leadership_ballots import open_vacant_leadership_ballot
+from .organization_strategy import (
+    ORGANIZATION_STRATEGY_REVIEW_HANDLER_ID,
+    ORGANIZATION_STRATEGY_REVIEW_HANDLER_VERSION,
+    evaluate_organizational_strategy_review,
+    organization_strategy_schedule_id,
+)
+from .organization_strategy_events import OrganizationStrategyReviewResolvedEvent
 from .safe_conduct_events import SafeConductChangedEvent
 from .safe_conduct_state import apply_safe_conduct
 from .work_shift import WorkShiftError, registered_work_shift_terms, revalidate_paid_work_shift
@@ -402,12 +410,16 @@ def apply_event(state: WorldState, raw_event: DomainEvent | dict[str, object]) -
             )
             records = [*state.travel_journeys, planned]
             location_id = None
+            payload = {"journey_id": str(journey.journey_id)}
+            if (event.routine_choice is not None and actor.id != state.player_id
+                and state.metadata.get(COMPACT_ROUTINE_JOURNEY_POLICY) is True):
+                payload["routine_history_only"] = True
             schedule = ScheduledEventRecord(
                 id=travel_resolution_schedule_id(journey.journey_id),
                 due_tick=journey.hazard_tick if journey.hazard_tick is not None else journey.arrival_tick,
                 phase="resolution", handler_id=TRAVEL_RESOLUTION_HANDLER_ID,
                 handler_version=TRAVEL_RESOLUTION_HANDLER_VERSION, priority=-1,
-                payload={"journey_id": str(journey.journey_id)},
+                payload=payload,
             )
             if any(item.id == schedule.id for item in state.scheduled_events):
                 raise InvalidEvent("Travel resolution schedule already exists.")
@@ -432,7 +444,7 @@ def apply_event(state: WorldState, raw_event: DomainEvent | dict[str, object]) -
                 or schedule.handler_id != TRAVEL_RESOLUTION_HANDLER_ID
                 or schedule.handler_version != TRAVEL_RESOLUTION_HANDLER_VERSION
                 or schedule.phase != "resolution" or schedule.due_tick != state.current_tick
-                or schedule.payload != {"journey_id": str(journey.journey_id)}
+                or not travel_resolution_payload_matches(schedule.payload, journey.journey_id)
             ):
                 raise InvalidEvent("Travel resolution must settle its exact queued occurrence.")
             schedules = [
@@ -491,6 +503,8 @@ def apply_event(state: WorldState, raw_event: DomainEvent | dict[str, object]) -
         return _validated_state(state, apply_leadership_ballot(state, event))
     if isinstance(event, LeadershipVacancyReviewRecordedEvent):
         return _apply_leadership_vacancy_review(state, event)
+    if isinstance(event, OrganizationStrategyReviewResolvedEvent):
+        return _apply_organization_strategy_review(state, event)
     if isinstance(event, SafeConductChangedEvent):
         return _validated_state(state, {"safe_conduct_treaties": apply_safe_conduct(state, event)})
     if isinstance(event, NpcPlanCreatedEvent):
@@ -1828,6 +1842,20 @@ def apply_event(state: WorldState, raw_event: DomainEvent | dict[str, object]) -
                for item in state.scheduled_events):
             raise InvalidEvent("World time cannot skip a queued story milestone.")
         updates = {"current_tick": event.to_tick}
+        if state.metadata.get(COMPACT_ROUTINE_JOURNEY_POLICY) is True:
+            cutoff = event.to_tick - state.calendar.day_seconds
+            dependencies = {dependency for row in state.scheduled_events for dependency in row.dependencies}
+            waypoint_journeys = {str(row.journey_id) for row in state.waypoint_opportunity_decisions}
+            expired = {
+                row.id: row.payload["journey_id"] for row in state.scheduled_events
+                if row.handler_id == TRAVEL_RESOLUTION_HANDLER_ID and row.status == "completed"
+                and row.due_tick < cutoff and row.payload.get("routine_history_only") is True
+                and row.id not in dependencies and row.payload["journey_id"] not in waypoint_journeys
+            }
+            if expired:
+                archived = set(expired.values())
+                updates["scheduled_events"] = [row for row in state.scheduled_events if row.id not in expired]
+                updates["travel_journeys"] = [row for row in state.travel_journeys if str(row.journey_id) not in archived]
         if event.work_job_id is not None or any(row.work_job_id is not None for row in state.npc_attendance):
             continuing = [row for row in state.npc_attendance
                           if row.work_job_id is not None and row.work_job_id == event.work_job_id]
@@ -2752,6 +2780,90 @@ def _apply_leadership_vacancy_review(
     return _validated_state(state, {"leadership_vacancy_reviews": reviews})
 
 
+def _apply_organization_strategy_review(
+    state: WorldState,
+    event: OrganizationStrategyReviewResolvedEvent,
+) -> WorldState:
+    """Validate and commit one exact recurring strategy decision and optional transfer."""
+
+    strategy = state.organizational_strategies.get(event.review.organization_id)
+    if strategy is None:
+        raise InvalidEvent("Organization strategy review requires a registered strategy profile.")
+    expected_schedule_id = organization_strategy_schedule_id(strategy)
+    schedule = next((row for row in state.scheduled_events if row.id == expected_schedule_id), None)
+    if (
+        schedule is None
+        or event.schedule_id != expected_schedule_id
+        or schedule.handler_id != ORGANIZATION_STRATEGY_REVIEW_HANDLER_ID
+        or schedule.handler_version != ORGANIZATION_STRATEGY_REVIEW_HANDLER_VERSION
+        or schedule.status != "queued"
+        or schedule.due_tick != state.current_tick
+        or schedule.revision != event.expected_schedule_revision
+        or event.review.review_index != schedule.completed_runs + 1
+    ):
+        raise InvalidEvent("Organization strategy review must settle its exact queued schedule occurrence.")
+    try:
+        expected_review = evaluate_organizational_strategy_review(
+            state,
+            strategy,
+            schedule.completed_runs + 1,
+        )
+    except (TypeError, ValueError) as exc:
+        raise InvalidEvent("Organization strategy review could not be recomputed from current state.") from exc
+    if expected_review != event.review:
+        raise InvalidEvent("Organization strategy review evidence or action does not match current state.")
+
+    updates: dict[str, object] = {}
+    receipt = event.review.transfer
+    if receipt is not None:
+        source = state.resources.get(receipt.from_account_id)
+        target = state.resources.get(receipt.to_account_id)
+        if (
+            source is None
+            or target is None
+            or source.owner_id != strategy.organization_id
+            or target.owner_id != strategy.organization_id
+            or source.account_type != "holder"
+            or target.account_type != "holder"
+            or source.resource_id != receipt.resource_id
+            or target.resource_id != receipt.resource_id
+            or source.balance != receipt.source_balance_before
+            or target.balance != receipt.target_balance_before
+        ):
+            raise InvalidEvent("Organization strategy transfer accounts or balances changed after review.")
+        resources = dict(state.resources)
+        resources[receipt.from_account_id] = source.model_copy(update={"balance": receipt.source_balance_after})
+        resources[receipt.to_account_id] = target.model_copy(update={"balance": receipt.target_balance_after})
+        updates["resources"] = resources
+
+    repeat_ticks = schedule.repeat_ticks
+    if repeat_ticks is None:
+        raise InvalidEvent("Organization strategy review requires a recurring schedule.")
+    next_due_tick = schedule.due_tick + repeat_ticks
+    if next_due_tick > 2**63 - 1:
+        raise InvalidEvent("Organization strategy review schedule exceeds the signed world-clock range.")
+    completed_runs = schedule.completed_runs + 1
+    repeats = completed_runs < schedule.max_runs
+    replacement_data = schedule.model_dump(mode="python") | {
+        "status": "queued" if repeats else "completed",
+        "due_tick": next_due_tick,
+        "completed_runs": completed_runs,
+        "revision": schedule.revision + 1,
+    }
+    try:
+        replacement = ScheduledEventRecord.model_validate(replacement_data)
+    except Exception as exc:
+        raise InvalidEvent("Organization strategy review could not advance its recurring schedule.") from exc
+    schedules = [replacement if row.id == schedule.id else row for row in state.scheduled_events]
+    reviews = {
+        **state.organizational_strategy_reviews,
+        strategy.organization_id: event.review,
+    }
+    updates["scheduled_events"] = schedules
+    updates["organizational_strategy_reviews"] = reviews
+    return _validated_state(state, updates)
+
+
 def _apply_organization_member_resignation(
     state: WorldState,
     event: OrganizationMemberResignedEvent,
@@ -3381,6 +3493,12 @@ def ledger_postings(event: DomainEvent) -> tuple[LedgerPosting, ...]:
         postings = (
             LedgerPosting(event.from_account_id, event.resource_id, event.quantity.copy_negate()),
             LedgerPosting(event.to_account_id, event.resource_id, event.quantity),
+        )
+    elif isinstance(event, OrganizationStrategyReviewResolvedEvent) and event.review.transfer is not None:
+        transfer = event.review.transfer
+        postings = (
+            LedgerPosting(transfer.from_account_id, transfer.resource_id, transfer.quantity.copy_negate()),
+            LedgerPosting(transfer.to_account_id, transfer.resource_id, transfer.quantity),
         )
     elif isinstance(event, StoryMilestoneResolvedEvent) and event.transfer is not None:
         transfer = event.transfer

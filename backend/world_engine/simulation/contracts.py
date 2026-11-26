@@ -11,7 +11,7 @@ from world_engine.domain.components import ExactDecimal, ResourceName
 from world_engine.rules.contracts import ConsumeIntent, ExploreIntent, RuleResolution
 
 from world_engine.domain.models import DomainEvent
-from world_engine.domain.npc_plan_review import NpcPlanningRejection
+from world_engine.domain.npc_plan_review import NpcPlanningPolicyReason, NpcPlanningRejection
 from world_engine.domain.npc_plans import NPC_EXPLORATION_TICKS, NpcPlan
 from world_engine.domain.relationship_promises import PromiseReviewChoice
 from world_engine.domain.travel_itinerary import TravelItinerary
@@ -218,6 +218,7 @@ class DecisionResponse(FrozenModel):
     explanation: str = Field(default="", max_length=2000)
     npc_planning_status: Literal["ready", "defer", "invalid"] | None = Field(default=None, exclude_if=lambda value: value is None)
     npc_planning_rejection: NpcPlanningRejection | None = Field(default=None, exclude_if=lambda value: value is None)
+    npc_planning_policy_reason: NpcPlanningPolicyReason | None = Field(default=None, exclude_if=lambda value: value is None)
     npc_plan: NpcPlan | None = Field(default=None, exclude_if=lambda value: value is None)
     npc_plan_state_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$", exclude_if=lambda value: value is None)
     promise_choice: PromiseReviewChoice | None = Field(default=None, exclude_if=lambda value: value is None)
@@ -230,8 +231,15 @@ class DecisionResponse(FrozenModel):
             raise ValueError("A promise choice requires a typed NPC deferral.")
         if self.npc_planning_rejection is not None and self.npc_planning_status != "invalid":
             raise ValueError("Only invalid NPC planning responses can contain a rejection code.")
+        if self.npc_planning_policy_reason is not None and (
+            self.npc_planning_status != "defer" or self.source != "policy"
+        ):
+            raise ValueError("NPC planning policy reasons require a policy-sourced defer.")
         if self.npc_planning_status is None:
-            if any(value is not None for value in (self.npc_plan, self.npc_plan_state_hash, self.npc_model_call_id)):
+            if any(value is not None for value in (
+                self.npc_plan, self.npc_plan_state_hash, self.npc_model_call_id,
+                self.npc_planning_policy_reason,
+            )):
                 raise ValueError("NPC planning fields require a typed planning status.")
             if self.source == "policy":
                 raise ValueError("Policy responses are reserved for typed NPC planning reviews.")

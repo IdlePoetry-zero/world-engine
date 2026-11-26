@@ -65,7 +65,11 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
   const [messages, setMessages] = useState<GameMessage[]>([])
   const [conversationLoad, setConversationLoad] = useState<{ key: string; conversation?: Conversation; error?: string } | null>(null)
   const [conversationAttempt, setConversationAttempt] = useState(0)
-  const [sending, setSending] = useState(false)
+  const [sendingRequest, setSendingRequest] = useState<MessageRequest | null>(null)
+  const sending = sendingRequest !== null
+  const [receiptError, setReceiptError] = useState('')
+  const [receiptAttempt, setReceiptAttempt] = useState(0)
+  const [checkingDelivery, setCheckingDelivery] = useState(false)
   const [failedRequest, setFailedRequest] = useState<MessageRequest | null>(null)
   const [job, setJob] = useState<PlayChatJob | null>(null)
   const [profile, setProfile] = useState<Pick<Settings, 'speed' | 'depth'> | null>(null)
@@ -135,14 +139,21 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
   const failedContinuationRequest = continuationSubmitState?.key === continuationRequestKey ? continuationSubmitState.failedRequest : null
   const modeForActor = characterCanAct ? mode : 'ask_gm'
   const playerPlaceId = typeof player?.location_id === 'string' ? player.location_id : null
-  const composerReady = Boolean(branchId && playerId && conversation?.actor_id === playerId && profile && !conversationLoading && !conversationError && !loading && !viewError && !sending && !failedRequest)
+  const recoveredPending = conversation?.items.find((item) => item.status === 'running')?.request_id
+  const awaitingReply = sending || Boolean(recoveredPending) || Boolean(failedRequest)
+  const hasUnsentSpeech = modeForActor === 'roleplay' && Boolean(input.trim())
+  const departureHeld = awaitingReply || hasUnsentSpeech
+  const composerReady = Boolean(branchId && playerId && conversation?.actor_id === playerId && profile && !conversationLoading && !conversationError && !loading && !viewError && !awaitingReply)
   const canPrepareQuery = composerReady && input.length === 0
   const canPrepareAction = canPrepareQuery && characterCanAct
   const canPrepareSceneDraft = modeForActor !== 'author'
   const sceneKey = JSON.stringify([worldId, branchId, playerId, playerPlaceId, state?.own_active_travel?.journey_id])
-  const canPlanRoute = Boolean(playerId && characterCanAct && !loading && !viewError && canPrepareSceneDraft)
+  const canPlanRoute = Boolean(playerId && characterCanAct && !loading && !viewError && canPrepareSceneDraft && !departureHeld)
   const sceneDraftStale = sceneDraft !== null && (sceneDraft.sceneKey !== sceneKey
-    || (sceneDraft.source.kind === 'opportunity'
+    || (sceneDraft.source.kind === 'person'
+      ? traveling || state?.entities[sceneDraft.source.id]?.location_id !== playerPlaceId
+        || state?.entities[sceneDraft.source.id]?.status !== 'active'
+      : sceneDraft.source.kind === 'opportunity'
       ? !state?.scene_opportunities?.some((entry) => entry.opportunity_id === sceneDraft.source.id
         && entry.draft?.mode === sceneDraft.mode)
       : !state?.available_case_anchors?.some((entry) => entry.anchor_id === sceneDraft.source.id
@@ -172,6 +183,30 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
       .catch((reason) => { if (active) setConversationLoad({ key: conversationRequestKey, error: errorMessage(reason) }) })
     return () => { active = false }
   }, [worldId, branchId, conversationRequestKey])
+
+  useEffect(() => {
+    if (!recoveredPending || !worldId || !branchId || !conversationSessionId) return
+    let active = true
+    let timer: number
+    const poll = async () => {
+      try {
+        const result = await api.conversation(worldId, branchId)
+        if (!active || result.session_id !== conversationSessionId) return
+        setReceiptError('')
+        setConversationLoad({ key: conversationRequestKey, conversation: result })
+        setMessages(messagesFromConversation(result.items))
+        if (!result.items.some((item) => item.status === 'running')) {
+          onRefresh()
+          return
+        }
+        timer = window.setTimeout(() => { void poll() }, FOREGROUND_STATUS_POLL_INTERVAL_MS)
+      } catch (reason) {
+        if (active) setReceiptError(errorMessage(reason))
+      }
+    }
+    void poll()
+    return () => { active = false; window.clearTimeout(timer) }
+  }, [recoveredPending, receiptAttempt, worldId, branchId, conversationSessionId, conversationRequestKey, onRefresh])
 
   useEffect(() => {
     if (!worldId || !branchId || !playerId || !playerDead) {
@@ -272,7 +307,7 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
 
   const executeRequest = async (request: MessageRequest, retry = false) => {
     const sendScope = sendScopeRevision.current
-    setSending(true)
+    setSendingRequest(request)
     try {
       const result = await api.sendMessage(request.world_id, request)
       if (sendScope !== sendScopeRevision.current) return
@@ -320,23 +355,24 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
         setFailedRequest(null)
         setInput((current) => current || request.text)
       } else {
-        setFailedRequest(!(reason instanceof ApiError) || reason.retryable ? request : null)
+        setFailedRequest(!(reason instanceof ApiError) || reason.retryable || reason.code === 'REQUEST_IN_PROGRESS' ? request : null)
       }
       const content = invalidDialogueReply ? `${errorMessage(reason)} 模型调用可能产生费用。` : errorMessage(reason)
       setMessages((current) => [...current.filter((message) => message.id !== `error-${request.request_id}`), { id: `error-${request.request_id}`, role: 'error', content, source: 'api' }])
       setMessages((current) => current.map((message) => message.id === `local-${request.request_id}` ? { ...message, delivery: 'failed' } : message))
-    } finally { setSending(false) }
+    } finally { setSendingRequest((current) => current?.request_id === request.request_id ? null : current) }
   }
-  const send = (draft?: DraftControl) => {
+  const send = (draft?: DraftControl, scene?: { text: string; mode: 'ask_gm'; scene_observation: true } | { text: string; mode: 'action'; case_anchor_id: string }) => {
     const close = draft?.operation === 'confirm' || draft?.operation === 'cancel'
     if (!world || !branchId || !conversation || !profile || !composerReady) return
-    if (!close && (!input.trim() || sceneDraftStale)) return
-    const text = close ? (draft.operation === 'confirm' ? '确认执行这份草稿。' : '取消这份草稿。') : input.trim()
+    if (scene && (!canPrepareSceneDraft || input.trim() || (scene.mode === 'action' && !characterCanAct))) return
+    if (!scene && !close && (!input.trim() || sceneDraftStale)) return
+    const text = scene?.text ?? (close ? (draft.operation === 'confirm' ? '确认执行这份草稿。' : '取消这份草稿。') : input.trim())
     const request: MessageRequest = {
       request_id: crypto.randomUUID(), world_id: world.world_id, branch_id: branchId,
       session_id: conversation.session_id, actor_id: conversation.actor_id,
-      expected_state_version: view?.world.state_version ?? world.state_version,
-      mode: draft ? 'action' : modeForActor, text, profile, draft,
+      expected_state_version: view?.branch.state_version ?? world.state_version,
+      mode: draft ? 'action' : modeForActor, text, profile, draft, ...scene,
     }
     setMessages((current) => [...current, { id: `local-${request.request_id}`, role: 'player', content: text, source: 'local', delivery: 'pending' }])
     if (!close) {
@@ -344,7 +380,11 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
       setSceneDraft(null)
     }
     void executeRequest(request)
+    if (scene) story.current?.scrollIntoView({ block: 'start' })
   }
+  const openCase = (id: string, title: string) => send(undefined, {
+    mode: 'action', text: `为「${title}」建立私人案卷。`, case_anchor_id: id,
+  })
   const submitContinuation = async (request: NonNullable<typeof failedContinuationRequest> | null = null) => {
     if (!worldId || !playerId || !branchId || !continuationOptions || !playerDead || continuationSubmitting) return
     const selected = continuationOptions.items.find((item) => item.actor_id === selectedContinuationId)
@@ -382,6 +422,32 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
       })
     } finally {
       setContinuationSubmitting(false)
+    }
+  }
+  const checkDelivery = async () => {
+    const request = failedRequest
+    if (!request || checkingDelivery || sending) return
+    const scope = sendScopeRevision.current
+    setCheckingDelivery(true)
+    try {
+      const result = await api.conversation(request.world_id, request.branch_id)
+      if (scope !== sendScopeRevision.current || result.session_id !== request.session_id || result.actor_id !== request.actor_id) return
+      const row = result.items.find((item) => item.request_id === request.request_id)
+      if (!row) {
+        onNotice({ kind: 'info', text: '当前对话记录里还没有这条消息的回执。可以用相同请求重试。' })
+        return
+      }
+      setConversationLoad({ key: conversationRequestKey, conversation: result })
+      setMessages(messagesFromConversation(result.items))
+      const retryCanRecover = row.status === 'failed' && (
+        row.result?.error === 'PROCESS_INTERRUPTED' || row.result?.error === 'STORAGE_BUSY'
+      )
+      if (!retryCanRecover) setFailedRequest(null)
+      if (row.status !== 'running') onRefresh()
+    } catch (reason) {
+      if (scope === sendScopeRevision.current) onNotice({ kind: 'error', text: errorMessage(reason) })
+    } finally {
+      setCheckingDelivery(false)
     }
   }
   const retryFailedRequest = () => { if (failedRequest && !sending) void executeRequest(failedRequest, true) }
@@ -446,6 +512,7 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
     </div>
     <div className="scene-play-grid">
       <PlaySceneCard
+        departureHint={departureHeld ? (hasUnsentSpeech ? '对话框里还有待发送的话。发送或清空后即可出发。' : '消息仍待核对回执，确认后即可出发。') : undefined}
         state={state}
         loading={loading}
         viewError={Boolean(viewError)}
@@ -454,6 +521,8 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
         canPrepareQuery={canPrepareSceneDraft && canPrepareQuery}
         canPlanRoute={canPlanRoute}
         onPrepareDraft={({ mode: draftMode, text, source }) => { if (canPrepareSceneDraft) prepareDraft(text, draftMode, source) }}
+        onObserve={() => send(undefined, { mode: 'ask_gm', text: '观察周围', scene_observation: true })}
+        onOpenCase={openCase}
         onPlanRoute={planRoute}
         onOpenInvestigation={openInvestigation}
         onOpenJourney={openJourneyStatus}
@@ -466,10 +535,23 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
         <div className="conversation-head">
           <div><span className="conversation-mark"><Icon name="spark" size={16} /></span><h2 id="play-story-title">故事与对话</h2></div>
           <div className="scene-story-actions">
+            <button type="button" className="scene-journey-link" onClick={() => {
+              const scene = document.getElementById('play-current-scene')
+              scene?.focus({ preventScroll: true })
+              scene?.scrollIntoView({ block: 'start' })
+            }}>返回现场</button>
             <button type="button" className="scene-journey-link" data-traveling={traveling} aria-controls="play-journey-tools" onClick={openJourneyStatus}>
               <Icon name="clock" size={15} />{traveling ? '行程进度' : '长行动'}
             </button>
-            <button type="button" className="icon-button quiet-button" aria-label="复制对话" title="复制对话" onClick={() => { void navigator.clipboard?.writeText(messages.map((message) => message.role + ': ' + message.content).join('\n\n')); onNotice({ kind: 'info', text: '已复制当前对话。' }) }} disabled={!messages.length}><Icon name="copy" size={16} /></button>
+            <button type="button" className="icon-button quiet-button" aria-label="复制对话" title="复制对话" onClick={async () => {
+              try {
+                if (!navigator.clipboard?.writeText) throw new Error('clipboard_unavailable')
+                await navigator.clipboard.writeText(messages.map((message) => message.role + ': ' + message.content).join('\n\n'))
+                onNotice({ kind: 'info', text: '已复制当前对话。' })
+              } catch {
+                onNotice({ kind: 'error', text: '无法写入剪贴板。可选中对话文字后手动复制。' })
+              }
+            }} disabled={!messages.length}><Icon name="copy" size={16} /></button>
           </div>
         </div>
         {Boolean(state?.story_milestones?.length) && <details className="scene-story-chronicle">
@@ -478,9 +560,9 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
             <strong>{milestone.title}</strong><p>{milestone.summary}</p>
           </li>)}</ul>
         </details>}
-        {worldId && branchId && playerId && view && Boolean(state?.local_challenges?.length) &&
+        {worldId && branchId && playerId && view && Boolean(state?.local_challenges?.length || state?.own_report_receipts?.length) &&
           <ChallengesPanel key={`challenges:${branchId}:${playerId}`} worldId={worldId} branchId={branchId} actorId={playerId}
-            version={view.world.state_version} options={state?.local_challenges ?? []} onRefresh={onRefresh} />}
+            version={view.branch.state_version} options={state?.local_challenges ?? []} receipts={state?.own_report_receipts ?? []} onRefresh={onRefresh} />}
         {worldId && branchId && playerId && view && Boolean(state?.local_contests?.length) &&
           <ContestsPanel key={`contests:${branchId}:${playerId}`} worldId={worldId} branchId={branchId} actorId={playerId}
             version={view.world.state_version} options={state?.local_contests ?? []} onRefresh={onRefresh} />}
@@ -551,14 +633,21 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
                   || state?.case_files?.some((file) => file.id === id)
                   || state?.own_accusation_repair_offers?.some((offer) => offer.offer_id === id)).map((id) =>
                   <button className="text-button" type="button" key={id} onClick={() => linkInvestigation(id)}>查看关联调查记录</button>)}
+                {message.role === 'player' && message.delivery === 'failed' && !failedRequest && <button type="button" className="text-button"
+                  disabled={!composerReady || Boolean(input.trim())}
+                  onClick={() => { setSceneDraft(null); setInput(message.content); composer.current?.focus() }}>取回原话并编辑</button>}
                 {message.jobId && <button type="button" className="text-button" onClick={openJourneyStatus}>查看行动进度和可用选项</button>}
                 {message.role === 'error' && failedRequest?.request_id && message.id === `error-${failedRequest.request_id}` && (
-                  <button className="retry-send" onClick={retryFailedRequest} disabled={sending}><Icon name="refresh" size={13} />使用相同请求重试</button>
+                  <><button className="retry-send" onClick={() => void checkDelivery()} disabled={sending || checkingDelivery}>{checkingDelivery ? '正在核对…' : '核对回执'}</button>
+                    <button className="retry-send" onClick={retryFailedRequest} disabled={sending || checkingDelivery}><Icon name="refresh" size={13} />使用相同请求重试</button></>
                 )}
               </div>
             </article>
           ))}
-          {sending && <div className="typing-indicator"><span /><span /><span /><em>正在发送到本地引擎</em></div>}
+          {sendingRequest && <div role="status" className="typing-indicator"><span /><span /><span /><em>{sendingRequest.scene_observation ? '正在读取角色可见的场景' : sendingRequest.case_anchor_id ? '正在登记私人案卷' : '已发送，正在等待引擎回执'}。刷新后可在本分支查看进度。</em></div>}
+          {recoveredPending && <div className="scene-receipt-status" role="status">{receiptError
+            ? <>{receiptError} <button type="button" className="text-button" onClick={() => setReceiptAttempt((current) => current + 1)}>重新核对回执</button></>
+            : '正在核对上次发送的消息，收到回执后会更新此处。'}</div>}
           {job && <div className="job-strip"><span className="job-pulse" /><span>后台任务 {job.jobId?.slice(0, 8) ?? job.commandId?.slice(0, 8) ?? ''}</span><strong>{jobStatusLabel(job.status)}</strong></div>}
         </div>
         <div className="composer-wrap">
@@ -613,10 +702,11 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
     <details id="play-journey-tools" className="scene-tools" ref={journeyTools}>
       <summary><Icon name="layers" size={18} /><strong>资料与旅程工具</strong><small>调查、账册、治理、历史与长行动</small><Icon name="chevron" size={15} /></summary>
       <div className="scene-tools-content">
+        {departureHeld && <p className="scene-receipt-status" role="status">{hasUnsentSpeech ? '对话框里还有待发送的话。发送或清空后即可出发。' : '请先等候或核对当前消息的回执，再出发。'}</p>}
         <section className="scene-tool-group" aria-labelledby="scene-tools-journey">
           <h3 id="scene-tools-journey">行动与调查</h3>
           {worldId && <div className="scene-journey-status" role="group" aria-labelledby="long-action-title" tabIndex={-1} ref={journeyStatus}>
-            <LongActionPanel worldId={worldId} branchId={branchId} currentTick={view?.branch.current_tick ?? world.current_tick} stateVersion={view?.branch.state_version ?? world.state_version} daySeconds={view?.state.calendar?.day_seconds} yearDays={view?.state.calendar?.year_days} travelOptions={state?.travel_options} travelDraftControls={travelDraftControls} itineraryRouteOptions={state?.itinerary_route_options} currentPlaceId={playerPlaceId} ownActiveTravel={state?.own_active_travel} ownStudySkills={state?.own_study_skills} ownWorkAssignments={state?.own_work_assignments} marketOffers={marketOffers} marketCurrency={marketCurrency} actorId={playerId} chatLongActionJob={chatLongActionJob} profile={profile} profileLoading={profileLoading} profileError={profileError} disabled={loading || Boolean(viewError) || !view || !playerId || !characterCanAct} onRefresh={onRefresh} onNotice={onNotice} />
+            <LongActionPanel worldId={worldId} branchId={branchId} currentTick={view?.branch.current_tick ?? world.current_tick} stateVersion={view?.branch.state_version ?? world.state_version} daySeconds={view?.state.calendar?.day_seconds} yearDays={view?.state.calendar?.year_days} travelOptions={state?.travel_options} travelDraftControls={travelDraftControls} itineraryRouteOptions={state?.itinerary_route_options} currentPlaceId={playerPlaceId} ownActiveTravel={state?.own_active_travel} ownStudySkills={state?.own_study_skills} ownWorkAssignments={state?.own_work_assignments} marketOffers={marketOffers} marketCurrency={marketCurrency} actorId={playerId} chatLongActionJob={chatLongActionJob} profile={profile} profileLoading={profileLoading} profileError={profileError} disabled={loading || Boolean(viewError) || !view || !playerId || !characterCanAct || departureHeld} onRefresh={onRefresh} onNotice={onNotice} />
           </div>}
           <div className="scene-journey-status" role="group" aria-label="调查日志" tabIndex={-1} ref={investigationStatus}>
             <InvestigationJournal
@@ -632,9 +722,10 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
               loading={loading}
               viewError={Boolean(viewError)}
               inputHasText={Boolean(input.trim())}
-              busy={sending || Boolean(failedRequest) || !characterCanAct}
+              busy={!composerReady || !characterCanAct}
               authorMode={modeForActor === 'author'}
               onPrepareAction={prepareActionDraft}
+              onOpenCase={openCase}
             />
           </div>
           {cultivationBreakthroughOptions && cultivationBreakthroughOptions.length > 0 && <Suspense fallback={null}>
@@ -692,6 +783,8 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
             entities={state?.entities ?? {}}
             playerId={playerId}
             currentTick={view?.branch.current_tick ?? world.current_tick}
+            daySeconds={calendar?.day_seconds}
+            yearDays={calendar?.year_days}
             projectionAvailable={Boolean(state && playerId)}
             loading={loading}
             viewError={viewError}

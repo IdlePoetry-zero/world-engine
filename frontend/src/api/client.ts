@@ -30,7 +30,17 @@ export class ApiError extends Error {
 
 export type Session = { principal: { id: string; display_name: string }; permissions: string[] }
 export type World = { world_id: string; title: string; active_branch_id: string | null; current_tick: string; state_version: string; status: string; ruleset_version?: string; pack_version?: string; world_mode?: 'story' }
-export type Pack = { pack_id: string; title: string; version: string; available_versions?: string[]; sustained_available_versions?: string[]; description: string }
+export type Pack = {
+  pack_id: string
+  title: string
+  version: string
+  available_versions?: string[]
+  sustained_available_versions?: string[]
+  subtitle?: string
+  summary?: string
+  description?: string
+  opening_choices?: { title: string; description: string; version?: string }[]
+}
 export type WorldPackPlayerProfile = {
   profile_id: string
   title: string
@@ -70,6 +80,8 @@ export type ChallengeOption = {
   can_attempt_skill?: boolean
   fee: { resource_id: string; quantity: string; label: string } | null
   passed: boolean | null
+  report?: { recipient: string; source: string; statement: string }
+  action_label?: string
 }
 export type ContestAction =
   | { operation: 'invite'; definition_id: string; recipient_id: string; routine: string }
@@ -620,8 +632,10 @@ export type WorldState = {
     public_schedule: { activity: string; place_name: string; start_second: number; duration_seconds: number; every_days: number }[]
     known_changes: { claim: string; received_tick: string }[]
     last_contact_tick?: string
+    schedule_difference?: { usual_place_name: string; current_place_name: string | null }
   }>
   local_challenges?: ChallengeOption[]
+  own_report_receipts?: { id: string; summary: string; submitted_tick: string; source_record_id: string | null }[]
   local_contests?: ContestOption[]
   metadata?: Record<string, unknown>
   resources: Record<string, ResourceAccount>
@@ -737,6 +751,8 @@ export type MessageRequest = {
   mode: 'auto' | 'ask_gm' | 'roleplay' | 'action' | 'author'
   text: string
   draft?: DraftControl
+  scene_observation?: true
+  case_anchor_id?: string
   profile: { speed: 'fast' | 'balanced' | 'patient'; depth: 'standard' | 'deep' | 'exhaustive' }
 }
 export type MessageResponse = { message_id: string; kind: string; content?: string; command_id?: string; job_id?: string; world_effect: boolean; committed_tick?: string; elapsed_ticks?: string; references?: string[]; state_version?: string; action_draft?: ActionDraft; closed_draft_id?: string }
@@ -877,6 +893,7 @@ export type CallRecord = {
   status: string | null
   trace?: CallTraceRecord | null
 }
+export type CallPage = { items: CallRecord[]; next_cursor: string | null; has_more: boolean }
 export type NarrativeRewriteStyle = 'concise' | 'literary'
 export type NarrativeRewrites = Partial<Record<NarrativeRewriteStyle, string>>
 export type NarrativeRewriteResult = { narrative_id: string; style: NarrativeRewriteStyle; content: string; world_effect: false }
@@ -1197,7 +1214,11 @@ export const api = {
   deleteProviderCredential: (providerId: string) => request<void>(`/providers/${encodeURIComponent(providerId)}/credential`, { method: 'DELETE' }, false),
   probeProvider: (providerId: string) => request<{ status?: string; models?: ModelInfo[]; detail?: string }>(`/providers/${encodeURIComponent(providerId)}/probe`, { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() } }, false),
   listModels: (providerId: string) => get<{ items: ModelInfo[] }>(`/models?provider_id=${encodeURIComponent(providerId)}`),
-  listCalls: () => get<{ items: CallRecord[] }>('/operations/calls'),
+  listCalls: (cursor: string | null = null, limit = 100) => {
+    const params = new URLSearchParams({ limit: String(limit) })
+    if (cursor) params.set('cursor', cursor)
+    return get<CallPage>(`/operations/calls?${params.toString()}`)
+  },
   getSettings: () => get<Settings>('/settings'),
   updateSettings: (body: Settings) => put<Settings>('/settings', body),
   validatePack: (draft: unknown) => post<{ valid: boolean; issues: { path: string; message: string; severity: string }[] }>('/packs/validate', draft, crypto.randomUUID()),

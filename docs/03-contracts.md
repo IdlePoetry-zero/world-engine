@@ -1,5 +1,11 @@
 # 世界数据与接口规范
 
+## 机构自主复审
+
+世界包可在创世状态登记 `organizational_strategies`。每个组织有自己的使命文本、章程授权、复审周期和可比较的有条件目标。排程同时绑定组织 UUID 和组织内策略标识。执行时只检查该组织的现有人员、状态及自有账户。首个满足条件并有足够可用资源的目标获得执行，结果可为延期或不行动。
+
+`core.organization_strategy_review_resolved.v1` 保存组织、复审批次、条件观测、当时有效的经办权限及可能发生的内部划拨。重放从前态复算并校验回执，账本的借贷两侧使用同一资源和数量。策略证据默认仅在作者历史可查。未来的实际结果不写入使命或目标文本。
+
 本规范定义实现前的协议基线。字段类型、错误语义和不变量是模块之间的约束；实现时将其转成 JSON Schema、OpenAPI 与契约测试。示例是协议说明，不是已运行的产品代码。
 
 ## 标识与基本类型
@@ -170,7 +176,7 @@ LLM 可提出参数与备选语义，不能决定余额检查结果或自行创�
 | POST /worlds/{id}/interventions | preview_id、expected_version | 创建干预事件或分支 |
 | GET /models | provider_id | 模型发现与能力信息 |
 | POST /providers/{id}/probe | 供应商 ID | 读取供应商模型目录，生成能力另需实际生成验证 |
-| GET /operations/calls | 当前身份的调用记录 | 返回模型职责、用量、费用、时延和结束原因，不含提示正文 |
+| GET /operations/calls?limit=&cursor= | 当前身份的调用记录；limit 默认为 100、范围 1–500，cursor 为不透明键集游标 | 按开始时间和唯一调用 ID 稳定倒序返回一页，并提供 next_cursor/has_more；不含提示正文 |
 | GET /worlds/{id}/backup | 可选 format_version | 下载单世界归档，包含已提交历史和归档支持的作者资料，不含凭据 |
 | POST /restores/preview | 归档的 ZIP 字节 | 核对版本、完整性和回放，返回预览标识及可用规则迁移 |
 | POST /restores | 同一归档、Preview-Id 和可选 Target-Ruleset-Version | 确认后恢复为独立世界，原存档继续可用 |
@@ -211,6 +217,10 @@ LLM 可提出参数与备选语义，不能决定余额检查结果或自行创�
 统一错误结构包含 code、message、retryable、field_errors、correlation_id、committed_through_tick。主要错误为 AUTH_REQUIRED、FORBIDDEN、STALE_VERSION、AMBIGUOUS_INTENT、RULE_REJECTED、INSUFFICIENT_RESOURCE、MODEL_UNAVAILABLE、MODEL_INVALID_OUTPUT、PACK_INCOMPATIBLE、JOB_CANCELLED 和 STORAGE_UNAVAILABLE。RULE_REJECTED 是游戏结果或可纠正输入，不自动当服务 500 错误。
 
 有主线世界包可以在介入点声明 `player_profiles`。预览只返回公开资料；导入时可在 `X-Player-Setup` 提供百分号编码的 UTF-8 JSON，字段限于 `profile_id`、`name`、`description`。不允许自行传入组件、能力或账户余额。配置仅作用于新世界的玩家角色。包内的 `food_requirement=not_required` 只移除进食需求，其余需求保持原开局。幂等键绑定归一化的角色配置与介入点。
+
+`POST /api/v1/worlds/{world_id}/messages` 可用 `scene_observation: true` 请求只读场景回执，模式为 `ask_gm`。也可用 `case_anchor_id` 请求为已选的可见线索建立私人案卷，模式为 `action`。两种选项互斥，沿用角色、分支、会话与请求幂等校验；案卷仍由正式规则验证。正文可编辑的自由输入走普通消息流程。
+
+故事关卡的报告配置可以固定收件人与来源要求。剧情条件 `report_registered` 匹配已提交的正式回执及来源类型。界面可以显示该玩家自己提交的回执。既有归档按其保存的普通考核与里程碑定义重放。
 
 ## 多人协调接口
 

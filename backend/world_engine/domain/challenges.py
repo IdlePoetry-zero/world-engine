@@ -6,12 +6,13 @@ from graphlib import CycleError, TopologicalSorter
 from typing import TYPE_CHECKING, Annotated, Literal
 from uuid import UUID, uuid5
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StringConstraints, model_validator
 
 from .components import CapabilitiesComponent, ExactDecimal, KnowledgeRecord, ResourceName, SkillsComponent, Tick, VisibilityScope
 from .errors import InvalidEvent
+from .investigation import entity_visible_to_actor
 from .json_types import JsonObject
-from .story_nodes import STORY_NODE_HANDLER, StoryTransfer, transfer_is_affordable
+from .story_nodes import STORY_NODE_HANDLER, ReportSource, StoryTransfer, transfer_is_affordable
 
 if TYPE_CHECKING:
     from .models import WorldState
@@ -30,12 +31,38 @@ class ChallengeFee(_ChallengeModel):
     quantity: ExactDecimal = Field(gt=0)
 
 
+class ReportTerms(_ChallengeModel):
+    recipient_id: UUID
+    source_kind: ReportSource
+    statement: Annotated[str, StringConstraints(min_length=1, max_length=500)]
+    rumor_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @model_validator(mode="after")
+    def attributed_rumor(self):
+        if (self.source_kind == "hearsay") != (self.rumor_id is not None):
+            raise ValueError("A hearsay report requires its specific rumor.")
+        return self
+
+
+class ReportReceipt(_ChallengeModel):
+    recipient_id: UUID
+    source_kind: ReportSource
+    statement: str = Field(min_length=1, max_length=500)
+    source_record_id: UUID | None = None
+
+
+_REPORT_LABELS = {"observation": "亲眼观察", "hearsay": "他人转述", "self_report": "未经核实的自述", "suggestion": "建议"}
+
+
 class ChallengeDefinition(_ChallengeModel):
     version: Literal["1.0.0"] = "1.0.0"
     challenge_id: UUID
     venue_id: UUID
     title: Annotated[str, StringConstraints(min_length=1, max_length=120)]
     description: Annotated[str, StringConstraints(min_length=1, max_length=500)]
+    action_label: Annotated[str, StringConstraints(min_length=1, max_length=40)] | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     skill_id: ResourceName
     skill_label: Annotated[str, StringConstraints(min_length=1, max_length=120)] | None = None
     pass_level: ExactDecimal = Field(ge=0, le=100)
@@ -47,6 +74,7 @@ class ChallengeDefinition(_ChallengeModel):
         default=None, exclude_if=lambda value: value is None,
     )
     required_note_from: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
+    report: ReportTerms | None = Field(default=None, exclude_if=lambda value: value is None)
     opens_after_story_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
     closes_after_story_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
 
@@ -56,6 +84,7 @@ class ChallengeAttempt(_ChallengeModel):
     actor_id: UUID
     completed_tick: Tick
     passed: StrictBool
+    report: ReportReceipt | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class ChallengeResolvedEvent(_ChallengeModel):
@@ -79,6 +108,8 @@ def _available_at_venue(state: WorldState, actor_id: UUID, definition: Challenge
 
 
 def _has_prerequisites(state: WorldState, actor_id: UUID, definition: ChallengeDefinition) -> bool:
+    if definition.report is not None and _report_receipt(state, actor_id, definition) is None:
+        return False
     if definition.prerequisite_id is not None and not any(
         row.actor_id == actor_id and row.challenge_id == definition.prerequisite_id and row.passed
         for row in state.challenge_attempts
@@ -89,6 +120,36 @@ def _has_prerequisites(state: WorldState, actor_id: UUID, definition: ChallengeD
         and record.visibility.policy == "subject_ids" and actor_id in record.visibility.subject_ids
         for record in state.knowledge
     )
+
+
+def _report_receipt(state: WorldState, actor_id: UUID, definition: ChallengeDefinition) -> ReportReceipt | None:
+    terms = definition.report
+    if terms is None:
+        return None
+    recipient = state.entities.get(terms.recipient_id)
+    if (recipient is None or recipient.status != "active" or recipient.location_id != definition.venue_id
+            or recipient.id == actor_id or not entity_visible_to_actor(state, actor_id, recipient.id)):
+        return None
+    source_id = terms.rumor_id
+    if terms.source_kind == "observation":
+        if definition.required_note_from is None:
+            return None
+        source_id = uuid5(definition.required_note_from, f"note:{actor_id}")
+    if source_id is not None:
+        source = next((row for row in state.knowledge if row.id == source_id), None)
+        if (source is None or source.holder_id != actor_id or source.claim != terms.statement
+                or source.kind != ("observation" if terms.source_kind == "observation" else "rumor")
+                or source.received_tick > state.current_tick
+                or source.valid_from_tick is not None and source.valid_from_tick > state.current_tick
+                or source.visibility.policy != "subject_ids" or actor_id not in source.visibility.subject_ids):
+            return None
+        if terms.source_kind == "observation" and (source.source_event_id is None or not any(
+            row.challenge_id == definition.required_note_from and row.actor_id == actor_id and row.passed
+            for row in state.challenge_attempts
+        )):
+            return None
+    return ReportReceipt(recipient_id=recipient.id, source_kind=terms.source_kind,
+                         statement=terms.statement, source_record_id=source_id)
 
 
 def open_challenges(state: WorldState, actor_id: UUID) -> list[dict]:
@@ -108,12 +169,33 @@ def open_challenges(state: WorldState, actor_id: UUID) -> list[dict]:
             "skill_label": row.skill_label or row.skill_id, "pass_level": str(row.pass_level),
             "current_level": str(skill.level) if skill is not None else None,
             "requires_pass_level": row.requires_pass_level,
-            "can_attempt_skill": skill is not None and (not row.requires_pass_level or skill.level >= row.pass_level),
+            "can_attempt_skill": row.report is not None or skill is not None and (not row.requires_pass_level or skill.level >= row.pass_level),
             "fee": ({"resource_id": row.fee.resource_id, "quantity": str(row.fee.quantity),
                      "label": label if isinstance(label, str) else row.fee.resource_id} if row.fee else None),
             "passed": receipt.passed if receipt else None,
+            **({"action_label": row.action_label} if row.action_label else {}),
+            **({"report": {"recipient": state.entities[row.report.recipient_id].name,
+                           "source": _REPORT_LABELS[row.report.source_kind], "statement": row.report.statement}}
+               if row.report is not None else {}),
         })
     return options
+
+
+def own_report_receipts(state: WorldState, actor_id: UUID) -> list[dict]:
+    filed = [row for row in state.challenge_attempts if row.actor_id == actor_id and row.report is not None]
+    if not filed:
+        return []
+    own_notes = {note.id: note for note in state.knowledge if note.owner_id == actor_id
+                 and note.visibility.policy == "subject_ids" and actor_id in note.visibility.subject_ids
+                 and note.received_tick <= state.current_tick}
+    receipts = []
+    for row in reversed(filed):
+        receipt_id = uuid5(row.challenge_id, f"report:{actor_id}")
+        note = own_notes.get(receipt_id)
+        if note is not None:
+            receipts.append({"id": str(receipt_id), "summary": note.claim, "submitted_tick": str(row.completed_tick),
+                             "source_record_id": str(row.report.source_record_id) if row.report.source_record_id else None})
+    return receipts
 
 
 def settle_challenge(state: WorldState, challenge_id: UUID, actor_id: UUID, event_id: UUID) -> ChallengeResolvedEvent:
@@ -130,9 +212,9 @@ def settle_challenge(state: WorldState, challenge_id: UUID, actor_id: UUID, even
     ):
         raise InvalidEvent("当前角色缺少参加这项考核的资格。")
     skill = SkillsComponent.model_validate(actor.components.get("skills", {})).skills.get(definition.skill_id)
-    if skill is None:
+    if skill is None and definition.report is None:
         raise InvalidEvent("请先学习这项考核所要求的技能。")
-    if definition.requires_pass_level and skill.level < definition.pass_level:
+    if definition.requires_pass_level and skill is not None and skill.level < definition.pass_level:
         raise InvalidEvent("当前技能尚未达到报名门槛。可以先修习，未消耗考核机会。")
     fee = None
     if definition.fee is not None:
@@ -146,7 +228,9 @@ def settle_challenge(state: WorldState, challenge_id: UUID, actor_id: UUID, even
         if not transfer_is_affordable(state, fee):
             raise InvalidEvent("费用无法按登记金额结算。")
     return ChallengeResolvedEvent(event_id=event_id, fee=fee, attempt=ChallengeAttempt(
-        challenge_id=challenge_id, actor_id=actor_id, completed_tick=state.current_tick, passed=skill.level >= definition.pass_level,
+        challenge_id=challenge_id, actor_id=actor_id, completed_tick=state.current_tick,
+        passed=definition.report is not None or skill is not None and skill.level >= definition.pass_level,
+        report=_report_receipt(state, actor_id, definition),
     ))
 
 
@@ -154,6 +238,17 @@ def challenge_note(state: WorldState, event: ChallengeResolvedEvent) -> Knowledg
     if not event.attempt.passed:
         return None
     definition = next(row for row in state.challenges if row.challenge_id == event.attempt.challenge_id)
+    report = event.attempt.report
+    if report is not None:
+        sender = event.attempt.actor_id
+        recipient = state.entities[report.recipient_id]
+        return KnowledgeRecord(
+            id=uuid5(definition.challenge_id, f"report:{sender}"), holder_id=report.recipient_id, owner_id=sender,
+            subject_id=report.recipient_id, claim=f"向{recipient.name}登记了{_REPORT_LABELS[report.source_kind]}：{report.statement}",
+            source_refs=[report.source_record_id] if report.source_record_id else [], source_event_id=event.event_id,
+            kind="memory", received_tick=state.current_tick, valid_from_tick=state.current_tick,
+            visibility=VisibilityScope(policy="subject_ids", subject_ids=[sender, report.recipient_id]),
+        )
     if definition.note_on_pass is None:
         return None
     actor_id = event.attempt.actor_id
@@ -176,6 +271,16 @@ def validate_challenge_state(state: WorldState) -> None:
     story_nodes.update(row.reaction_id for row in state.story_reactions)
     story_nodes.update(row.followup_id for row in state.story_followups)
     for row in state.challenges:
+        if row.report:
+            recipient = state.entities.get(row.report.recipient_id)
+            if (recipient is None or recipient.kind not in {"person", "character"}
+                    or (row.report.source_kind == "observation") != (row.required_note_from is not None)
+                    or row.note_on_pass is not None or row.pass_level != 0):
+                raise ValueError("Report registration must use valid sources, a recipient and no skill threshold.")
+            if row.report.source_kind == "observation":
+                source = definitions.get(row.required_note_from)
+                if source is None or source.note_on_pass != row.report.statement:
+                    raise ValueError("Observation reports must quote the required source note.")
         timing = [item for item in (row.opens_after_story_id, row.closes_after_story_id) if item is not None]
         if len(set(timing)) != len(timing) or not set(timing).issubset(story_nodes):
             raise ValueError("Challenge story bounds must reference distinct registered milestones.")
@@ -206,4 +311,14 @@ def validate_challenge_state(state: WorldState) -> None:
         if (key in attempts or row.challenge_id not in definitions or row.completed_tick > state.current_tick
                 or actor is None or actor.kind not in {"person", "character"}):
             raise ValueError("A challenge receipt must refer to one valid completed attempt.")
+        definition = definitions[row.challenge_id]
+        terms = definition.report
+        if terms is None and row.report is not None:
+            raise ValueError("An ordinary challenge cannot carry a report receipt.")
+        if terms is not None:
+            expected_source = (uuid5(definition.required_note_from, f"note:{row.actor_id}")
+                               if definition.required_note_from is not None else terms.rumor_id)
+            if not row.passed or row.report != ReportReceipt(recipient_id=terms.recipient_id, source_kind=terms.source_kind,
+                                                              statement=terms.statement, source_record_id=expected_source):
+                raise ValueError("A report receipt must match its registered statement and source.")
         attempts.add(key)

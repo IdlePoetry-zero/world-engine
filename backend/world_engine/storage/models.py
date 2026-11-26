@@ -19,6 +19,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     Uuid,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -157,6 +158,11 @@ class EventRow(Base):
         UniqueConstraint("event_id", name="uq_event_id"),
         Index("ix_events_world_tick", "world_id", "tick"),
         Index("ix_events_command", "command_id"),
+        Index(
+            "ix_events_direct_move_branch_sequence", "world_id", "branch_id", "sequence",
+            sqlite_where=text("event_type = 'core.movement_completed.v1'"),
+            postgresql_where=text("event_type = 'core.movement_completed.v1'"),
+        ),
         CheckConstraint("sequence >= 1", name="sequence_positive"),
         CheckConstraint("state_version_after >= 1", name="state_version_positive"),
     )

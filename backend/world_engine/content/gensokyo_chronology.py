@@ -13,6 +13,7 @@ from world_engine.domain.story_nodes import (
 from world_engine.domain.world_books import WorldBookEntry
 
 from .gensokyo_reference import _id
+from .gensokyo_mist_reports import SOURCES, report_id
 from .gensokyo_village_life import local_aid
 
 MORIYA_SURVEY_PERMIT = "gensokyo.moriya_survey_passage"
@@ -114,6 +115,38 @@ CONTINUATION_DAYS = {
 }
 
 
+def _incident_variants(chapter: Chapter, player_id: UUID, contact_id: UUID) -> list[dict]:
+    if chapter.key == "scarlet-mist":
+        return [{
+            "when": [{"kind": "report_registered", "actor_id": player_id, "recipient_id": contact_id,
+                      "source_kind": kind, "challenge_id": report_id(kind)}],
+            "outcome": {"key": outcome, "effect": "mitigated" if kind == "observation" else "occurred",
+                        "summary": summary},
+        } for kind, (_, _, outcome, summary) in SOURCES.items()]
+
+    variants = [{
+        "when": [
+            {"kind": "challenge_passed", "actor_id": player_id,
+             "challenge_id": _id(f"world:incident:{chapter.key}:report")},
+            {"kind": "world_condition", "owner_id": player_id, "condition": {
+                "kind": "relationship_dimension_minimum", "subject_id": player_id,
+                "target_id": contact_id, "dimension": "familiarity", "threshold": "1",
+            }},
+        ],
+        "outcome": {"key": "player-report", "effect": "mitigated", "summary": chapter.joined},
+    }]
+    if chapter.key == "mountain-shrine":
+        variants.append({
+            "when": [{"kind": "challenge_passed", "actor_id": player_id, "challenge_id": MORIYA_SURVEY_ID}],
+            "outcome": {
+                "key": "survey-passage", "effect": "mitigated",
+                "summary": "山道核查获认可。守矢神社准许你试行已核查的近道，口粮仍依原来安排。",
+                "awards": [{"actor_id": player_id, "capability": MORIYA_SURVEY_PERMIT}],
+            },
+        })
+    return variants
+
+
 def incident_nodes(
     chapter: Chapter,
     evidence: WorldBookEntry,
@@ -135,6 +168,7 @@ def incident_nodes(
             "contact_id": contact_id,
             "lead_ticks": chapter.hours * 3600,
             **({
+                "detail": "人里村口可查验日影。到神社后，可把现场笔记交给灵梦，也可转述行商所言、登记自述或提出建议。",
                 "known_cost": "从人间之里到博丽神社，按当前开放路线步行约需 45 分钟。",
                 "possible_impact": "及时登记目击可影响灵梦的调查和神社对受红雾影响者的安置。口粮属于公共救济。",
             } if chapter.key == "scarlet-mist" else {}),
@@ -144,24 +178,7 @@ def incident_nodes(
                 "possible_impact": "交涉提案可促成口粮援助。若只完成核查，可获得山道试行资格。",
             } if chapter.key == "mountain-shrine" else {}),
         },
-        "variants": [{
-            "when": [
-                {"kind": "challenge_passed", "actor_id": player_id,
-                 "challenge_id": _id(f"world:incident:{chapter.key}:report")},
-                {"kind": "world_condition", "owner_id": player_id, "condition": {
-                    "kind": "relationship_dimension_minimum", "subject_id": player_id,
-                    "target_id": contact_id, "dimension": "familiarity", "threshold": "1",
-                }},
-            ],
-            "outcome": {"key": "player-report", "effect": "mitigated", "summary": chapter.joined},
-        }, *([{
-            "when": [{"kind": "challenge_passed", "actor_id": player_id, "challenge_id": MORIYA_SURVEY_ID}],
-            "outcome": {
-                "key": "survey-passage", "effect": "mitigated",
-                "summary": "山道核查获认可。守矢神社准许你试行已核查的近道，口粮仍依原来安排。",
-                "awards": [{"actor_id": player_id, "capability": MORIYA_SURVEY_PERMIT}],
-            },
-        }] if chapter.key == "mountain-shrine" else [])],
+        "variants": _incident_variants(chapter, player_id, contact_id),
         "fallback": {"key": "independent", "effect": "occurred", "summary": chapter.independent},
     })
     schedule = ScheduledEventRecord(
@@ -202,4 +219,7 @@ def incident_nodes(
     )
     if chapter.key == "mountain-shrine":
         afters += (after("survey-passage", "山道试行资格已登记，外来访客仍适用原有通行安排。"),)
+    if chapter.key == "scarlet-mist":
+        afters += tuple(after(key, "神社已收存本轮登记。") for kind, (_, _, key, _) in SOURCES.items()
+                        if kind != "observation")
     return schedule, afters

@@ -194,6 +194,38 @@ def test_trusted_post_write_publication_can_seed_a_hot_view(monkeypatch: pytest.
     assert cache_hit and cached == state and cached is not state
 
 
+def test_committed_publication_adopts_private_state_and_regular_reads_stay_detached(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    state, raw_payload, metadata = _branch_state()
+    cache = ValidatedBranchStateCache()
+    encoded_payload = cache._encode_payload(raw_payload)
+
+    def unexpected_copy(_state):
+        raise AssertionError("committed publication should transfer its private reducer result")
+
+    monkeypatch.setattr(cache, "_copy_state", unexpected_copy)
+    assert cache._publish_committed_state(
+        world_id=metadata["world_id"],
+        branch_id=metadata["branch_id"],
+        encoded_payload=encoded_payload,
+        stored_digest=metadata["stored_digest"],
+        state_version=metadata["state_version"],
+        current_tick=metadata["current_tick"],
+        state=state,
+    )
+
+    # Normal cache users still receive independent models even though the
+    # private post-commit publisher retained the reducer result by reference.
+    monkeypatch.undo()
+    returned, cache_hit = _load(cache, raw_payload, metadata)
+    assert cache_hit and returned is not state
+    returned.metadata["custom"]["nested"].append("caller mutation")
+    another, again_hit = _load(cache, raw_payload, metadata)
+    assert again_hit
+    assert another.metadata["custom"]["nested"] == ["original"]
+
+
 def test_lru_entry_and_serialized_byte_budgets_are_enforced(monkeypatch: pytest.MonkeyPatch):
     cache = ValidatedBranchStateCache(max_entries=2, max_serialized_bytes=1_000_000)
     validations = 0

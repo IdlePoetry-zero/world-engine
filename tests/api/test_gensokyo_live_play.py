@@ -13,6 +13,7 @@ from world_engine.application.operations import ModelOperations
 from world_engine.application.simulation_jobs import SimulationJobs
 from world_engine.content.gensokyo_chronology import MORIYA_SURVEY_ID, MORIYA_SURVEY_PERMIT
 from world_engine.content.gensokyo_reference import _id
+from world_engine.content.gensokyo_mist_reports import CHECK_ID, RUMOR_ID, SOURCES, report_id as mist_report_id
 from world_engine.content.gensokyo_village_life import local_aid
 from world_engine.content.gensokyo_world import CHAPTERS, actor_id, build_archive
 from world_engine.domain.models import JobStatus
@@ -28,7 +29,8 @@ def test_scarlet_mist_dialogue_changes_the_chapter_with_autonomous_npc_travel(tm
     village = str(_id(f"place:{chapter.start}"))
     incident = str(_id(f"world:incident:{chapter.key}"))
     report_id = str(_id(f"world:incident:{chapter.key}:report"))
-    player_words = "灵梦，我在村口看到红雾越过屋顶，想把目击情况告诉你。"
+    player_words = "灵梦，今天只是来问好，不登记线索。"
+    denial = "我没有目击北面的雾，也没有可以提交的报告。"
     buy_words = "我购买一份米粮。"
     npc_words = "我会去人里核对红雾最先出现的位置。"
     planning_branches = []
@@ -44,7 +46,7 @@ def test_scarlet_mist_dialogue_changes_the_chapter_with_autonomous_npc_travel(tm
             else:
                 output = {"target_id": contact, "clarification": ""}
         elif role == RoleTask.SOCIAL_ADJUDICATION:
-            assert player_words in request.messages[-1].content
+            assert any(words in request.messages[-1].content for words in (player_words, denial))
             output = {"utterance": npc_words}
         elif role == RoleTask.NPC_DECISION:
             context = json.loads(request.messages[-1].content)
@@ -136,6 +138,7 @@ def test_scarlet_mist_dialogue_changes_the_chapter_with_autonomous_npc_travel(tm
 
         start = view(main)["state"]
         player = start["player_id"]
+        inactive = fork(view(main), "Stay in the village and let the incident play out")
         assert start["entities"][player]["location_id"] == village
         assert contact not in start["entities"]
         assert any(row["resource_id"] == "gensokyo.rice" for row in start["market_offers"]["offers"])
@@ -150,8 +153,17 @@ def test_scarlet_mist_dialogue_changes_the_chapter_with_autonomous_npc_travel(tm
                            if item["owner_id"] == player}
         assert player_balances == {"gensokyo.copper": "29", "gensokyo.rice": "1"}
         shrine_name = view(main, "author")["state"]["entities"][shrine]["name"]
+        without_note = fork(view(main), "Leave without inspecting the village")
+        def register(branch, challenge, key):
+            body = {"branch_id": branch, "actor_id": player, "expected_state_version": view(branch)["branch"]["state_version"]}
+            return client.post(f"{path}/challenges/{challenge}/attempt", headers={"Idempotency-Key": key}, json=body)
+
+        register(main, CHECK_ID, "check-shadow").raise_for_status()
         route = next(row for row in start["travel_options"] if row["destination_name"] == shrine_name)
         run_job(main, "long-actions", int(route["travel_ticks"]), activity="travel", route_id=route["route_id"])
+        run_job(without_note, "long-actions", int(route["travel_ticks"]), activity="travel", route_id=route["route_id"])
+        assert all(row["challenge_id"] != report_id for row in view(without_note)["state"]["local_challenges"])
+        assert register(without_note, report_id, "unearned-observation").status_code == 409
 
         local = view(main)
         assert local["state"]["entities"][player]["location_id"] == shrine
@@ -175,25 +187,57 @@ def test_scarlet_mist_dialogue_changes_the_chapter_with_autonomous_npc_travel(tm
         assert view(no_contact, "author")["state_hash"] == baseline["state_hash"]
         dialogue_only = fork(after_dialogue, "Talk without registering a report")
         assert view(dialogue_only, "author")["state_hash"] == after_dialogue["state_hash"]
+        denied = fork(local, "Explicitly deny having a report")
+        client.post(f"{path}/messages", headers={"Origin": origin}, json={
+            "world_id": str(world_id), "branch_id": denied, "request_id": str(uuid4()), "session_id": str(uuid4()),
+            "actor_id": player, "expected_state_version": view(denied)["branch"]["state_version"],
+            "mode": "roleplay", "text": denial,
+        }).raise_for_status()
+        other_reports = []
+        for kind in ("hearsay", "self_report", "suggestion"):
+            branch = fork(local, kind)
+            register(branch, mist_report_id(kind), kind).raise_for_status()
+            receipt = view(branch, "author")["state"]["challenge_attempts"][-1]["report"]
+            assert receipt["source_kind"] == kind and receipt["recipient_id"] == contact
+            assert receipt["source_record_id"] == (str(RUMOR_ID) if kind == "hearsay" else None)
+            other_reports.append((branch, SOURCES[kind][2]))
 
         assert any(row["challenge_id"] == report_id for row in view(main)["state"]["local_challenges"])
+        register(main, mist_report_id("hearsay"), "earlier-rumor").raise_for_status()
+        registration_version = view(main)["branch"]["state_version"]
         report = client.post(f"{path}/challenges/{report_id}/attempt", headers={"Idempotency-Key": "report-red-mist"}, json={
-            "branch_id": main, "actor_id": player, "expected_state_version": after_dialogue["branch"]["state_version"],
+            "branch_id": main, "actor_id": player, "expected_state_version": registration_version,
         }).raise_for_status().json()
         assert report["passed"]
+        duplicate = client.post(f"{path}/challenges/{report_id}/attempt", headers={"Idempotency-Key": "report-red-mist"}, json={
+            "branch_id": main, "actor_id": player, "expected_state_version": registration_version,
+        }).raise_for_status().json()
+        assert duplicate == report
+        records = view(main, "author")["state"]["challenge_attempts"]
+        observation, = [row["report"] for row in records if row["challenge_id"] == report_id]
+        assert observation["source_record_id"] == str(uuid5(CHECK_ID, f"note:{player}"))
 
         incident_tick = chapter.hours * 3600
-        duration = incident_tick + 3600 - int(after_dialogue["state"]["current_tick"])
         relief = local_aid(chapter.key).transfer
-        for branch, outcome in ((main, "player-report"), (dialogue_only, "independent"), (no_contact, "independent")):
+        branches = [(main, "player-report"), (dialogue_only, "independent"), (denied, "independent"),
+                    (no_contact, "independent"), (inactive, "independent"), *other_reports]
+        summaries = {key: summary for _, _, key, summary in SOURCES.values()} | {"independent": chapter.independent}
+        for branch, outcome in branches:
+            before_advance = view(branch)
+            duration = incident_tick + 3600 - int(before_advance["branch"]["current_tick"])
             job_id = run_job(branch, "world-advance", duration)
             final = view(branch, "author")
             state = final["state"]
             result = next(row for row in state["story_milestones"] if row["schedule_id"] == incident)
             assert result["outcome"] == outcome and int(result["resolved_tick"]) == incident_tick
             public = next(row for row in view(branch)["state"]["story_milestones"] if row["record_id"] == incident)
-            assert public["summary"] == (chapter.joined if branch == main else chapter.independent)
-            assert state["entities"][player]["location_id"] == shrine
+            assert public["summary"] == summaries[outcome]
+            own_reports = view(branch)["state"].get("own_report_receipts", [])
+            assert len(own_reports) == (2 if branch == main else 0 if outcome == "independent" else 1)
+            if branch == main:
+                assert own_reports[0]["source_record_id"] == str(uuid5(CHECK_ID, f"note:{player}"))
+                assert own_reports[1]["source_record_id"] == str(RUMOR_ID)
+            assert state["entities"][player]["location_id"] == (village if branch == inactive else shrine)
             assert state["entities"][contact]["location_id"] == village
             followup = next(row for row in state["story_milestones"] if row["schedule_id"] == str(
                 _id(f"world:incident:{chapter.key}:{outcome}:followup")
@@ -206,7 +250,7 @@ def test_scarlet_mist_dialogue_changes_the_chapter_with_autonomous_npc_travel(tm
             assert repository.replay(scope, world_id, UUID(branch), from_genesis=True).state_hash == final["state_hash"]
 
             events = []
-            cursor = local["last_seq"]
+            cursor = before_advance["last_seq"]
             while cursor is not None:
                 page = client.get(f"{path}/history", params={"branch_id": branch, "after": cursor}).raise_for_status().json()
                 events.extend(page["items"])
@@ -221,7 +265,14 @@ def test_scarlet_mist_dialogue_changes_the_chapter_with_autonomous_npc_travel(tm
             assert departure["command_id"] == str(uuid5(job_id, f"window:{departure_window}"))
             assert departure["payload"]["journey"]["to_place_id"] == village
 
-        assert planning_branches == [main, dialogue_only, no_contact]
+        assert planning_branches == [branch for branch, _ in branches]
+        previous = view(main)["state"]
+        village_name = previous["entities"][village]["name"]
+        return_route = next(row for row in previous["travel_options"] if row["destination_name"] == village_name)
+        run_job(main, "long-actions", int(return_route["travel_ticks"]), activity="travel", route_id=return_route["route_id"])
+        back_home = view(main)["state"]
+        assert back_home["entities"][player]["location_id"] == village
+        assert back_home["own_report_receipts"] == previous["own_report_receipts"]
 
 
 def test_moriya_survey_report_and_inactivity_have_distinct_world_consequences(tmp_path, monkeypatch):

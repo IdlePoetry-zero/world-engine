@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 TRAVEL_RESOLUTION_HANDLER_ID = "travel.journey_resolve"
 TRAVEL_RESOLUTION_HANDLER_VERSION = "1.0.0"
+COMPACT_ROUTINE_JOURNEY_POLICY = "compact_routine_journeys_v1"
 _MAX_TICK = 2**63 - 1
 _MIN_TICK = -(2**63)
 TravelJourneyTick = Annotated[StrictInt, Field(ge=_MIN_TICK, le=_MAX_TICK)]
@@ -80,6 +81,13 @@ def travel_resolution_schedule_id(journey_id: UUID) -> UUID:
     if not isinstance(journey_id, UUID):
         raise ValueError("travel resolution schedules require a UUID journey ID")
     return uuid5(journey_id, "travel-journey-resolution")
+
+
+def travel_resolution_payload_matches(payload: Mapping, journey_id: UUID) -> bool:
+    expected = {"journey_id": str(journey_id)}
+    return payload == expected or (
+        payload.get("routine_history_only") is True and payload == (expected | {"routine_history_only": True})
+    )
 
 
 def active_travel_journey(state: WorldState, actor_id: UUID) -> TravelJourney | None:
@@ -257,7 +265,7 @@ def plan_travel_resolution(
         or schedule.max_runs != 1
         or schedule.repeat_ticks is not None
         or schedule.completed_runs != 0
-        or schedule.payload != {"journey_id": str(journey.journey_id)}
+        or not travel_resolution_payload_matches(schedule.payload, journey.journey_id)
     ):
         raise InvalidEvent("Travel journey does not match its original queued resolution schedule.")
 

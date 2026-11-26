@@ -94,7 +94,7 @@ Ollama 适配器使用 /api/tags 发现模型，/api/chat 生成文本。能力�
 
 每个调用保存 request_id、parent_trace、world、branch、job、role、provider、requested_model、reported_model、配置版本、开始结束时间、排队时长、首 token 时间、校验时长、重试次数、结束原因与错误类别。
 
-Token 分开记录输入、缓存输入、非缓存输入、输出、推理以及其他供应商项目；供应商输出若已包含推理 token，不再重复加总。用量缺失显示 unknown；本地估算与服务端报告分列。用户看到单次、回合、世界、角色职责、模型、日期的汇总，并能导出不含秘密的 CSV。
+Token 分开记录输入、缓存输入、非缓存输入、输出、推理以及其他供应商项目；供应商输出若已包含推理 token，不再重复加总。用量缺失显示 unknown；本地估算与服务端报告分列。用户看到单次、回合、世界、角色职责、模型、日期的汇总，并能导出不含秘密的 CSV。调用记录按开始时间和唯一调用 ID 键集分页，翻页时新写入的较新调用不会重复进入后续页；界面分别提供当前页 CSV 和读取全部分页的全量 CSV。
 
 生成职责可配置单次输出 Token 上限，留空沿用该请求的默认参数。调用追踪记录实际发给适配器的请求上限，供应商用量和费用按返回值与费率另算。DeepSeek Chat Completions 的 `length` 也可能由上下文窗口用尽触发，因此截断提示同时提供调整输出上限和缩短输入两种恢复方式。 [DeepSeek Chat Completions API](https://api-docs.deepseek.com/api/create-chat-completion/)
 

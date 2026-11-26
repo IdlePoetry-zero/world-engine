@@ -20,7 +20,7 @@ def catalog() -> ContentCatalog:
 def test_sustained_240_roster_and_pack_picker_defaults_stay_unchanged(catalog, pack) -> None:
     listed_pack = next(item for item in catalog.list_packs() if item["pack_id"] == pack.pack_id)
     assert listed_pack["version"] == "2.0.0"
-    assert listed_pack["available_versions"] == ["2.0.0", "2.2.0", "2.3.0", "2.8.0", "2.12.0"]
+    assert listed_pack["available_versions"] == ["2.0.0", "2.2.0", "2.3.0", "2.8.0", "2.12.0", "2.13.0"]
     expected_sustained_versions = ["2.4.0"]
     if pack.pack_id == "modern_city":
         expected_sustained_versions.extend(["2.5.0", "2.6.0", "2.7.0", "2.10.0"])

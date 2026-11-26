@@ -990,6 +990,7 @@ class GoalRecord(ComponentModel):
     owner_id: UUID
     title: str = Field(min_length=1, max_length=240)
     description: str = Field(default="", max_length=4000)
+    counterpart_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
     status: Literal["active", "paused", "succeeded", "failed", "abandoned"] = "active"
     priority: int = Field(default=50, ge=0, le=100)
     deadline: Tick | None = None

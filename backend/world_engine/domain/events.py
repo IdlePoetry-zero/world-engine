@@ -64,6 +64,8 @@ from .autonomous_vacancy_events import (
     LEADERSHIP_VACANCY_REVIEW_RECORDED_EVENT_TYPE,
     LeadershipVacancyReviewRecordedEvent,
 )
+from .organization_strategy import ORGANIZATION_STRATEGY_REVIEW_EVENT_TYPE
+from .organization_strategy_events import OrganizationStrategyReviewResolvedEvent
 from .safe_conduct_events import SAFE_CONDUCT_CHANGED_EVENT_TYPE, SafeConductChangedEvent
 from .work_shift_events import WorkShiftPaidEvent
 from .promise_trust_events import PromiseDeadlineBreachedWithTrustEvent, PromiseItemReturnedWithTrustEvent
@@ -191,6 +193,7 @@ EVENT_TYPES: dict[str, type] = {
     "core.governance_leadership_handed_over.v1": GovernanceLeadershipHandedOverEvent,
     LEADERSHIP_BALLOT_CHANGED_EVENT_TYPE: LeadershipBallotChangedEvent,
     LEADERSHIP_VACANCY_REVIEW_RECORDED_EVENT_TYPE: LeadershipVacancyReviewRecordedEvent,
+    ORGANIZATION_STRATEGY_REVIEW_EVENT_TYPE: OrganizationStrategyReviewResolvedEvent,
     SAFE_CONDUCT_CHANGED_EVENT_TYPE: SafeConductChangedEvent,
     "core.organization_member_resigned.v1": OrganizationMemberResignedEvent,
     "core.production_quota_renewed.v1": ProductionQuotaRenewedEvent,

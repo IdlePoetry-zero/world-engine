@@ -21,6 +21,7 @@ from world_engine.domain.leadership_ballot_events import LeadershipBallotChanged
 from world_engine.domain.models import DomainEvent, WorldState
 from world_engine.domain.npc_plan_events import NpcPlanCreatedEvent, NpcPlanRevisedEvent
 from world_engine.domain.npc_plan_review import (
+    NPC_MODEL_UNAVAILABLE_REASON,
     NPC_PLANNING_REJECTIONS,
     npc_plan_review_request_id,
     validate_npc_plan_review_schedule,
@@ -202,6 +203,10 @@ def _validate_review_batch(
                 option_id="plan",
                 npc_planning_status=review.outcome,
                 npc_planning_rejection=review.reason if review.reason in NPC_PLANNING_REJECTIONS else None,
+                npc_planning_policy_reason=(
+                    NPC_MODEL_UNAVAILABLE_REASON
+                    if review.reason == NPC_MODEL_UNAVAILABLE_REASON else None
+                ),
                 npc_plan=proposed_plan,
                 promise_choice=review.promise_choice,
                 npc_plan_state_hash=state_hash(state),
@@ -255,6 +260,7 @@ def _response_matches_review(supplied: DecisionResponse, rebuilt: DecisionRespon
             "option_id",
             "npc_planning_status",
             "npc_planning_rejection",
+            "npc_planning_policy_reason",
             "promise_choice",
             "npc_plan",
             "npc_plan_state_hash",

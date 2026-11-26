@@ -2,6 +2,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import json
 from uuid import uuid4
 
@@ -32,6 +33,37 @@ def scope():
 def provider_document(url="http://127.0.0.1:9999/v1"):
     return {"kind": "openai_compatible", "name": "Test endpoint", "base_url": url,
             "default_model": "fixture", "enabled": True, "secret_ref": None}
+
+
+@dataclass(frozen=True)
+class _SyntheticCallTrace:
+    request_id: str
+    started_at: datetime
+
+    def to_public_dict(self):
+        return {
+            "request_id": self.request_id,
+            "parent_trace": None,
+            "world_id": None,
+            "branch_id": None,
+            "job_id": None,
+            "role_task": RoleTask.GM_ANSWER.value,
+            "provider_id": "fixture",
+            "provider_kind": ProviderKind.OPENAI_COMPATIBLE.value,
+            "requested_model": "fixture",
+            "reported_model": "fixture",
+            "started_at": self.started_at.isoformat(),
+            "ended_at": self.started_at.isoformat(),
+            "queue_seconds": None,
+            "first_token_seconds": None,
+            "validation_seconds": None,
+            "attempts": [],
+            "finish_reason": "stop",
+            "usage": {"source": "reported", "total_tokens": 2, "input_tokens": 1, "output_tokens": 1},
+            "cost": {"state": "unknown", "amount": None, "currency": None, "components": {}},
+            "error_code": None,
+            "end_reason": "completed",
+        }
 
 
 @dataclass(frozen=True)
@@ -782,6 +814,52 @@ async def test_calls_are_audited_without_prompts_and_locality_blocks_network(tmp
         await operations.generate(user, ModelRequest(role_task=RoleTask.GM_ANSWER, messages=(ChatMessage("user", "second"),)))
     assert len(calls) == 1
     assert len(store.list_calls(user)) == 2
+
+
+def test_call_pages_are_stable_when_newer_calls_arrive_and_api_returns_next_cursor(tmp_path):
+    store, user = OperationsStore(tmp_path / "ops-pages.db"), scope()
+    start = datetime(2026, 11, 20, tzinfo=timezone.utc)
+    expected = []
+    for index in range(101):
+        trace = _SyntheticCallTrace(f"call-{index:03}", start + timedelta(seconds=index // 4))
+        expected.append(trace)
+        store.record_trace(user, trace)
+    expected_ids = [item.request_id for item in sorted(expected, key=lambda item: (item.started_at.isoformat(), item.request_id), reverse=True)]
+
+    page = store.list_calls_page(user, limit=17)
+    paged_ids = [item["request_id"] for item in page["items"]]
+    assert page["has_more"] is True
+    assert page["next_cursor"]
+
+    # A new, more recent call sorts before the saved cursor and must not be
+    # inserted into later pages or cause an existing row to repeat.
+    store.record_trace(user, _SyntheticCallTrace("call-late", start + timedelta(days=1)))
+    while page["next_cursor"]:
+        page = store.list_calls_page(user, limit=17, cursor=page["next_cursor"])
+        paged_ids.extend(item["request_id"] for item in page["items"])
+
+    assert paged_ids == expected_ids
+    assert len(paged_ids) == len(set(paged_ids)) == 101
+    assert "call-late" not in paged_ids
+    assert store.list_calls_page(scope(), limit=17)["items"] == []
+    with pytest.raises(ValueError, match="Invalid call cursor"):
+        store.list_calls_page(user, cursor="not-a-cursor")
+
+    session = LocalSession(str(user.user_id), str(user.tenant_id), frozenset({"http://testserver"}))
+    operations = ModelOperations(store, _RecordingGateway())
+    with TestClient(create_app(None, session, operations=operations)) as client:
+        client.get("/api/v1/session")
+        response = client.get("/api/v1/operations/calls?limit=3")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body["items"]) == 3
+        assert body["has_more"] is True
+        next_page = client.get("/api/v1/operations/calls", params={"limit": 3, "cursor": body["next_cursor"]})
+        assert next_page.status_code == 200
+        next_body = next_page.json()
+        assert len(next_body["items"]) == 3
+        assert not ({item["request_id"] for item in body["items"]} & {item["request_id"] for item in next_body["items"]})
+        assert client.get("/api/v1/operations/calls", params={"cursor": "bad"}).status_code == 422
 
 
 def test_local_policy_blocks_remote_catalogue_probe_and_generation_at_transport(tmp_path):

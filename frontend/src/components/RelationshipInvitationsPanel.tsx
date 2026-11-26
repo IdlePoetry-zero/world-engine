@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { type CharacterEntity, type OwnMeetingReflection, type OwnRelationshipInvitation } from '../api/client'
 import { Icon } from './Icon'
+import { formatWorldRelativeTick } from '../worldTime'
 
 const statusLabels: Record<string, string> = {
   pending: '等待回应',
@@ -23,6 +24,8 @@ export function RelationshipInvitationsPanel({
   entities,
   playerId,
   currentTick,
+  daySeconds = 0,
+  yearDays = 0,
   projectionAvailable,
   loading,
   viewError,
@@ -34,6 +37,8 @@ export function RelationshipInvitationsPanel({
   entities: Record<string, CharacterEntity>
   playerId?: string
   currentTick: string | number
+  daySeconds?: number
+  yearDays?: number
   projectionAvailable: boolean
   loading: boolean
   viewError: string | null
@@ -46,6 +51,7 @@ export function RelationshipInvitationsPanel({
   const invitations = validRecords.filter((item) => item.proposer_id === playerId || item.invitee_id === playerId)
   const invalidCount = dataAvailable ? rawInvitations.length - validRecords.length : 0
   const currentTickValue = parseTick(currentTick)
+  const calendarTime = (tick: string | number) => formatWorldRelativeTick(parseTick(tick), daySeconds, yearDays)
   const pendingCount = invitations.filter((item) => item.status === 'pending'
     && !isExpiredPendingInvitation(item, currentTickValue)).length
   const reflectionDataAvailable = Array.isArray(rawReflections)
@@ -105,8 +111,8 @@ export function RelationshipInvitationsPanel({
             <div><dt>更新 tick</dt><dd>{formatTick(invitation.updated_tick)}</dd></div>
             {invitation.meeting && <>
               {invitation.meeting_venue_name && <div><dt>会面地点</dt><dd>{invitation.meeting_venue_name}</dd></div>}
-              <div><dt>开始世界秒</dt><dd><bdi>{formatTick(invitation.meeting.start_tick)}</bdi></dd></div>
-              <div><dt>结束世界秒</dt><dd><bdi>{formatTick(invitation.meeting.end_tick)}</bdi></dd></div>
+              <div><dt>开始</dt><dd><bdi title={`${formatTick(invitation.meeting.start_tick)} 世界秒`}>{calendarTime(invitation.meeting.start_tick)}</bdi></dd></div>
+              <div><dt>结束</dt><dd><bdi title={`${formatTick(invitation.meeting.end_tick)} 世界秒`}>{calendarTime(invitation.meeting.end_tick)}</bdi></dd></div>
             </>}
             {invitation.meeting && <div><dt>已记录出席</dt><dd>{attendance.length
               ? attendance.map((record, index) => <span key={`${record.actorId}-${index}`}>

@@ -11,10 +11,12 @@ from world_engine.domain.errors import InvalidEvent
 from world_engine.domain.models import WorldEntity, WorldState
 from world_engine.domain.npc_plan_review import (
     NPC_FAILURE_REVIEW_POLICY,
+    NPC_MODEL_UNAVAILABLE_REASON,
     NPC_PLAN_REVIEW_HANDLER_ID,
     NPC_PLAN_REVIEW_HANDLER_VERSION,
     build_npc_failure_review,
     build_npc_plan_review_schedule,
+    build_npc_provider_unavailable_review,
     npc_plan_review_request_id,
     npc_plan_review_schedule_id,
     queued_npc_plan_reviews,
@@ -168,6 +170,62 @@ def test_failure_review_respects_cooldown_deadline_and_run_limit():
     assert build_npc_failure_review(expiring, world_id, plan) is None
     capped = completed.model_copy(update={"completed_runs": 13, "max_runs": 13})
     assert build_npc_failure_review(_state_with_schedule(state, capped), world_id, plan) is None
+
+
+def test_provider_unavailability_rearms_one_due_review_with_bounded_cadence():
+    world_id, actor_id, _, base_state = _world(tick=100)
+    schedule = _schedule(base_state, world_id, actor_id)
+    state = _state_with_schedule(base_state, schedule)
+    event = _event(
+        world_id, actor_id, schedule, outcome="defer", source="policy",
+        reason=NPC_MODEL_UNAVAILABLE_REASON,
+    )
+
+    result = apply_npc_plan_review_resolved(state, event)
+
+    retry, = result.scheduled_events
+    assert result.current_tick == state.current_tick
+    assert retry.id == schedule.id
+    assert retry.status == "queued"
+    assert retry.due_tick == state.current_tick + 3_600
+    assert retry.revision == schedule.revision + 2
+    assert retry.completed_runs == 1 and retry.max_runs == 2
+    assert apply_event(state, event) == result
+    with pytest.raises(InvalidEvent):
+        apply_npc_plan_review_resolved(result, event)
+
+
+def test_provider_unavailability_respects_existing_schedule_and_total_retry_cap():
+    world_id, actor_id, _, state = _world(tick=100)
+    repeating = _schedule(state, world_id, actor_id, repeat_ticks=10_000, max_runs=3)
+    queued = _state_with_schedule(state, repeating)
+    result = apply_npc_plan_review_resolved(queued, _event(
+        world_id, actor_id, repeating, outcome="defer", source="policy",
+        reason=NPC_MODEL_UNAVAILABLE_REASON,
+    ))
+    next_review, = result.scheduled_events
+    assert next_review.due_tick == 100 + 10_000
+    assert next_review.max_runs == repeating.max_runs
+    assert next_review.completed_runs == 1
+
+    exhausted = repeating.model_copy(update={
+        "status": "completed", "completed_runs": 3, "revision": 4,
+    })
+    retry = build_npc_provider_unavailable_review(_state_with_schedule(state, exhausted), world_id, actor_id)
+    assert retry.due_tick == 100 + 4 * 3_600
+
+    capped = repeating.model_copy(update={
+        "status": "completed", "completed_runs": 13, "max_runs": 13,
+        "revision": 14,
+    })
+    capped_state = _state_with_schedule(state, capped)
+    assert build_npc_provider_unavailable_review(capped_state, world_id, actor_id) is None
+
+    expiring = state.model_copy(update={
+        "goals": [state.goals[0].model_copy(update={"deadline": state.current_tick + 3_599})],
+        "scheduled_events": [capped],
+    })
+    assert build_npc_provider_unavailable_review(expiring, world_id, actor_id) is None
 
 
 def test_review_schedule_rejects_player_controlled_dead_or_goal_less_actors():

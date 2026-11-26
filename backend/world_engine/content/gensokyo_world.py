@@ -5,12 +5,14 @@ from uuid import UUID
 from world_engine.application.world_packs import WorldPackManifest, write_world_pack
 from world_engine.domain.challenges import ChallengeDefinition
 from world_engine.domain.components import GoalRecord, KnowledgeRecord, PlaceComponent, ProvenanceReference, RelationRecord
-from world_engine.domain.models import StoryArrival, WorldEntity, WorldState
+from world_engine.domain.models import ResourceAccount, StoryArrival, WorldEntity, WorldState
 from world_engine.domain.npc_plan_review import build_npc_plan_review_schedule
 from world_engine.domain.story_nodes import StoryFollowup, StoryNode
+from world_engine.domain.travel_journeys import COMPACT_ROUTINE_JOURNEY_POLICY
 from world_engine.domain.world_books import WorldBookCitation, WorldBookEntry, WorldBookProvenance
 
 from .gensokyo_cast_early import EARLY_CAST_FACTS, EARLY_CAST_RELATIONS, EARLY_CAST_SOURCES
+from .gensokyo_mist_reports import mist_reports
 from .gensokyo_cast_habitats import HABITATS
 from .gensokyo_cast_middle import MIDDLE_CAST_FACTS, MIDDLE_CAST_SOURCES
 from .gensokyo_cast_personae_late import LATE_CAST_FACTS, LATE_CAST_PRIVATE_FACTS
@@ -25,10 +27,11 @@ from .gensokyo_reference import (
 from .gensokyo_world_lore import LORE_ENTRIES, LORE_SOURCES
 from .gensokyo_world_map import connect_world_map, register_passage
 from .gensokyo_village_life import RESOURCE_LABELS, add_local_economy
+from .strategy_examples import reserve_strategy
 
 
 PACK_ID = "author.gensokyo-world"
-PACK_VERSION = "1.3.0"
+PACK_VERSION = "1.5.0"
 PACK_TITLE = "东方幻想乡·异变年代"
 
 _PLAYER_PROFILES = (
@@ -401,6 +404,31 @@ def _attach_organizations(entities: dict[UUID, WorldEntity], entries: list[World
         })
 
 
+def _install_local_strategies(state: WorldState) -> WorldState:
+    # These author-supplied operating policies use the existing organizations.
+    # The resource allocation describes the simulation's opening inventory.
+    policies = (
+        ("scarlet-household", "sakuya", 12, "维持馆务、照护和来客接待，并逐步准备后续活动所需物资。"),
+        ("moriya-faith", "sanae", 10, "维持神社日常和山上访客接待，并为后续活动预留物资。"),
+    )
+    resource_id = "gensokyo.care_supply"
+    issuer_id = _id(f"world:stock:issue:{resource_id}")
+    for key, officer, amount, mission in policies:
+        organization_id = _id(f"organization:{key}")
+        organization = state.entities.get(organization_id)
+        officer_id = actor_id(officer)
+        if organization is None or str(officer_id) not in organization.components.get("governance", {}).get("members", ()):
+            continue
+        stock_id = _id(f"world:strategy-source:{key}")
+        issuer = state.resources[issuer_id]
+        state = state.model_copy(update={"resources": state.resources | {
+            issuer_id: issuer.model_copy(update={"balance": issuer.balance - amount}),
+            stock_id: ResourceAccount(owner_id=organization_id, resource_id=resource_id, balance=amount),
+        }})
+        state = reserve_strategy(state, organization_id, stock_id, mission=mission, officer_id=officer_id)
+    return state
+
+
 def _cast_reference(facts: WorldBookEntry, work: int) -> tuple[WorldBookEntry, list[str]]:
     profile = _CAST_FACTS.get(facts.source_key)
     if profile is None or profile.document > work:
@@ -556,6 +584,7 @@ def _standing_goals(key: str, entities: dict[UUID, WorldEntity]) -> tuple[GoalRe
         return ()
     return (GoalRecord(
         id=_id(f"world:social-goal:{key}"), owner_id=actor_id(key), title=goal, priority=55,
+        counterpart_id=actor_id(partner),
         description="见面可先沟通，若还需要讨论可提议另约时间。对方可按自己的日程和立场答复。",
     ),)
 
@@ -628,10 +657,13 @@ def build_opening(chapter: Chapter) -> dict:
     access_challenges, permit_reactions = register_passage(player.id, entities)
     challenges.extend(access_challenges)
     meeting = _id(f"place:{chapter.meeting}")
-    challenges.extend([
-        _chapter_report(chapter, history[chapter.key], entities, cast_entries[chapter.contact].title, incident.id),
-        *later_reports,
-    ])
+    if chapter.key == "scarlet-mist":
+        reports, rumor = mist_reports(player.id, actor_id(chapter.contact), incident.id)
+        challenges.extend(reports)
+        knowledge.append(rumor)
+    else:
+        challenges.append(_chapter_report(chapter, history[chapter.key], entities, cast_entries[chapter.contact].title, incident.id))
+    challenges.extend(later_reports)
     if chapter.key == "mountain-shrine":
         challenges.append(_moriya_survey(incident.id))
     resources = add_local_economy(entities, player.id)
@@ -649,17 +681,22 @@ def build_opening(chapter: Chapter) -> dict:
             "铜钱用于自愿交易，公共救济口粮由地点保管。路程、日程、来客资格和调查后果为世界包的模拟配置。",
             "reference_incident": chapter.key,
             "resource_catalog": RESOURCE_LABELS,
+            COMPACT_ROUTINE_JOURNEY_POLICY: True,
         },
     )
+    standing_actor_ids = {actor_id(key) for key in _STANDING_RELATIONSHIP_GOALS}
     reviews = [
         build_npc_plan_review_schedule(
             state, _id(f"world:reviews:{chapter.key}"), actor, _HOUR + index * 900,
+            **({"repeat_ticks": state.calendar.day_seconds * 90, "max_runs": 241}
+               if actor in standing_actor_ids else {}),
         )
         for index, actor in enumerate(dict.fromkeys(goal.owner_id for goal in goals))
     ]
     state = WorldState.model_validate(state.model_dump(mode="python") | {
         "scheduled_events": [incident, *reviews],
     })
+    state = _install_local_strategies(state)
     past = [history[key].content for key in HISTORY_WORKS if key in known_history and key != chapter.key]
     return {
         "opening_id": chapter.key, "title": history[chapter.key].title,

@@ -46,6 +46,7 @@ from .modern_occupation_profiles_260 import (
 )
 from .recruitment_roles import RECRUITMENT_ROLES
 from .routine_openings import ROUTINE_OPENING_PACK_VERSION, ROUTINE_OPENINGS, RoutineOpening, prepare_routine_opening
+from .strategy_examples import reserve_strategy
 from .waypoint_openings import build_waypoint_openings, waypoint_opening_notice
 
 
@@ -65,7 +66,10 @@ _WAYPOINT_OPENING_PACK_VERSION = "2.8.0"
 _FEUDAL_OCCUPATION_PACK_VERSION_290 = "2.9.0"
 _MODERN_CIVIC_RECRUITMENT_PACK_VERSION_210 = "2.10.0"
 _CULTIVATION_OCCUPATION_PACK_VERSION_211 = CULTIVATION_OCCUPATION_PROFILES_211_VERSION
-_PUBLIC_WAYPOINT_PACK_VERSIONS = {_WAYPOINT_OPENING_PACK_VERSION, ROUTINE_OPENING_PACK_VERSION}
+_ORGANIZATION_STRATEGY_PACK_VERSION = "2.13.0"
+_PUBLIC_WAYPOINT_PACK_VERSIONS = {
+    _WAYPOINT_OPENING_PACK_VERSION, ROUTINE_OPENING_PACK_VERSION, _ORGANIZATION_STRATEGY_PACK_VERSION,
+}
 _MODERN_OCCUPATION_PROFILE_VERSIONS = {
     _MODERN_OCCUPATION_PACK_VERSION, _MODERN_OCCUPATION_260_PACK_VERSION, _MODERN_CIVIC_OCCUPATION_PACK_VERSION,
 }
@@ -90,6 +94,29 @@ _REGION_COUNT = 12
 _SETTLEMENTS_PER_REGION = 9
 _POLITY_COUNT = 24
 _ORGANIZATION_COUNT = 24
+
+_OPENING_DESCRIPTIONS = {
+    "modern_city": ("现代都市", "在街区、车站和工作场所之间来往。通勤、工作安排、公共设施和人物关系都会影响一天怎么过。"),
+    "low_magic_feudal": ("低魔封建", "河谷领地之间有桥税、行路许可和集镇贸易。可以走访证人、打听道路或专注自己的旅程。"),
+    "long_life_cultivation": ("长生修行", "将修行、宗门往来和山川旅行安排在同一条时间线上。境界突破有各自的条件和代价。"),
+}
+
+_OPENING_CHOICES = {
+    "modern_city": (
+        {"title": "追查末班车", "description": "到南线站核对停运影响，决定找人问话、查记录或继续自己的安排。",
+         "version": _CASE_PACK_VERSION},
+        {"title": "约在下一班之前", "description": "按调度员的时间和地点去见面，也可把时间用在工作或外出。暴风时地点会调整。",
+         "version": ROUTINE_OPENING_PACK_VERSION},
+        {"title": "机构自治", "description": "地区机构会依据自身章程、人员和账本定期调整储备。",
+         "version": _ORGANIZATION_STRATEGY_PACK_VERSION},
+    ),
+    "low_magic_feudal": (
+        {"title": "沿灰境林道出发", "description": "规划多段旅程。抵达林道驿点后，可赶路，也可停留核对过路抄表。",
+         "version": _WAYPOINT_OPENING_PACK_VERSION},
+        {"title": "找桥吏谈修桥摊派", "description": "从当地告示找到接待时段。你也可以等下一次会面，或先走自己的路。",
+         "version": ROUTINE_OPENING_PACK_VERSION},
+    ),
+}
 
 
 def _named_resident_capacity(version: str | None, population_mode: str | None) -> int:
@@ -118,7 +145,7 @@ class ContentCatalog:
                 "version": _CASE_PACK_VERSION,
                 "available_versions": [
                     _CASE_PACK_VERSION, _TRUST_PACK_VERSION, _FAMILY_PACK_VERSION, _WAYPOINT_OPENING_PACK_VERSION,
-                    ROUTINE_OPENING_PACK_VERSION,
+                    ROUTINE_OPENING_PACK_VERSION, _ORGANIZATION_STRATEGY_PACK_VERSION,
                 ],
                 "sustained_available_versions": (
                     [
@@ -140,8 +167,10 @@ class ContentCatalog:
                     )
                 ),
                 "title": pack.title,
-                "subtitle": pack.subtitle,
-                "summary": pack.summary,
+                "subtitle": _OPENING_DESCRIPTIONS[pack.pack_id][0],
+                "summary": _OPENING_DESCRIPTIONS[pack.pack_id][1],
+                **({"opening_choices": [dict(item) for item in choices]}
+                   if (choices := _OPENING_CHOICES.get(pack.pack_id)) else {}),
                 "themes": list(pack.themes),
                 "systems": list(pack.systems),
                 "capacity": {
@@ -287,6 +316,15 @@ class ContentCatalog:
             generation_seed=seed,
             population_mode=population_mode,
         ).build()
+        if pack.version == _ORGANIZATION_STRATEGY_PACK_VERSION:
+            content = state.metadata["content_index"]
+            for identifier in (content["country_ids"][0], content["organization_ids"][0]):
+                organization_id = UUID(identifier)
+                components = state.entities[organization_id].components
+                state = reserve_strategy(
+                    state, organization_id, UUID(components["treasury"]["accounts"][pack.currency_id]),
+                    mission=components["governance"]["charter"], scale=25,
+                )
         return NewWorld(
             world_id=uuid5(namespace, "world"),
             branch_id=uuid5(namespace, "branch:main"),
@@ -482,6 +520,15 @@ class _WorldSeedBuilder:
         }
         if self.generation_seed is not None:
             metadata["generation_seed"] = self.generation_seed
+        if self.pack.pack_id == "modern_city" and self.pack.version == _ORGANIZATION_STRATEGY_PACK_VERSION:
+            investigation = {
+                "goal_id": str(self.entity_id("goal", "player")),
+                "destination_id": str(self.settlement_ids[1]),
+            }
+            if self.pack.version in _CASE_PACK_VERSIONS:
+                investigation["anchor_id"] = str(self.entity_id("item", "opening-investigation-case"))
+                investigation["case_id"] = str(self.entity_id("case", "opening-investigation-rumor"))
+            metadata["opening_investigation"] = investigation
         if self.routine_opening is not None:
             metadata["time_units"]["route_durations"] += "; short local routine links are measured in minutes"
         if self._has_membership_recruitment():

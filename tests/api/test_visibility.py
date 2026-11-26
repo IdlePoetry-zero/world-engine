@@ -75,6 +75,26 @@ def test_scene_reunion_shows_public_hours_and_only_new_player_known_facts():
     assert "scene_npc_readback" not in project_player_state(world, "p")
 
 
+def test_public_schedule_difference_requires_current_presence_and_known_place():
+    world = state()
+    world["current_tick"] = 100
+    npc = world["entities"]["n"]
+    npc["status"] = "active"
+    npc["components"]["daily_routine"] = {"windows": [
+        {"window_id": "visit", "place_id": "remote", "activity": "work",
+         "start_second": 90, "duration_seconds": 60, "public": True},
+    ]}
+    world["entities"]["remote"] = {"id": "remote", "kind": "place", "name": "车站", "components": {}}
+    world["entities"]["p"]["components"]["known_places"] = ["remote"]
+    difference = project_player_state(world, "p")["scene_npc_readback"]["n"]["schedule_difference"]
+    assert difference == {"usual_place_name": "车站", "current_place_name": "小镇"}
+    world["current_tick"] = 150
+    assert "schedule_difference" not in project_player_state(world, "p")["scene_npc_readback"]["n"]
+    world["current_tick"] = 100
+    world["entities"]["p"]["components"]["known_places"] = []
+    assert "scene_npc_readback" not in project_player_state(world, "p")
+
+
 def work_shift_state():
     world = state()
     world["current_tick"] = 600

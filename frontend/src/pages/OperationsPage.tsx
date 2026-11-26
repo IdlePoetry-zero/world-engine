@@ -12,6 +12,7 @@ type OpsTab = 'overview' | 'providers' | 'routes' | 'calls'
 type SettingsMutation = (settings: Settings) => Settings
 type SettingsUpdateJob = { mutation: SettingsMutation; approvedDestinations: string[]; resolve: (saved: boolean) => void }
 type CloudChange = { mutation: SettingsMutation; destinations: Provider[]; resolve: (saved: boolean) => void }
+type CallsPageSnapshot = { items: CallRecord[]; nextCursor: string | null }
 
 function cloudDestinations(settings: Settings, providers: Provider[]): Provider[] {
   if (settings.local_only) return []
@@ -28,7 +29,11 @@ export function OperationsPage({ onNotice }: { onNotice: (notice: Notice) => voi
   const [tab, setTab] = useState<OpsTab>('overview')
   const [settings, setSettings] = useState<Settings | null>(null)
   const [providers, setProviders] = useState<Provider[]>([])
-  const [calls, setCalls] = useState<CallRecord[]>([])
+  const [callPages, setCallPages] = useState<CallsPageSnapshot[]>([])
+  const [callPageIndex, setCallPageIndex] = useState(0)
+  const [callPageLoading, setCallPageLoading] = useState(false)
+  const [callPageError, setCallPageError] = useState('')
+  const [allCallsExporting, setAllCallsExporting] = useState(false)
   const [models, setModels] = useState<Record<string, ModelInfo[]>>({})
   const [cloudChange, setCloudChange] = useState<CloudChange | null>(null)
   const [loading, setLoading] = useState(true)
@@ -43,7 +48,10 @@ export function OperationsPage({ onNotice }: { onNotice: (notice: Notice) => voi
   const pendingSettingsWritesRef = useRef(0)
   const settingsRevisionRef = useRef(0)
   const settingsReadSequenceRef = useRef(0)
+  const callsReadSequenceRef = useRef(0)
   const mountedRef = useRef(true)
+  const calls = callPages[callPageIndex]?.items ?? []
+  const loadedCallCount = callPages.reduce((total, page) => total + page.items.length, 0)
 
   const publishSettings = useCallback((next: Settings | null) => {
     visibleSettingsRef.current = next
@@ -125,6 +133,9 @@ export function OperationsPage({ onNotice }: { onNotice: (notice: Notice) => voi
   const loadData = useCallback(async () => {
     const settingsRevision = settingsRevisionRef.current
     const settingsReadSequence = ++settingsReadSequenceRef.current
+    const callsReadSequence = ++callsReadSequenceRef.current
+    setCallPageLoading(false)
+    setCallPageError('')
     const results = await Promise.allSettled([api.getSettings(), api.listProviders(), api.listCalls()])
     const [settingsResult, providersResult, callsResult] = results
     if (settingsResult.status === 'fulfilled'
@@ -138,12 +149,42 @@ export function OperationsPage({ onNotice }: { onNotice: (notice: Notice) => voi
       providersRef.current = providersResult.value.items
       setProviders(providersResult.value.items)
     }
-    if (callsResult.status === 'fulfilled') setCalls(callsResult.value.items)
+    if (callsResult.status === 'fulfilled' && callsReadSequence === callsReadSequenceRef.current) {
+      setCallPages([{ items: callsResult.value.items, nextCursor: callsResult.value.next_cursor }])
+      setCallPageIndex(0)
+      setCallPageError('')
+    }
     const rejected = results.find((result) => result.status === 'rejected')
     if (mountedRef.current && rejected?.status === 'rejected') setError(errorMessage(rejected.reason))
     if (mountedRef.current) setLoading(false)
   }, [publishSettings])
   const reload = useCallback(async () => { setLoading(true); setError(null); await loadData() }, [loadData])
+
+  const loadNextCallsPage = useCallback(async () => {
+    const current = callPages[callPageIndex]
+    if (!current?.nextCursor || callPageLoading) return
+    if (callPages[callPageIndex + 1]) {
+      setCallPageIndex((index) => index + 1)
+      setCallPageError('')
+      return
+    }
+    const requestSequence = ++callsReadSequenceRef.current
+    setCallPageLoading(true)
+    setCallPageError('')
+    try {
+      const page = await api.listCalls(current.nextCursor)
+      if (requestSequence !== callsReadSequenceRef.current) return
+      setCallPages((existing) => {
+        if (existing[callPageIndex]?.nextCursor !== current.nextCursor) return existing
+        return [...existing.slice(0, callPageIndex + 1), { items: page.items, nextCursor: page.next_cursor }]
+      })
+      setCallPageIndex(callPageIndex + 1)
+    } catch (reason) {
+      if (requestSequence === callsReadSequenceRef.current) setCallPageError(errorMessage(reason))
+    } finally {
+      if (requestSequence === callsReadSequenceRef.current) setCallPageLoading(false)
+    }
+  }, [callPages, callPageIndex, callPageLoading])
   useEffect(() => {
     mountedRef.current = true
     const timer = window.setTimeout(() => void loadData(), 0)
@@ -191,15 +232,37 @@ export function OperationsPage({ onNotice }: { onNotice: (notice: Notice) => voi
       setModels((current) => ({ ...current, [provider.provider_id]: result.models ?? [] }))
     } catch (reason) { onNotice({ kind: 'error', text: errorMessage(reason) }) }
   }
-  const exportCsv = () => {
+  const exportCsv = (records: CallRecord[], scopeLabel: string) => {
+    if (!records.length) return
     const header = ['request_id', 'started_at', 'role', 'provider', 'model', 'duration_ms', 'queue_seconds', 'first_token_seconds', 'validation_seconds', 'usage_source', 'input_tokens', 'cached_input_tokens', 'output_tokens', 'max_output_tokens', 'reasoning_tokens', 'total_tokens', 'cost_state', 'cost_amount', 'currency', 'cost_components', 'transport_failure_attempt_number', 'transport_failure_attempt_context', 'transport_failure_phase', 'transport_failure_retryable', 'transport_failure_possibly_billed', 'transport_attempt_summary', 'error_code', 'status']
-    const rows = calls.map((call) => {
+    const rows = records.map((call) => {
       const [failureAttemptNumber, failureAttemptContext, failurePhase, retryable, possiblyBilled, attemptSummary] = transportFailureCsvFields(call)
       return [call.request_id, call.started_at ?? '', call.role, call.provider ?? '', call.model ?? '', call.duration_ms ?? 'unknown', traceNumber(call.trace, 'queue_seconds') ?? 'unknown', traceNumber(call.trace, 'first_token_seconds') ?? 'unknown', traceNumber(call.trace, 'validation_seconds') ?? 'unknown', call.usage?.source ?? 'unknown', call.usage?.input_tokens ?? 'unknown', call.usage?.cached_input_tokens ?? 'unknown', call.usage?.output_tokens ?? 'unknown', traceNumber(call.trace, 'max_output_tokens') ?? 'unknown', call.usage?.reasoning_tokens ?? 'unknown', call.usage?.total_tokens ?? 'unknown', call.cost?.state ?? 'unknown', call.cost?.amount ?? 'unknown', call.cost?.currency ?? 'unknown', call.cost?.components ? JSON.stringify(call.cost.components) : 'unknown', failureAttemptNumber, failureAttemptContext, failurePhase, retryable, possiblyBilled, attemptSummary, call.trace?.error_code ?? '', call.status ?? 'unknown']
     })
     const csv = [header, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n')
     const link = document.createElement('a'); link.href = URL.createObjectURL(new Blob(['\ufeff', csv], { type: 'text/csv;charset=utf-8' })); link.download = 'world-engine-model-calls.csv'; link.click(); URL.revokeObjectURL(link.href)
-    onNotice({ kind: 'success', text: `已导出 ${calls.length} 条当前可见记录。` })
+    onNotice({ kind: 'success', text: `已导出 ${records.length} 条${scopeLabel}调用记录。` })
+  }
+  const exportAllCallsCsv = async () => {
+    if (allCallsExporting) return
+    setAllCallsExporting(true)
+    try {
+      const all: CallRecord[] = []
+      let page = await api.listCalls(null, 500)
+      all.push(...page.items)
+      const seenCursors = new Set<string>()
+      while (page.next_cursor) {
+        if (seenCursors.has(page.next_cursor)) throw new Error('调用记录分页游标未前进，请刷新后重试。')
+        seenCursors.add(page.next_cursor)
+        page = await api.listCalls(page.next_cursor, 500)
+        all.push(...page.items)
+      }
+      exportCsv(all, '全部')
+    } catch (reason) {
+      onNotice({ kind: 'error', text: `全量 CSV 导出失败：${errorMessage(reason)}` })
+    } finally {
+      setAllCallsExporting(false)
+    }
   }
 
   const tabs: { value: OpsTab; label: string; icon: IconName }[] = [{ value: 'overview', label: '运行概览', icon: 'pulse' }, { value: 'providers', label: '模型连接', icon: 'plug' }, { value: 'routes', label: '职责路由', icon: 'route' }, { value: 'calls', label: '调用记录', icon: 'list' }]
@@ -209,13 +272,13 @@ export function OperationsPage({ onNotice }: { onNotice: (notice: Notice) => voi
     <div className="ops-tabs" role="tablist" aria-label="运行后台页面">{tabs.map((item) => <button key={item.value} role="tab" aria-selected={tab === item.value} className={tab === item.value ? 'active' : ''} onClick={() => setTab(item.value)}><Icon name={item.icon} size={16} />{item.label}</button>)}</div>
     {error && <div className="inline-error"><Icon name="alert" size={16} /><span>{error}</span><button onClick={() => void reload()}>重试</button></div>}
     {tab === 'overview' && <div className="ops-overview">
-      <div className="ops-summary-grid"><SummaryCard label="已配置模型连接" icon="plug" value={loading ? '—' : providers.length} note={`${providers.filter((provider) => provider.enabled).length} 个启用`} action="查看连接" onClick={() => setTab('providers')} /><SummaryCard label="可用模型" icon="cpu" value={loading ? '—' : Object.values(models).reduce((sum, list) => sum + list.length, 0)} note="以服务发现结果为准" action="查看模型" onClick={() => setTab('providers')} /><SummaryCard label="调用记录" icon="activity" value={loading ? '—' : calls.length} note="服务端返回的最近记录" action="查看记录" onClick={() => setTab('calls')} /></div>
+      <div className="ops-summary-grid"><SummaryCard label="已配置模型连接" icon="plug" value={loading ? '—' : providers.length} note={`${providers.filter((provider) => provider.enabled).length} 个启用`} action="查看连接" onClick={() => setTab('providers')} /><SummaryCard label="可用模型" icon="cpu" value={loading ? '—' : Object.values(models).reduce((sum, list) => sum + list.length, 0)} note="以服务发现结果为准" action="查看模型" onClick={() => setTab('providers')} /><SummaryCard label="已加载调用记录" icon="activity" value={loading ? '—' : loadedCallCount} note="按开始时间分页浏览" action="查看记录" onClick={() => setTab('calls')} /></div>
       <section className="profile-settings panel-card"><div className="panel-card-heading"><div><span className="panel-overline">EXECUTION PROFILE</span><h2>速度与深度</h2></div><span className={`save-indicator ${savingSettings ? 'saving' : ''}`}><i />{savingSettings ? '保存中…' : settings ? '自动保存' : '等待设置'}</span></div><p className="panel-description">两项设置分别影响调度节奏和模拟精度。无论选择哪一档，世界硬规则始终生效。</p>{settings ? <div className="profile-controls"><ProfileControl title="速度" subtitle="请求调度、并发与呈现策略" value={settings.speed} options={[['fast', '快速', '更快地调度独立请求'], ['balanced', '均衡', '保持交互与后台平衡'], ['patient', '耐心', '减少资源竞争，完整校验后呈现']]} onChange={(value) => void updateSetting((current) => ({ ...current, speed: value as Settings['speed'] }))} /><ProfileControl title="深度" subtitle="推演范围、记忆和复核层级" value={settings.depth} options={[['standard', '标准', '精简候选与回顾范围'], ['deep', '深入', '扩展因果与人物考虑'], ['exhaustive', '充分', '更完整的候选与冲突审视']]} onChange={(value) => void updateSetting((current) => ({ ...current, depth: value as Settings['depth'] }))} /></div> : <div className="settings-empty">{loading ? '正在读取运行设置…' : '服务端尚未返回运行设置。'}</div>}<div className="profile-separation"><span className="separation-icon"><Icon name="crosshair" size={15} /></span><span><strong>互相独立的两个维度</strong><small>快速 + 充分仍会执行充分推演；耐心 + 标准不会自动增加模拟深度。</small></span></div></section>
       <div className="ops-overview-bottom"><div className="mini-panel"><span className="panel-overline">LOCAL API</span><h3>连接检查</h3><p>设置状态来自服务端的运行配置响应。</p><button className="text-button" onClick={() => void reload()}>重新检测 <Icon name="arrow-right" size={14} /></button></div><div className="mini-panel"><span className="panel-overline">PRIVACY</span><h3>凭据只留在本机</h3><p>密钥只写入 Windows 凭据管理器；界面只接收状态和引用，不回读密钥。</p><span className="privacy-badge"><Icon name="shield" size={13} />本地凭据边界</span></div></div>
     </div>}
     {tab === 'providers' && <div className="providers-page"><div className="subpage-header"><div><h2>模型连接</h2><p>目录发现只返回可见模型；生成能力需经过独立验证。</p></div><button className="button button-primary" onClick={() => setProviderModal('new')}><Icon name="plus" size={16} />添加供应商</button></div>{loading && providers.length === 0 ? <div className="provider-skeleton" /> : providers.length ? <div className="provider-list">{providers.map((provider) => <ProviderCard key={provider.provider_id} provider={provider} models={models[provider.provider_id]} cloudBlocked={!settings || settings.local_only} onEdit={() => setProviderModal(provider)} onProbe={() => void probeProvider(provider)} />)}</div> : <InlineState icon="plug" title="还没有模型连接" description="添加一个供应商端点后，可以发现模型目录。密钥由后端凭据库管理。" action={<button className="button button-primary" onClick={() => setProviderModal('new')}><Icon name="plus" size={15} />添加供应商</button>} />}</div>}
     {tab === 'routes' && <RoutesPage settings={settings} providers={providers} models={models} loading={loading} saving={savingSettings} onChange={updateSetting} />}
-    {tab === 'calls' && <div className="calls-page"><div className="subpage-header"><div><h2>调用记录</h2><p>按任务角色核对总耗时、供应商报告的输入 / 输出 Token 与费用。未知值不会显示为零；完整安全追踪可展开查看。</p></div><button className="button button-secondary button-small" onClick={exportCsv} disabled={!calls.length}><Icon name="download" size={14} />导出 CSV</button></div>{calls.length ? <div className="calls-table-wrap"><table className="calls-table"><thead><tr><th>时间 / 调用</th><th>职责</th><th>供应商 / 模型</th><th>总耗时 / 阶段</th><th>Token 用量</th><th>费用</th><th>结果</th><th>追踪</th></tr></thead><tbody>{calls.map((call) => <tr key={call.request_id}><td><strong>{formatTime(call.started_at)}</strong><small>{call.request_id.slice(0, 12)}</small></td><td><strong>{roleLabel(call.role)}</strong><small>{call.role}</small></td><td><strong>{call.provider ?? '未知'}</strong><small>{call.model ?? '模型未知'}</small></td><td className="call-metrics-cell"><strong>{formatMilliseconds(call.duration_ms)}</strong><small>队列 {formatSeconds(traceNumber(call.trace, 'queue_seconds'))}</small><small>首 Token {formatSeconds(traceNumber(call.trace, 'first_token_seconds'))}</small></td><td className="call-metrics-cell"><strong>输入 {formatTokenCount(call.usage?.input_tokens)} · 输出 {formatTokenCount(call.usage?.output_tokens)}</strong><small>合计 {formatTokenCount(call.usage?.total_tokens)} tokens · {usageSourceLabel(call.usage?.source)}</small>{traceNumber(call.trace, 'max_output_tokens') != null && <small>本次输出上限 {formatTokenCount(traceNumber(call.trace, 'max_output_tokens'))} tokens</small>}{call.usage?.cached_input_tokens != null && <small>缓存输入 {formatTokenCount(call.usage.cached_input_tokens)} tokens</small>}{call.usage?.reasoning_tokens != null && <small>推理 {formatTokenCount(call.usage.reasoning_tokens)} tokens</small>}</td><td><CostCell cost={call.cost} /></td><td><span className={`call-status call-status-${callStatusTone(call.status)}`}>{callStatusLabel(call.status, call.trace?.error_code)}</span>{call.trace?.error_code === 'context_limit' && <small style={{ whiteSpace: 'normal', overflow: 'visible' }}>请在「模型与运行 → 模型连接」提高 Ollama 上下文容量；较大值会占用更多内存。</small>}<TransportFailure call={call} compact /></td><td><details className="trace-details"><summary>查看</summary><TransportFailure call={call} /><pre>{JSON.stringify(call.trace ?? { request_id: call.request_id, role: call.role, provider: call.provider, model: call.model, status: call.status }, null, 2)}</pre></details></td></tr>)}</tbody></table></div> : <InlineState icon="activity" title="还没有调用记录" description="请求实际通过模型后台后，服务端会返回可核对的运行信息。" />}</div>}
+    {tab === 'calls' && <div className="calls-page"><div className="subpage-header"><div><h2>调用记录</h2><p>按开始时间分页核对用量与费用；未知值不会显示为零。导出当前页只含本页，全量导出会读取全部分页。</p></div><div className="call-export-actions"><button className="button button-secondary button-small" onClick={() => exportCsv(calls, '当前页')} disabled={!calls.length}><Icon name="download" size={14} />导出当前页 CSV</button><button className="button button-secondary button-small" onClick={() => void exportAllCallsCsv()} disabled={!calls.length || allCallsExporting}><Icon name="download" size={14} />{allCallsExporting ? '正在读取全部记录…' : '导出全部记录 CSV'}</button></div></div>{calls.length ? <><div className="calls-table-wrap"><table className="calls-table"><thead><tr><th>时间 / 调用</th><th>职责</th><th>供应商 / 模型</th><th>总耗时 / 阶段</th><th>Token 用量</th><th>费用</th><th>结果</th><th>追踪</th></tr></thead><tbody>{calls.map((call) => <tr key={call.request_id}><td><strong>{formatTime(call.started_at)}</strong><small>{call.request_id.slice(0, 12)}</small></td><td><strong>{roleLabel(call.role)}</strong><small>{call.role}</small></td><td><strong>{call.provider ?? '未知'}</strong><small>{call.model ?? '模型未知'}</small></td><td className="call-metrics-cell"><strong>{formatMilliseconds(call.duration_ms)}</strong><small>队列 {formatSeconds(traceNumber(call.trace, 'queue_seconds'))}</small><small>首 Token {formatSeconds(traceNumber(call.trace, 'first_token_seconds'))}</small></td><td className="call-metrics-cell"><strong>输入 {formatTokenCount(call.usage?.input_tokens)} · 输出 {formatTokenCount(call.usage?.output_tokens)}</strong><small>合计 {formatTokenCount(call.usage?.total_tokens)} tokens · {usageSourceLabel(call.usage?.source)}</small>{traceNumber(call.trace, 'max_output_tokens') != null && <small>本次输出上限 {formatTokenCount(traceNumber(call.trace, 'max_output_tokens'))} tokens</small>}{call.usage?.cached_input_tokens != null && <small>缓存输入 {formatTokenCount(call.usage.cached_input_tokens)} tokens</small>}{call.usage?.reasoning_tokens != null && <small>推理 {formatTokenCount(call.usage.reasoning_tokens)} tokens</small>}</td><td><CostCell cost={call.cost} /></td><td><span className={`call-status call-status-${callStatusTone(call.status)}`}>{callStatusLabel(call.status, call.trace?.error_code)}</span>{call.trace?.error_code === 'context_limit' && <small style={{ whiteSpace: 'normal', overflow: 'visible' }}>请在「模型与运行 → 模型连接」提高 Ollama 上下文容量；较大值会占用更多内存。</small>}<TransportFailure call={call} compact /></td><td><details className="trace-details"><summary>查看</summary><TransportFailure call={call} /><pre>{JSON.stringify(call.trace ?? { request_id: call.request_id, role: call.role, provider: call.provider, model: call.model, status: call.status }, null, 2)}</pre></details></td></tr>)}</tbody></table></div><div className="call-pagination">{callPageError && <span className="call-page-error" role="alert">下一页读取失败：{callPageError}</span>}<button className="button button-secondary button-small" onClick={() => { setCallPageIndex((index) => Math.max(0, index - 1)); setCallPageError('') }} disabled={callPageIndex === 0 || callPageLoading}>上一页</button><span>第 {callPageIndex + 1} 页 · {calls.length} 条</span><button className="button button-secondary button-small" onClick={() => void loadNextCallsPage()} disabled={!callPages[callPageIndex]?.nextCursor || callPageLoading}>{callPageLoading ? '正在读取…' : '下一页'}</button></div></> : <InlineState icon="activity" title="还没有调用记录" description="请求实际通过模型后台后，服务端会返回可核对的运行信息。" />}</div>}
     {cloudChange && <CloudChangeDialog destinations={cloudChange.destinations} onConfirm={() => completeCloudChange(true)} onClose={() => completeCloudChange(false)} />}
     {providerModal && <ProviderDialog key={providerModal === 'new' ? 'new' : providerModal.provider_id} provider={providerModal === 'new' ? undefined : providerModal} onClose={() => setProviderModal(null)} onSave={saveProvider} />}
   </section>

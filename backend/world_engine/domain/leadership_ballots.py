@@ -71,17 +71,18 @@ class LeadershipBallot(BallotModel):
     @model_validator(mode="after")
     def validate_order_uniqueness_and_resolution(self) -> LeadershipBallot:
         voter_ids = tuple(str(item) for item in self.eligible_voter_ids)
-        if voter_ids != tuple(sorted(voter_ids)) or len(voter_ids) != len(set(voter_ids)):
+        electorate = set(voter_ids)
+        if voter_ids != tuple(sorted(voter_ids)) or len(voter_ids) != len(electorate):
             raise ValueError("eligible_voter_ids must be sorted and unique")
         vote_ids = tuple(str(item.voter_id) for item in self.votes)
         if vote_ids != tuple(sorted(vote_ids)) or len(vote_ids) != len(set(vote_ids)):
             raise ValueError("votes must be sorted by voter_id and unique")
-        if any(voter not in self.eligible_voter_ids for voter in (item.voter_id for item in self.votes)):
+        if not set(vote_ids).issubset(electorate):
             raise ValueError("every ballot vote must come from the fixed electorate")
         if self.incumbent_id is None:
             if self.vacancy_proposer_id is None:
                 raise ValueError("a vacancy ballot requires a vacancy proposer")
-            if self.vacancy_proposer_id not in self.eligible_voter_ids:
+            if str(self.vacancy_proposer_id) not in electorate:
                 raise ValueError("the vacancy proposer must belong to the fixed electorate")
         elif self.vacancy_proposer_id is not None:
             raise ValueError("an incumbent ballot cannot record a vacancy proposer")

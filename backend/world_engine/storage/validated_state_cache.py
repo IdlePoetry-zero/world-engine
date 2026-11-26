@@ -755,6 +755,50 @@ class ValidatedBranchStateCache:
         self._insert((world_id, branch_id), entry)
         return True
 
+    def _publish_committed_state(
+        self,
+        *,
+        world_id: UUID,
+        branch_id: UUID,
+        encoded_payload: bytes,
+        stored_digest: str,
+        state_version: int,
+        current_tick: int,
+        state: WorldState,
+    ) -> bool:
+        """Adopt a repository-owned state after its exact write commits.
+
+        This internal path avoids making another full graph copy at the write
+        boundary. The repository must call it only after commit, with canonical
+        payload bytes and the digest it already computed for the same validated
+        reducer result. The next lookup fingerprints the freshly read database
+        payload against this digest before accepting the cache entry. Ownership
+        of ``state`` transfers to the cache; it must not be returned to callers
+        or passed to plugins. Ordinary publication continues to use
+        ``publish_trusted`` and keeps its detached-copy rule.
+        """
+
+        self._validate_metadata(world_id, branch_id, stored_digest, state_version, current_tick)
+        if not isinstance(encoded_payload, bytes):
+            raise StoredBranchStateIntegrityError("Trusted committed state must use encoded canonical JSON bytes.")
+        if state.current_tick != current_tick:
+            raise StoredBranchStateIntegrityError("Committed state publication does not match its branch head.")
+        if len(encoded_payload) > self.max_serialized_bytes:
+            return False
+        entry = _CacheEntry(
+            # Commit code computed this digest from the canonical bytes just
+            # before writing both fields. Fresh DB content is still
+            # fingerprinted and compared on every later lookup.
+            fingerprint=stored_digest,
+            stored_digest=stored_digest,
+            state_version=state_version,
+            current_tick=current_tick,
+            serialized_bytes=len(encoded_payload),
+            state=state,
+        )
+        self._insert((world_id, branch_id), entry)
+        return True
+
     def clear(self) -> None:
         with self._lock:
             self._entries.clear()

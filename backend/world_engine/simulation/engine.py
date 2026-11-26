@@ -373,7 +373,7 @@ class SimulationEngine:
                             reference_id=scheduled.id,
                         ),
                     )
-                if scheduled.phase == "decision":
+                if scheduled.phase == "decision" and not self._scheduled_handler_supported(scheduled):
                     return self._decision_gate(
                         state, context, self._scheduled_decision_request(state, context, scheduled), continuation=plan
                     )
@@ -1877,7 +1877,7 @@ class SimulationEngine:
                             reference_id=scheduled.id,
                         ),
                     )
-                if scheduled.phase == "decision":
+                if scheduled.phase == "decision" and not self._scheduled_handler_supported(scheduled):
                     return self._decision_gate(
                         state, context, self._scheduled_decision_request(state, context, scheduled),
                         continuation=plan,
@@ -3087,6 +3087,7 @@ class SimulationEngine:
             or (scheduled.handler_id == CREDIT_MATURITY_HANDLER and scheduled.handler_version == CREDIT_MATURITY_HANDLER_VERSION)
             or (scheduled.handler_id == STORY_NODE_HANDLER and scheduled.handler_version == STORY_NODE_VERSION)
             or (scheduled.handler_id, scheduled.handler_version) == (MEETING_COMMITMENT_HANDLER, MEETING_COMMITMENT_VERSION)
+            or (scheduled.handler_id, scheduled.handler_version) == ("organization.strategy_review", "1.0.0")
         )
 
     @staticmethod
@@ -3533,7 +3534,11 @@ class SimulationEngine:
                 raise StaleDecisionResponse("NPC plan proposal does not match the reviewed world snapshot.")
             outcome, source, call_id = response.npc_planning_status, response.source, response.npc_model_call_id
             proposed = response.npc_plan
-            reason = response.npc_planning_rejection or f"npc_planning_{outcome}"
+            reason = (
+                response.npc_planning_policy_reason
+                or response.npc_planning_rejection
+                or f"npc_planning_{outcome}"
+            )
             if proposed is not None:
                 if proposed.actor_id != request.actor_id or proposed.created_tick != state.current_tick:
                     raise StaleDecisionResponse("NPC plan proposal names a different actor or starting tick.")

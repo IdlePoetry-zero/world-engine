@@ -5,6 +5,7 @@ import pytest
 from world_engine.content import ContentCatalog
 from world_engine.domain.models import WorldState
 from world_engine.domain.npc_plan_review import build_npc_plan_review_schedule
+from world_engine.domain.npc_plan_review import NPC_MODEL_UNAVAILABLE_REASON
 from world_engine.domain.npc_plans import NpcPlan, NpcPlanStep
 from world_engine.domain.reducers import apply_event, state_hash
 from world_engine.rules.contracts import RuleContext
@@ -89,6 +90,38 @@ def test_review_accepts_a_bound_registered_policy_plan_without_advancing_time(re
     assert after.npc_plans[0] == plan
     assert after.scheduled_events[0].due_tick == 3600
     assert resolution.events[-1].source == "policy" and resolution.events[-1].model_call_id is None
+
+
+def test_provider_unavailable_policy_defer_preserves_an_existing_blocked_plan(review_world):
+    draft, state, actor_id, goal_id, step = review_world
+    blocked = NpcPlan(
+        plan_id=uuid4(), actor_id=actor_id, goal_ids=[goal_id], revision=2, status="blocked",
+        created_tick=0, updated_tick=0, next_review_tick=3600, steps=[step], current_step=0,
+        attempts=1, last_failure="A previous action could not proceed.", reason="Keep the existing plan for review.",
+    )
+    state = state.model_copy(update={"npc_plans": [blocked]})
+    context = _context(draft)
+    pending = SimulationEngine().plan_window(
+        state, WorldAdvancePlan(started_tick=0, target_tick=7200), context,
+    )
+    request, = pending.decision_requests
+    response = DecisionResponse(
+        request_id=request.request_id, state_version=0, at_tick=0, source="policy", option_id="plan",
+        npc_planning_status="defer", npc_planning_policy_reason=NPC_MODEL_UNAVAILABLE_REASON,
+        npc_plan_state_hash=state_hash(state),
+    )
+
+    resolution = SimulationEngine().plan_window(
+        state, WorldAdvancePlan(started_tick=0, target_tick=7200),
+        context.model_copy(update={"decision_responses": (response,)}),
+    )
+
+    assert len(resolution.events) == 1
+    assert resolution.events[0].type == "core.npc_plan_review_resolved.v1"
+    assert resolution.events[0].reason == NPC_MODEL_UNAVAILABLE_REASON
+    after = _apply_all(state, resolution.events)
+    assert after.npc_plans == [blocked]
+    assert after.current_tick == state.current_tick
 
 
 def test_user_controlled_actor_review_is_skipped_without_a_model_request(review_world):

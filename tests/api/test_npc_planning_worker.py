@@ -13,6 +13,7 @@ from uuid import uuid4
 import pytest
 
 from world_engine.adapters.models import RoleTask
+from world_engine.adapters.models.errors import ProviderError, ProviderErrorCode
 import world_engine.application.model_decisions as model_decisions
 import world_engine.runtime as runtime
 import world_engine.application.npc_planning as npc_planning
@@ -20,7 +21,11 @@ from world_engine.application.simulation_jobs import SimulationJobs
 from world_engine.domain.components import GoalCondition, GoalRecord, PlaceComponent, PlaceRoute
 from world_engine.domain.models import AccessScope, NewWorld, WorldEntity, WorldState
 from world_engine.domain.npc_goal_completion import NPC_STEP_GOAL_COMPLETION_POLICY
-from world_engine.domain.npc_plan_review import NPC_GOAL_FOLLOWUP_REVIEW_POLICY, build_npc_plan_review_schedule
+from world_engine.domain.npc_plan_review import (
+    NPC_GOAL_FOLLOWUP_REVIEW_POLICY,
+    NPC_MODEL_UNAVAILABLE_REASON,
+    build_npc_plan_review_schedule,
+)
 from world_engine.domain.npc_plans import NPC_SHARED_TRAINING_POLICY, NpcPlan, NpcPlanStep
 from world_engine.domain.reducers import state_hash
 from world_engine.simulation.contracts import DecisionRequest, DecisionResponse, WorldAdvancePlan
@@ -137,6 +142,40 @@ async def test_leased_npc_planning_records_job_and_decision_trace_scope(pending_
     view = context.repository.read_world(context.scope, context.lease.world_id, context.lease.branch_id)
     replay = context.repository.replay(context.scope, context.lease.world_id, context.lease.branch_id, from_genesis=True)
     assert replay.state_hash == view.state_hash
+
+
+@pytest.mark.asyncio
+async def test_unavailable_npc_planner_records_policy_defer_and_bounded_retry(pending_review_job):
+    context = pending_review_job
+
+    class OfflineProvider:
+        async def generate(self, _scope, _request):
+            raise ProviderError(ProviderErrorCode.NETWORK, "provider is offline", retryable=True)
+
+    response = await model_decisions.invoke_npc_planning(
+        OfflineProvider(), context.repository, context.scope, context.lease,
+        context.job, context.decision,
+    )
+
+    assert response.source == "policy"
+    assert response.npc_planning_status == "defer"
+    assert response.npc_planning_policy_reason == NPC_MODEL_UNAVAILABLE_REASON
+    assert response.npc_plan is None and response.npc_model_call_id is None
+    saved = context.jobs.advance(context.scope, context.lease, model_decision=response)
+    review, = [event for event in saved.events if event.type == "core.npc_plan_review_resolved.v1"]
+    assert review.source == "policy" and review.outcome == "defer"
+    assert review.reason == NPC_MODEL_UNAVAILABLE_REASON and review.model_call_id is None
+    assert saved.outcome == "advanced"
+
+    view = context.repository.read_world(context.scope, context.lease.world_id, context.lease.branch_id)
+    retry, = [item for item in view.state.scheduled_events if item.id == review.scheduled_event_id]
+    assert retry.status == "queued" and retry.due_tick == 3_600
+    assert retry.completed_runs == 1 and retry.max_runs == 2
+    job = context.repository.read_job(context.scope, context.lease.job_id)
+    assert job.payload["last_decision"]["npc_planning_policy_reason"] == NPC_MODEL_UNAVAILABLE_REASON
+    assert context.repository.replay(
+        context.scope, context.lease.world_id, context.lease.branch_id, from_genesis=True,
+    ).state_hash == view.state_hash
 
 
 @pytest.mark.asyncio

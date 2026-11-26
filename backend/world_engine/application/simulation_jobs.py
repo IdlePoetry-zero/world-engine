@@ -38,6 +38,7 @@ class SimulationJobs:
     def __init__(self, repository, engine=None):
         self.repository = repository
         self.engine = engine if engine is not None else SimulationEngine()
+        self._borrow_simulation_input = getattr(repository, "borrow_simulation_input", None) if engine is None else None
 
     def enqueue(self, scope, world_id, branch_id, plan, *, idempotency_key, speed, depth,
                 expected_state_version=None):
@@ -107,7 +108,8 @@ class SimulationJobs:
         job = self.repository.read_job(scope, lease.job_id)
         if job.job_type not in {"simulation.long_action", "simulation.world_advance"}:
             raise Conflict("This worker only handles registered simulation jobs.")
-        view = self.repository.read_world(scope, lease.world_id, lease.branch_id)
+        read_state = self._borrow_simulation_input or self.repository.read_world
+        view = read_state(scope, lease.world_id, lease.branch_id)
         if job.job_type == "simulation.world_advance":
             self._authorize_world_advance(scope, view)
         if job.committed_through_tick != view.state.current_tick:

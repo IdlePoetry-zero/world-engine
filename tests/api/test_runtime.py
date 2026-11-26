@@ -130,7 +130,9 @@ def test_runtime_worker_picks_up_http_world_advance(tmp_path, expired_lease):
         client.get("/api/v1/session").raise_for_status()
         scope = local_identity(tmp_path)
         repo = app.state.worlds.repository
-        world = repo.create_world(scope, NewWorld(title="Clock worker", state=WorldState()))
+        world = repo.create_world(scope, NewWorld(
+            title="Clock worker", state=WorldState(metadata={"probe": {"values": ["committed"]}}),
+        ))
         wid, bid = world.world.world_id, world.branch.branch_id
         job = client.post(f"/api/v1/worlds/{wid}/world-advance", headers={"Idempotency-Key": "runtime"}, json={
             "branch_id": str(bid), "expected_state_version": "0", "duration_seconds": 60,
@@ -154,6 +156,8 @@ def test_runtime_worker_picks_up_http_world_advance(tmp_path, expired_lease):
         assert status["committed_through_tick"] == status["target_tick"] == "60"
         view = repo.read_world(scope, wid, bid)
         assert view.last_seq == 1 and view.state_hash == repo.replay(scope, wid, bid).state_hash
+        view.state.metadata["probe"]["values"].append("external mutation")
+        assert repo.borrow_simulation_input(scope, wid, bid).state.metadata["probe"]["values"] == ["committed"]
 
 
 def test_runtime_worker_retries_one_locked_window_using_its_existing_lease(tmp_path, monkeypatch):

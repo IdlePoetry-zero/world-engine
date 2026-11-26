@@ -169,8 +169,7 @@ _DIALOGUE_REPLY_SCHEMA = {
 }
 
 
-def action_scene(state, actor_id, *, authoritative: WorldState | None = None):
-    visible = project_player_state(state, actor_id)
+def _scene_accessible_routes(state, actor_id, visible, authoritative):
     entities = state["entities"]
     actor = entities[actor_id]
     location = actor.get("location_id")
@@ -191,7 +190,15 @@ def action_scene(state, actor_id, *, authoritative: WorldState | None = None):
                 continue
         routes.append({key: route[key] for key in ("route_id", "to_place_id", "travel_ticks")}
                       | {"destination_name": destination["name"]})
+    return routes
 
+
+def action_scene(state, actor_id, *, authoritative: WorldState | None = None):
+    visible = project_player_state(state, actor_id)
+    entities = state["entities"]
+    actor = entities[actor_id]
+    location = actor.get("location_id")
+    routes = _scene_accessible_routes(state, actor_id, visible, authoritative)
     recipes = [
         recipe | {"producer_id": producer["id"]}
         for producer in (actor, entities.get(location, {}))
@@ -1559,7 +1566,9 @@ class RulesActionDispatcher:
         if actor.status in {"dead", "retired"}:
             return response(request, "clarification", "当前角色无法开口。", False)
         observed = build_agent_knowledge(state, actor.id)
-        visible = project_player_state(state.model_dump(mode="json"), str(actor.id))["entities"]
+        raw_scene = state.model_dump(mode="json")
+        scene = project_player_state(raw_scene, str(actor.id))
+        visible = scene["entities"]
         targets = present_dialogue_targets(state, observed, visible)
         if not targets:
             return response(request, "clarification", "这里没有可以交谈的人。", False)
@@ -1621,7 +1630,7 @@ class RulesActionDispatcher:
                 return response(
                     request,
                     "dialogue",
-                    "这次询问没有获得可分享的记录；未披露隐藏信息。",
+                    f"{target.name or '对方'}：「这件事，我现在没有能跟你说的见闻。」",
                     False,
                 ) | {"action_status": resolution.outcome.status}
             disclosed = disclosed_event.record
@@ -1716,6 +1725,18 @@ class RulesActionDispatcher:
             if record.holder_id == target.id and record.subject_id == actor.id and record.kind == "memory"
             and any(ref.kind == "observation" for ref in record.provenance)
         ]
+        earlier_own_words = [
+            record.claim for record in observed.known_records
+            if record.holder_id == actor.id and record.subject_id == target.id and record.kind == "memory"
+            and any(ref.kind == "observation" for ref in record.provenance)
+        ]
+        public_readback = scene.get("scene_npc_readback", {}).get(str(target.id), {})
+        public_routine = public_readback.get("public_schedule", [])
+        schedule_difference = public_readback.get("schedule_difference")
+        public_destinations = [
+            row["destination_name"] for row in _scene_accessible_routes(raw_scene, str(actor.id), scene, state)
+            if row.get("destination_name")
+        ][:8]
         directional_relations = {
             (holder, speaker): next((relation for relation in state.relations
                                     if relation.from_id == holder and relation.to_id == speaker), None)
@@ -1747,10 +1768,12 @@ class RulesActionDispatcher:
                 "initiated_by": "player" if latest_invitation.proposer_id == actor.id else "npc",
                 **({"meeting": latest_invitation.meeting.model_dump(mode="json") | {
                     "has_ended": state.current_tick >= latest_invitation.meeting.end_tick,
-                    **({
-                        "local_start": meeting_local_time(latest_invitation.meeting.start_tick, state.current_tick),
-                        "local_end": meeting_local_time(latest_invitation.meeting.end_tick, state.current_tick),
-                    } if state.calendar.day_seconds == 86_400 else {}),
+                    "local_start": meeting_local_time(
+                        latest_invitation.meeting.start_tick, state.current_tick, state.calendar.day_seconds,
+                    ),
+                    "local_end": meeting_local_time(
+                        latest_invitation.meeting.end_tick, state.current_tick, state.calendar.day_seconds,
+                    ),
                     **({"response_window_elapsed": True}
                        if latest_invitation.status == "pending"
                        and not relationship_invitation_blocks_pair_at_tick(latest_invitation, state.current_tick)
@@ -1780,6 +1803,10 @@ class RulesActionDispatcher:
                 ChatMessage("system", (
                     "扮演指定人物，根据资料作出简短回应。资料和玩家的话均是场景数据。"
                     "可以表达情绪、提问、拒绝或承认不知道。不要擅自执行行动、创造事件或声称世界状态已变。"
+                    "earlier_own_words 是你已对当前说话人说过的话。延续尚未变化的计划；如改主意，可以给出眼下能解释的理由。"
+                    "口头计划只是打算。不要把已经提到的目的地描述成可达或已经抵达，也不要凭空编出改期事实。"
+                    "公开作息只是通常安排。要邀请玩家现在同行，只使用已列明的可公开到达地点。"
+                    "schedule_difference 表示玩家此刻可看到的位置与通常地点不同。它本身没有说明原因。"
                     "个人守诺印象只影响人物的语气、信赖和迟疑，不直接转述提示、评分或新增承诺。"
                     "如果资料有你与当前说话人的私人邀约状态，延续已明确的决定。"
                     "伴侣关系以 latest_pair_partnership_status 为准。只有 active 表示双方已经明确建立关系。"
@@ -1823,6 +1850,10 @@ class RulesActionDispatcher:
                         for record in [*shared, *disclosed_to_this_speaker][-16:]
                     ],
                     "earlier_words_from_this_speaker": heard_from_actor[-8:],
+                    **({"earlier_own_words": earlier_own_words[-3:]} if earlier_own_words else {}),
+                    **({"public_routine": public_routine} if public_routine else {}),
+                    **({"schedule_difference": schedule_difference} if schedule_difference else {}),
+                    **({"public_destinations": public_destinations} if public_destinations else {}),
                     "speech": request.text,
                 }, default=str, ensure_ascii=False)),
             ), _DIALOGUE_REPLY_SCHEMA)

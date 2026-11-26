@@ -86,6 +86,17 @@ class StoryChallengeGate(_StoryModel):
     challenge_id: UUID
 
 
+ReportSource = Literal["observation", "hearsay", "self_report", "suggestion"]
+
+
+class StoryReportGate(_StoryModel):
+    kind: Literal["report_registered"]
+    actor_id: UUID
+    recipient_id: UUID
+    challenge_id: UUID
+    source_kind: ReportSource
+
+
 class StoryContestGate(_StoryModel):
     kind: Literal["contest_result"]
     actor_id: UUID
@@ -103,7 +114,7 @@ class StoryPromiseTrustGate(_StoryModel):
 
 StoryGate = Annotated[
     StoryGoalGate | StoryCapabilityGate | StorySkillGate | StoryKnowledgeGate | StoryPriorOutcomeGate
-    | StoryEnvironmentGate | StoryChallengeGate | StoryContestGate | StoryPromiseTrustGate,
+    | StoryEnvironmentGate | StoryChallengeGate | StoryReportGate | StoryContestGate | StoryPromiseTrustGate,
     Field(discriminator="kind"),
 ]
 
@@ -302,6 +313,11 @@ def _gate_passes(state: WorldState, gate: StoryGate) -> bool:
             and (bond.trust >= gate.threshold if gate.comparison == "at_least" else bond.trust <= gate.threshold)
             for bond in projection.bonds.values()
         )
+    if isinstance(gate, StoryReportGate):
+        return any(attempt.actor_id == gate.actor_id and attempt.challenge_id == gate.challenge_id
+                   and attempt.report is not None and attempt.report.recipient_id == gate.recipient_id
+                   and attempt.report.source_kind == gate.source_kind and attempt.passed
+                   for attempt in state.challenge_attempts)
     actor = state.entities.get(gate.actor_id)
     if actor is None or actor.kind not in {"character", "person"} or actor.status != "active":
         return False
@@ -620,7 +636,7 @@ def validate_story_state(state: WorldState) -> None:
             goal_ids.add(goal.id)
     parents: dict[UUID, set[UUID]] = {key: set() for key in nodes}
     dispatch_knowledge: dict[UUID, tuple[StoryFollowup, UUID]] = {}
-    challenge_ids = {challenge.challenge_id for challenge in state.challenges}
+    challenges = {challenge.challenge_id: challenge for challenge in state.challenges}
     contest_ids = {contest.definition_id for contest in state.contest_definitions}
     all_schedules = {schedule.id: schedule for schedule in state.scheduled_events}
     for key, followup in followups.items():
@@ -674,8 +690,13 @@ def validate_story_state(state: WorldState) -> None:
                 if gate.actor_id != recipient_id:
                     raise ValueError("A dispatch knowledge gate must name its authorized recipient.")
                 parents[key].add(producer.followup_id)
-            if isinstance(gate, StoryChallengeGate) and gate.challenge_id not in challenge_ids:
+            if isinstance(gate, StoryChallengeGate) and gate.challenge_id not in challenges:
                 raise ValueError("Story gates may only reference a registered challenge.")
+            if isinstance(gate, StoryReportGate):
+                definition = challenges.get(gate.challenge_id)
+                terms = definition.report if definition else None
+                if terms is None or terms.source_kind != gate.source_kind or terms.recipient_id != gate.recipient_id:
+                    raise ValueError("Story report gates must reference the registered report's source and recipient.")
             if isinstance(gate, StoryContestGate) and gate.definition_id not in contest_ids:
                 raise ValueError("Story gates may only reference a registered contest.")
             if isinstance(gate, StoryPromiseTrustGate):

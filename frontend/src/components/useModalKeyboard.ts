@@ -5,6 +5,8 @@ type ModalKeyboardOptions = {
   onClose: () => void
   busy: boolean
   focusKey?: string | number
+  active?: boolean
+  inertBackground?: boolean
 }
 
 const focusableSelector = [
@@ -56,11 +58,10 @@ function makeBackgroundInert(dialog: HTMLElement) {
 /** Keeps focus within an open modal, handles Escape, and restores focus to its opener. */
 export function useModalKeyboard(
   dialogRef: RefObject<HTMLElement | null>,
-  { onClose, busy, focusKey }: ModalKeyboardOptions,
+  { onClose, busy, focusKey, active = true, inertBackground = true }: ModalKeyboardOptions,
 ) {
   const latest = useRef({ onClose, busy })
   const invokingElement = useRef<HTMLElement | null>(null)
-  const capturedInvoker = useRef(false)
   const previousFocusKey = useRef(focusKey)
 
   useLayoutEffect(() => {
@@ -69,33 +70,29 @@ export function useModalKeyboard(
 
   useLayoutEffect(() => {
     const dialog = dialogRef.current
-    if (!dialog) return
+    if (!active || !dialog) return
 
-    if (!capturedInvoker.current) {
-      invokingElement.current = document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : null
-      capturedInvoker.current = true
-    }
-    const restoreBackground = makeBackgroundInert(dialog)
+    invokingElement.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const restoreBackground = inertBackground ? makeBackgroundInert(dialog) : undefined
     focusInitialElement(dialog)
 
     return () => {
-      restoreBackground()
+      restoreBackground?.()
       if (invokingElement.current?.isConnected && !invokingElement.current.hasAttribute('disabled')) {
         invokingElement.current.focus()
       }
     }
-  }, [dialogRef])
+  }, [active, dialogRef, inertBackground])
 
   useLayoutEffect(() => {
     if (previousFocusKey.current === focusKey) return
     previousFocusKey.current = focusKey
     const dialog = dialogRef.current
-    if (dialog) focusInitialElement(dialog)
-  }, [dialogRef, focusKey])
+    if (active && dialog) focusInitialElement(dialog)
+  }, [active, dialogRef, focusKey])
 
   useEffect(() => {
+    if (!active) return
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.isComposing || event.keyCode === 229) return
 
@@ -134,5 +131,5 @@ export function useModalKeyboard(
 
     document.addEventListener('keydown', onKeyDown, true)
     return () => document.removeEventListener('keydown', onKeyDown, true)
-  }, [dialogRef])
+  }, [active, dialogRef])
 }

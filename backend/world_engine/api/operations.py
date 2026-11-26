@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Callable
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 
 from world_engine.application.operations import ModelOperations
 from world_engine.domain.errors import InvalidEvent
@@ -65,8 +65,16 @@ def operations_router(operations: ModelOperations, scope: Callable) -> APIRouter
                 "detail": "已读取供应商模型目录；这不代表生成能力已验证。"}
 
     @router.get("/operations/calls")
-    def calls(request: Request):
-        return {"items": [_call_view(item) for item in operations.store.list_calls(scope(request))]}
+    def calls(request: Request, limit: int = Query(100, ge=1, le=500), cursor: str | None = None):
+        try:
+            page = operations.store.list_calls_page(scope(request), limit=limit, cursor=cursor)
+        except ValueError as error:
+            raise InvalidEvent("Invalid call cursor") from error
+        return {
+            "items": [_call_view(item) for item in page["items"]],
+            "next_cursor": page["next_cursor"],
+            "has_more": page["has_more"],
+        }
 
     return router
 

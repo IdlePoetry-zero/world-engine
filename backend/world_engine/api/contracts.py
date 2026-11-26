@@ -58,6 +58,16 @@ class MessageRequest(RequestModel):
     text: str = Field(min_length=1, max_length=100_000)
     profile: QualityProfile = Field(default_factory=QualityProfile)
     draft: DraftControl | None = Field(default=None, exclude_if=lambda value: value is None)
+    scene_observation: Literal[True] | None = Field(default=None, exclude_if=lambda value: value is None)
+    case_anchor_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @model_validator(mode="after")
+    def validate_structured_message(self) -> MessageRequest:
+        if self.scene_observation and (self.mode != "ask_gm" or self.draft is not None or self.case_anchor_id is not None):
+            raise ValueError("Scene observation requires its own GM query.")
+        if self.case_anchor_id is not None and (self.mode != "action" or self.draft is not None):
+            raise ValueError("A case anchor requires a direct action.")
+        return self
 
 
 class NarrativeRewriteRequest(RequestModel):

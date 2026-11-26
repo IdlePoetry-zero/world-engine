@@ -1,9 +1,11 @@
 """Verify the playable package uses the same import path as other worlds."""
 
 from decimal import Decimal
+from pathlib import Path
 from uuid import UUID
 
 from fastapi.testclient import TestClient
+import pytest
 
 from world_engine.application.quoted_speech_guard import visible_dialogue_targets
 from world_engine.application.simulation_jobs import SimulationJobs
@@ -11,12 +13,67 @@ from world_engine.application.visibility import project_player_state
 from world_engine.application.world_packs import load_world_pack, write_world_pack
 from world_engine.content.gensokyo_cast_habitats import HABITATS
 from world_engine.content.gensokyo_reference import _id
+from world_engine.content.gensokyo_mist_reports import RUMOR_ID, report_id
 from world_engine.content.gensokyo_world import CHAPTERS, actor_id, build_archive, build_opening, world_source_index
 from world_engine.domain.components import PlaceRoute
+from world_engine.domain.challenges import open_challenges, settle_challenge
+from world_engine.domain.errors import InvalidEvent
 from world_engine.domain.models import JobStatus, WorldState
 from world_engine.rules.engine import route_access_reason
 from world_engine.runtime import build_application, local_identity
 from world_engine.simulation.npc_routine_schedule import next_npc_routine_tick, npc_routine_candidate
+
+
+def test_historical_red_mist_archive_keeps_original_registration(tmp_path):
+    archived = Path(__file__).resolve().parents[2] / ".runtime/world-packs/gensokyo-world-1.3.0.zip"
+    if not archived.is_file():
+        pytest.skip("The original distributed 1.3.0 archive is unavailable on this host.")
+    origin = "http://127.0.0.1:8000"
+    with TestClient(build_application(data_directory=tmp_path, run_simulation_worker=False), base_url=origin) as client:
+        client.get("/api/v1/session").raise_for_status()
+        data = archived.read_bytes()
+        headers = {"Content-Type": "application/zip", "Origin": origin}
+        preview = client.post("/api/v1/packs/import/preview", headers=headers, content=data).raise_for_status().json()
+        world = client.post("/api/v1/packs/import", headers=headers | {
+            "X-World-Pack-Sha256": preview["archive_sha256"], "X-Story-Opening": "scarlet-mist",
+            "Idempotency-Key": "historical-scarlet-mist",
+        }, content=data).raise_for_status().json()
+        view = client.get(f"/api/v1/worlds/{world['world_id']}/view", params={
+            "mode": "author", "branch_id": world["active_branch_id"],
+        }).raise_for_status().json()
+        state = view["state"]
+        assert state["metadata"]["pack_version"] == "1.3.0"
+        old_report = next(row for row in state["challenges"] if row["challenge_id"] == str(report_id("observation")))
+        assert "report" not in old_report and old_report["pass_level"] == "1"
+        incident = next(row for row in state["scheduled_events"] if row["id"] == str(_id("world:incident:scarlet-mist")))
+        variant, = incident["payload"]["variants"]
+        assert [gate["kind"] for gate in variant["when"]] == ["challenge_passed", "world_condition"]
+
+
+def test_red_mist_registration_requires_owned_sources_and_present_recipient():
+    state = WorldState.model_validate(build_opening(CHAPTERS[0])["scenario"])
+    player = state.player_id
+    shrine = _id("place:shrine")
+    actor = state.entities[player].model_copy(update={"location_id": shrine})
+    at_shrine = state.model_copy(update={"entities": state.entities | {player: actor}})
+    heard = report_id("hearsay")
+
+    def available(scene):
+        return {item["challenge_id"] for item in open_challenges(scene, player)}
+
+    assert str(heard) in available(at_shrine)
+    assert str(report_id("observation")) not in available(at_shrine)
+    missing_source = at_shrine.model_copy(update={"knowledge": [row for row in state.knowledge if row.id != RUMOR_ID]})
+    assert str(heard) not in available(missing_source)
+    with pytest.raises(InvalidEvent):
+        settle_challenge(missing_source, heard, player, _id("test:red-mist:unheard"))
+    reimu = state.entities[actor_id("reimu")]
+    absent = at_shrine.model_copy(update={"entities": at_shrine.entities | {
+        reimu.id: reimu.model_copy(update={"location_id": _id("place:human-village")}),
+    }})
+    assert str(heard) not in available(absent)
+    with pytest.raises(InvalidEvent):
+        settle_challenge(absent, heard, player, _id("test:red-mist:absent"))
 
 
 def test_scarlet_mist_scene_shows_the_current_lead_and_no_future_incident():

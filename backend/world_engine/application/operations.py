@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import asyncio
+import base64
+import binascii
 from dataclasses import replace
 import ipaddress
 import json
@@ -95,6 +97,7 @@ class OperationsStore:
                     CHECK ((claim_id IS NULL) != (text IS NULL))
                 )""")
                 db.execute("PRAGMA user_version = 4")
+            db.execute("CREATE INDEX IF NOT EXISTS calls_recent_page ON calls(tenant, principal, started_at DESC, id DESC)")
 
     @contextmanager
     def connect(self):
@@ -282,9 +285,52 @@ class OperationsStore:
 
     def list_calls(self, scope: AccessScope, limit: int = 100) -> list[dict[str, Any]]:
         with self.connect() as db:
-            rows = db.execute("SELECT document FROM calls WHERE tenant=? AND principal=? ORDER BY started_at DESC LIMIT ?",
+            rows = db.execute("SELECT document FROM calls WHERE tenant=? AND principal=? ORDER BY started_at DESC, id DESC LIMIT ?",
                               (*self.identity(scope), min(500, max(1, limit))))
             return [json.loads(row[0]) for row in rows]
+
+    def list_calls_page(
+        self, scope: AccessScope, *, limit: int = 100, cursor: str | None = None,
+    ) -> dict[str, Any]:
+        page_size = min(500, max(1, limit))
+        cursor_key = self._decode_calls_cursor(cursor) if cursor is not None else None
+        query = "SELECT started_at, id, document FROM calls WHERE tenant=? AND principal=?"
+        params: tuple[Any, ...] = self.identity(scope)
+        if cursor_key is not None:
+            started_at, call_id = cursor_key
+            query += " AND (started_at < ? OR (started_at = ? AND id < ?))"
+            params += (started_at, started_at, call_id)
+        query += " ORDER BY started_at DESC, id DESC LIMIT ?"
+        params += (page_size + 1,)
+        with self.connect() as db:
+            rows = db.execute(query, params).fetchall()
+        has_more = len(rows) > page_size
+        page = rows[:page_size]
+        next_cursor = self._encode_calls_cursor(page[-1][0], page[-1][1]) if has_more and page else None
+        return {
+            "items": [json.loads(row[2]) for row in page],
+            "next_cursor": next_cursor,
+            "has_more": has_more,
+        }
+
+    @staticmethod
+    def _encode_calls_cursor(started_at: str, call_id: str) -> str:
+        encoded = json.dumps([started_at, call_id], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        return base64.urlsafe_b64encode(encoded).decode("ascii").rstrip("=")
+
+    @staticmethod
+    def _decode_calls_cursor(cursor: str) -> tuple[str, str]:
+        try:
+            if not cursor or len(cursor) > 2048:
+                raise ValueError
+            padded = cursor + "=" * (-len(cursor) % 4)
+            decoded = json.loads(base64.b64decode(padded, altchars=b"-_", validate=True))
+            if (not isinstance(decoded, list) or len(decoded) != 2
+                or not all(isinstance(value, str) and value for value in decoded)):
+                raise ValueError
+            return decoded[0], decoded[1]
+        except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error) as error:
+            raise ValueError("Invalid call cursor") from error
 
     @staticmethod
     def config(document: dict[str, Any]) -> ProviderConfig:

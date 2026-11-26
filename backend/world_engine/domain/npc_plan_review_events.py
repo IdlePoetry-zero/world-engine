@@ -14,7 +14,9 @@ from .npc_plan_review import (
     NPC_PLAN_REVIEW_HANDLER_ID,
     NPC_PLAN_REVIEW_HANDLER_VERSION,
     NPC_PLAN_REVIEW_PHASE,
+    NPC_MODEL_UNAVAILABLE_REASON,
     build_npc_plan_review_schedule,
+    build_npc_provider_unavailable_review,
     npc_plan_review_schedule_id,
     _npc_plan_review_request_id_for_occurrence,
     validate_npc_plan_review_schedule,
@@ -187,6 +189,10 @@ class NpcPlanReviewResolvedEvent(NpcPlanReviewEventModel):
             raise ValueError("Policy-sourced NPC plan review cannot claim a model_call_id")
         if self.outcome == "skipped" and self.source != "policy":
             raise ValueError("A skipped NPC plan review must be resolved by policy")
+        if self.reason == NPC_MODEL_UNAVAILABLE_REASON and (
+            self.source != "policy" or self.outcome != "defer"
+        ):
+            raise ValueError("Model unavailability must be recorded as a policy-sourced defer")
         self.require_author_visibility()
         return self
 
@@ -316,6 +322,17 @@ def apply_npc_plan_review_resolved(
             from .npc_commitments import record_return_review
 
             updated = record_return_review(updated, parsed.actor_id, parsed.promise_choice, parsed.event_id)
+        if parsed.reason == NPC_MODEL_UNAVAILABLE_REASON:
+            retry = build_npc_provider_unavailable_review(updated, parsed.world_id, parsed.actor_id)
+            if retry is not None:
+                from .models import WorldState as RuntimeWorldState
+
+                scheduled_events = [
+                    retry if item.id == retry.id else item for item in updated.scheduled_events
+                ]
+                updated = RuntimeWorldState.model_validate(
+                    updated.model_dump(mode="python") | {"scheduled_events": scheduled_events}
+                )
         return updated
     except InvalidEvent:
         raise

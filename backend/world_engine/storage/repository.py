@@ -576,6 +576,10 @@ class WorldRepository:
     ) -> WorldView:
         return self._read_world_view(scope, world_id, branch_id, detached=True)
 
+    def borrow_simulation_input(self, scope: AccessScope, world_id: UUID, branch_id: UUID) -> WorldView:
+        """Borrow an integrity-checked snapshot for the built-in, read-only simulation planner."""
+        return self._read_world_view(scope, world_id, branch_id, detached=False)
+
     def project_verified_player_view(
         self,
         scope: AccessScope,
@@ -1229,6 +1233,32 @@ class WorldRepository:
                         "started_tick": move["started_tick"], "arrived_tick": move["arrived_tick"],
                     })
             return history
+
+    def first_actor_direct_arrival(
+        self, scope: AccessScope, world_id: UUID, branch_id: UUID, actor_id: UUID, destination_id: UUID,
+        *, through_seq: int,
+    ) -> int | None:
+        """Find the earliest direct arrival inherited at this verified checkpoint, including older saves."""
+        with self._transaction() as session:
+            _, role = self._require_membership(session, scope, world_id)
+            if role not in AUTHOR_ROLES and session.get(ActorControlRow, (world_id, scope.user_id, actor_id)) is None:
+                raise AccessDenied("This account does not control the requested actor.")
+            branch = self._get_branch(session, world_id, branch_id, defer_state_json=True, defer_initial_state_json=True)
+            if not branch.fork_seq <= through_seq <= branch.head_seq:
+                raise ValueError("through_seq must be within the branch's committed history")
+            chain = self._branch_chain(session, branch, through_seq, include_ancestors=True, defer_state_json=True)
+            for source_id, cutoff in reversed(chain):
+                move = session.scalar(
+                    select(EventRow.payload_json).where(
+                        EventRow.world_id == world_id, EventRow.branch_id == source_id, EventRow.sequence <= cutoff,
+                        EventRow.event_type == "core.movement_completed.v1",
+                        EventRow.payload_json["actor_id"].as_string() == str(actor_id),
+                        EventRow.payload_json["to_place_id"].as_string() == str(destination_id),
+                    ).order_by(EventRow.sequence).limit(1)
+                )
+                if move is not None:
+                    return int(move["arrived_tick"])
+        return None
 
     def read_branch_event(
         self, scope: AccessScope, world_id: UUID, branch_id: UUID, event_id: UUID,
@@ -2124,6 +2154,7 @@ class WorldRepository:
         captured_history_raw_fingerprint: str | None = None
         captured_history_job_id: UUID | None = None
         committed_history_result: CommitResult | None = None
+        committed_state_cache_candidate: tuple[bytes, WorldState, str, int, int] | None = None
         capture_npc_reflection_allowed = False
         npc_reflection_commit_pending: dict[str, object] | None = None
 
@@ -2154,9 +2185,28 @@ class WorldRepository:
                 # Optional cache work must not alter an already durable commit.
                 return
 
+        def publish_committed_branch_state_after_commit() -> None:
+            candidate = committed_state_cache_candidate
+            if candidate is not None:
+                encoded_payload, state, digest, state_version, current_tick = candidate
+                try:
+                    self._branch_state_cache._publish_committed_state(
+                        world_id=world_id,
+                        branch_id=branch_id,
+                        encoded_payload=encoded_payload,
+                        stored_digest=digest,
+                        state_version=state_version,
+                        current_tick=current_tick,
+                        state=state,
+                    )
+                except Exception:
+                    # A cache failure must not change an already durable commit.
+                    pass
+            retain_history_context_after_commit()
+
         try:
             with self._transaction(
-                write=True, after_commit=retain_history_context_after_commit,
+                write=True, after_commit=publish_committed_branch_state_after_commit,
             ) as session:
                 world, role = self._require_membership(session, scope, world_id)
                 branch = (
@@ -2907,7 +2957,18 @@ class WorldRepository:
                 typed_events = tuple(committed_events)
                 validate_ledger_postings(tuple(postings))
                 next_payload = projection_payload if projection_reused else state_json(next_state)
-                next_hash = projection_hash if projection_reused else state_payload_hash(next_payload)
+                if projection_reused:
+                    next_payload_bytes = None
+                    next_hash = projection_hash
+                else:
+                    encoded_payload = self._branch_state_cache._encode_payload(next_payload)
+                    next_hash = hashlib.sha256(encoded_payload).hexdigest()
+                    next_payload_bytes = (
+                        encoded_payload
+                        if len(encoded_payload) <= self._branch_state_cache.max_serialized_bytes
+                        else None
+                    )
+                    del encoded_payload
                 if not projection_reused:
                     next_state_tick = next_state.current_tick
                 last_seq = first_seq + len(typed_events) - 1
@@ -3109,6 +3170,14 @@ class WorldRepository:
                         return self._idempotent_result(session, concurrent, request_hash)
                     current = session.get(BranchRow, branch_id)
                     raise StaleVersion(command.expected_state_version, current.state_version if current else -1)
+                if next_payload_bytes is not None:
+                    committed_state_cache_candidate = (
+                        next_payload_bytes,
+                        next_state,
+                        next_hash,
+                        version_after,
+                        next_state_tick,
+                    )
 
                 for event, record, event_postings in zip(
                     typed_events, event_records, event_postings_by_event, strict=True,

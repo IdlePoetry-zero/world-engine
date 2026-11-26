@@ -691,7 +691,12 @@ def _decision_context(
         goal.id: goal for goal in state.goals
         if goal.id in prerequisite_ids and goal.owner_id == actor.id and goal.updated_tick <= state.current_tick
     }
-    safe_goals = [_goal_view(goal, prerequisites) for goal in goals]
+    safe_goals = [
+        _goal_view(goal, prerequisites) | (
+            {"counterpart_id": str(goal.counterpart_id)} if str(goal.counterpart_id) in bounded_entities else {}
+        )
+        for goal in goals
+    ]
     # build_agent_knowledge includes public/shared facts and the actor's own
     # facts, while excluding future-dated facts. Author-only records remain
     # excluded even if malformed data names the actor as their holder.

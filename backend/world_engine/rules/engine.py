@@ -30,6 +30,14 @@ from world_engine.domain.institutional_credit import InstitutionalCreditError
 from world_engine.domain.institutional_credit_state import CREDIT_MATURITY_HANDLER, plan_institutional_credit_maturity_event
 from world_engine.domain.promise_trust_settlement import build_trusted_promise_settlement
 from world_engine.domain.story_nodes import STORY_NODE_HANDLER, settle_story_milestone
+from world_engine.domain.modern_opening_goal import opening_arrival_event
+from world_engine.domain.organization_strategy import (
+    ORGANIZATION_STRATEGY_REVIEW_HANDLER_ID,
+    ORGANIZATION_STRATEGY_REVIEW_HANDLER_VERSION,
+    evaluate_organizational_strategy_review,
+    organization_strategy_review_event_id,
+)
+from world_engine.domain.organization_strategy_events import OrganizationStrategyReviewResolvedEvent
 from world_engine.domain.npc_commitments import MEETING_COMMITMENT_HANDLER, MEETING_COMMITMENT_VERSION
 from world_engine.domain.shipment_relief import plan_shipment_relief
 from world_engine.domain.shipment_relief_events import (
@@ -390,6 +398,65 @@ class RuleEngine:
             return self._resolution(
                 state, context, status="succeeded", code="story_milestone_resolved",
                 message="A story milestone reached its scheduled boundary.", events=[event],
+            )
+        if scheduled.handler_id == ORGANIZATION_STRATEGY_REVIEW_HANDLER_ID:
+            if scheduled.handler_version != ORGANIZATION_STRATEGY_REVIEW_HANDLER_VERSION:
+                return self._rejected(
+                    context,
+                    "organization_strategy_handler_unregistered",
+                    "No registered rule handler matches this organization strategy review version.",
+                )
+            strategy_id = scheduled.payload.get("strategy_id")
+            organization_id_value = scheduled.payload.get("organization_id")
+            try:
+                organization_id = UUID(str(organization_id_value))
+            except (TypeError, ValueError):
+                organization_id = None
+            strategy = state.organizational_strategies.get(organization_id) if organization_id is not None else None
+            if strategy is None or strategy.strategy_id != strategy_id:
+                return self._rejected(
+                    context,
+                    "organization_strategy_missing",
+                    "The strategy review schedule does not reference a registered organization strategy.",
+                )
+            try:
+                review = evaluate_organizational_strategy_review(
+                    state,
+                    strategy,
+                    scheduled.completed_runs + 1,
+                )
+                event = OrganizationStrategyReviewResolvedEvent(
+                    event_id=organization_strategy_review_event_id(scheduled.id, review.review_index),
+                    schedule_id=scheduled.id,
+                    expected_schedule_revision=scheduled.revision,
+                    review=review,
+                )
+            except (TypeError, ValueError):
+                return self._rejected(
+                    context,
+                    "organization_strategy_review_invalid",
+                    "The organization strategy review cannot be recomputed from the current scheduled state.",
+                )
+            executed = review.reason == "action_executed"
+            return self._resolution(
+                state,
+                context,
+                status="succeeded",
+                code="organization_strategy_action_committed" if executed else "organization_strategy_review_abstained",
+                message=(
+                    "The organization strategy review committed its authorized, resource-backed action."
+                    if executed else "The organization strategy review recorded current conditions and abstained."
+                ),
+                details={
+                    "strategy_id": strategy.strategy_id,
+                    "organization_id": str(strategy.organization_id),
+                    "review_index": review.review_index,
+                    "review_reason": review.reason,
+                    "authorized_actor_id": str(review.authorized_actor_id) if review.authorized_actor_id else None,
+                    "selected_goal_id": review.selected_goal_id,
+                    "transfer_quantity": str(review.transfer.quantity) if review.transfer is not None else None,
+                },
+                events=[event],
             )
         if (scheduled.handler_id, scheduled.handler_version) == (MEETING_COMMITMENT_HANDLER, MEETING_COMMITMENT_VERSION):
             event = ScheduledEventCompletedEvent(
@@ -1754,6 +1821,7 @@ class RuleEngine:
             visibility=travel_journey_visibility(resolved.actor_id),
         )
         if operation == "arrive":
+            goal_event = opening_arrival_event(state, actor.id, journey.to_place_id, event.event_id)
             return self._resolution(
                 state,
                 context,
@@ -1761,7 +1829,7 @@ class RuleEngine:
                 code="travel_arrived",
                 message="The character arrived at the registered destination.",
                 details={"journey_id": str(resolved.journey_id)},
-                events=[event],
+                events=[event, goal_event] if goal_event is not None else [event],
             )
 
         hazard_interruption = (
@@ -1967,6 +2035,9 @@ class RuleEngine:
             arrived_tick=state.current_tick + route.travel_ticks,
         )
         followup.append(movement)
+        goal_event = opening_arrival_event(state, actor.id, intent.destination_id, movement.event_id)
+        if goal_event is not None:
+            followup.append(goal_event)
         needs_event, deprivation = self._time_need_effects(state, actor, route.travel_ticks, context, rest_delta=0)
         if needs_event is not None:
             followup.append(needs_event)

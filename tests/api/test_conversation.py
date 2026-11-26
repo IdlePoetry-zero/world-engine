@@ -1,6 +1,8 @@
+import asyncio
 from contextlib import closing
 import json
 import sqlite3
+from threading import Event
 from decimal import Decimal
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -12,6 +14,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import event
 
 from world_engine.adapters.models import ModelGateway, ProviderKind, RoleTask
+from world_engine.adapters.models.errors import ProviderError, ProviderErrorCode
 from world_engine.api.contracts import MessageRequest, QualityProfile
 from world_engine.api.app import create_app
 from world_engine.api.security import LocalSession
@@ -20,10 +23,13 @@ from world_engine.application.conversation import (
     INTENT_SYSTEM_PROMPT,
     ConversationApplication,
     ConversationStore,
+    _compact_gm_context,
 )
 from world_engine.application.actions import RulesActionDispatcher
 from world_engine.application.operations import ModelOperations, OperationsStore
+from world_engine.application.visibility import meeting_local_time, project_player_state
 from world_engine.application.worlds import WorldApplication
+from world_engine.content import ContentCatalog
 from world_engine.domain.errors import AccessDenied, Conflict, InvalidEvent, StaleVersion
 from world_engine.domain.components import HistoricalEvidenceArtifact, KnowledgeRecord, RelationRecord
 from world_engine.domain.gameplay_events import KnowledgeAcquiredEvent
@@ -76,6 +82,50 @@ def setup_conversation(tmp_path):
     database.dispose()
 
 
+def test_compact_context_keeps_explicit_case_and_its_visible_evidence():
+    cases = [{"id": f"case-{index}", "title": f"卷宗{index}", "evidence_refs": [f"record-{index}"]}
+             for index in range(1, 5)]
+    records = [{"id": f"record-{index}", "kind": "fact", "claim": f"材料{index}"}
+               for index in (4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)]
+    compact = _compact_gm_context({
+        "state": {"player_id": "player", "entities": {"player": {"name": "访客"}},
+                  "case_files": cases, "knowledge": records},
+        "current_tick": "0", "reference_ids": ["case-4", "record-4", "unseen"],
+        "skill_level_scale": {}, "tracked_personal_needs": {}, "present_dialogue_targets": [],
+    }, "请核对案卷『卷宗4』。")
+    assert compact["state"]["case_files"][0]["id"] == "case-4"
+    assert compact["state"]["knowledge"][0]["id"] == "record-4"
+    assert compact["reference_ids"] == ["case-4", "record-4"]
+
+
+def test_meeting_local_time_uses_the_calendar_day_boundary():
+    assert meeting_local_time(3_600, 3_599, 3_600) == {"day_offset_from_now": 1, "clock": "00:00:00"}
+    assert meeting_local_time(3_599, 3_600, 3_600) == {"day_offset_from_now": -1, "clock": "00:59:59"}
+
+
+@pytest.mark.asyncio
+async def test_slow_message_snapshot_does_not_hold_the_async_dispatcher(setup_conversation, monkeypatch):
+    identity, repository, service, request, _ = setup_conversation
+    original = repository.read_world
+    entered, release = Event(), Event()
+
+    def slow_read(*args, **kwargs):
+        entered.set()
+        assert release.wait(2)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(repository, "read_world", slow_read)
+    operation = asyncio.create_task(service.send(identity, request.model_copy(update={
+        "mode": "ask_gm", "scene_observation": True, "text": "观察周围",
+    })))
+    try:
+        assert await asyncio.to_thread(entered.wait, 1)
+        assert not operation.done()
+    finally:
+        release.set()
+    assert (await operation)["world_effect"] is False
+
+
 @pytest.mark.asyncio
 async def test_hypothetical_query_never_changes_world_and_retry_does_not_call_model(setup_conversation):
     identity, repository, service, request, captured = setup_conversation
@@ -99,6 +149,78 @@ async def test_hypothetical_query_never_changes_world_and_retry_does_not_call_mo
     rows = service.store.history(identity, request.world_id, request.branch_id, request.session_id, request.actor_id)
     assert len(rows) == 1 and rows[0]["result"] == result
     assert service.default_conversation(identity, request.world_id, request.branch_id)["session_id"] == str(request.session_id)
+
+
+@pytest.mark.asyncio
+async def test_scene_observation_and_selected_case_bypass_model_and_remain_idempotent(setup_conversation):
+    identity, repository, service, prototype, captured = setup_conversation
+    opening = ContentCatalog().build_world("modern_city", "Structured opening", "Traveler", seed=7)
+    world = repository.create_world(identity, opening)
+    request = prototype.model_copy(update={
+        "world_id": world.world.world_id, "branch_id": world.branch.branch_id, "actor_id": opening.state.player_id,
+        "mode": "ask_gm", "scene_observation": True, "text": "观察周围",
+    })
+    baseline = repository.read_world(identity, request.world_id, request.branch_id)
+    readback = await service.send(identity, request)
+    assert readback["kind"] == "query" and not readback["world_effect"]
+    assert baseline.state.entities[baseline.state.entities[request.actor_id].location_id].name in readback["content"]
+    assert await service.send(identity, request) == readback
+
+    public = project_player_state(baseline.state.model_dump(mode="json"), str(request.actor_id))
+    service.actions = RulesActionDispatcher(repository, service.models, RuleEngine(), ACTION_INTENT_ADAPTER, RuleContext)
+    open_case = request.model_copy(update={
+        "request_id": uuid4(), "mode": "action", "scene_observation": None, "text": "建立选中的私人案卷",
+        "case_anchor_id": UUID(public["available_case_anchors"][0]["anchor_id"]),
+    })
+    created = await service.send(identity, open_case)
+    assert created["world_effect"] and len(created["references"]) == 1
+    assert await service.send(identity, open_case) == created
+    recovered = service._committed_status(identity, request.world_id, request.branch_id, open_case.request_id, request.actor_id)
+    assert recovered["result"]["references"] == created["references"]
+    after = repository.read_world(identity, request.world_id, request.branch_id)
+    assert len(after.state.investigation_cases) == 1
+    assert after.state.current_tick == baseline.state.current_tick
+    assert not captured
+
+
+@pytest.mark.asyncio
+async def test_gm_shrinks_current_question_after_provider_context_limit(setup_conversation, monkeypatch):
+    identity, repository, service, request, _ = setup_conversation
+    calls = []
+
+    async def generate(_scope, model_request):
+        calls.append(model_request)
+        if len(calls) == 1:
+            raise ProviderError(ProviderErrorCode.CONTEXT_LIMIT, "The context is too large.")
+        return SimpleNamespace(normalized_output={"answer": "这里有一位工匠。", "references": []})
+
+    monkeypatch.setattr(service.models, "generate", generate)
+    request = request.model_copy(update={"mode": "ask_gm", "text": "我附近有什么人？"})
+    before = repository.read_world(identity, request.world_id, request.branch_id)
+    result = await service.send(identity, request)
+    assert result["content"] == "这里有一位工匠。" and not result["world_effect"]
+    assert len(calls) == 2
+    assert len(calls[1].messages[0].content) < len(calls[0].messages[0].content)
+    assert "HIDDEN_CONSPIRACY" not in calls[1].messages[-1].content
+    assert repository.read_world(identity, request.world_id, request.branch_id).state_hash == before.state_hash
+
+
+@pytest.mark.asyncio
+async def test_gm_reports_compact_context_exhaustion_with_read_only_scene(setup_conversation, monkeypatch):
+    identity, repository, service, request, _ = setup_conversation
+    calls = []
+
+    async def generate(_scope, model_request):
+        calls.append(model_request)
+        raise ProviderError(ProviderErrorCode.CONTEXT_LIMIT, "The context is too large.")
+
+    monkeypatch.setattr(service.models, "generate", generate)
+    request = request.model_copy(update={"mode": "ask_gm", "text": "我附近有什么人？"})
+    before = repository.read_world(identity, request.world_id, request.branch_id)
+    answer = await service.send(identity, request)
+    assert len(calls) == 2 and not answer["world_effect"]
+    assert "上下文仍不足" in answer["content"] and "Neighbor" in answer["content"]
+    assert repository.read_world(identity, request.world_id, request.branch_id).state_hash == before.state_hash
 
 
 def test_busy_world_write_can_retry_same_chat_request_once(setup_conversation):
@@ -625,11 +747,38 @@ async def test_dialogue_records_speaker_memories_without_advancing_time(setup_co
     assert len(calls) == 2
     second = exchange.model_copy(update={"request_id": uuid4(), "expected_state_version": str(after.branch.state_version)})
     await service.send(identity, second)
+    second_context = json.loads(calls[-1].messages[-1].content)
+    assert second_context["earlier_own_words"] == ["我是这里的工匠。"]
+    assert second_context["earlier_words_from_this_speaker"] == [exchange.text]
     later = repository.read_world(identity, request.world_id, request.branch_id)
     assert {relation.id for relation in later.state.relations} == {relation.id for relation in after.state.relations}
     assert all(relation.dimensions["familiarity"] == 2 and len(relation.evidence_refs) == 2
                for relation in later.state.relations)
     assert repository.replay(identity, request.world_id, request.branch_id).state_hash == later.state_hash
+
+
+@pytest.mark.asyncio
+async def test_empty_testimony_responds_in_character_without_revealing_what_exists(setup_conversation):
+    identity, repository, service, request, _ = setup_conversation
+    before = repository.read_world(identity, request.world_id, request.branch_id)
+    target = next(entity for entity in before.state.entities.values() if entity.name == "Neighbor")
+    calls = []
+
+    class Models:
+        async def generate(self, _scope, model_request):
+            calls.append(model_request.role_task)
+            return SimpleNamespace(normalized_output={
+                "target_id": str(target.id), "purpose": "ask_npc_claim", "clarification": "",
+                "subject_id": str(request.actor_id),
+            })
+
+    service.actions = RulesActionDispatcher(repository, Models(), RuleEngine(), ACTION_INTENT_ADAPTER, RuleContext)
+    result = await service.send(identity, request.model_copy(update={"mode": "roleplay", "text": "你亲眼见过我吗？"}))
+    assert calls == [RoleTask.INTENT]
+    assert result["kind"] == "dialogue" and not result["world_effect"]
+    assert result["content"].startswith("Neighbor：「")
+    assert "HIDDEN_CONSPIRACY" not in result["content"]
+    assert repository.read_world(identity, request.world_id, request.branch_id).state_hash == before.state_hash
 
 
 @pytest.mark.parametrize(

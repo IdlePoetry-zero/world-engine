@@ -19,6 +19,7 @@ type Props = {
   inputHasText: boolean
   busy: boolean
   authorMode: boolean
+  onOpenCase: (id: string, title: string) => void
   onPrepareAction: (text: string) => void
 }
 
@@ -37,6 +38,7 @@ export function InvestigationJournal({
   inputHasText,
   busy,
   authorMode,
+  onOpenCase,
   onPrepareAction,
 }: Props) {
   const [observationId, setObservationId] = useState('')
@@ -104,8 +106,8 @@ export function InvestigationJournal({
                   className="investigation-action"
                   type="button"
                   disabled={actionDisabled || Boolean(existing)}
-                  title={existing ? (existing.status === 'open' ? '此角色已有这宗案卷' : '此角色已有已结案记录') : inputHasText ? '先发送或清空现有输入' : '将一条可编辑的行动文字填入 GM 输入框'}
-                  onClick={() => onPrepareAction(`请为线索「${anchor.title}」建立一份我的私人调查档案。`)}
+                  title={existing ? (existing.status === 'open' ? '此角色已有这宗案卷' : '此角色已有已结案记录') : inputHasText ? '先发送或清空现有输入' : '为选中的线索登记私人案卷'}
+                  onClick={() => onOpenCase(anchor.anchor_id, anchor.title)}
                 >
                   {existing ? (existing.status === 'open' ? '已建档' : '已结案') : <><Icon name="plus" size={13} />建立案卷</>}
                 </button>
