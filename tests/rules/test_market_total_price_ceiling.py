@@ -97,6 +97,20 @@ def _evaluate(state: WorldState, intent: TradeIntent):
     )
 
 
+def test_trade_rejects_own_listing_before_any_shared_settlement():
+    state = _state()
+    market = state.entities[MARKET_ID]
+    raw = dict(market.components["market"])
+    raw["offers"] = [raw["offers"][0] | {"seller_id": str(BUYER_ID)}]
+    scene = state.model_copy(update={"entities": state.entities | {
+        MARKET_ID: market.model_copy(update={"components": market.components | {"market": raw}}),
+    }})
+    result = _evaluate(scene, _intent())
+    assert result.outcome.status == "rejected"
+    assert result.outcome.code == "trade_own_listing"
+    assert result.events == [] and result.elapsed_ticks == 0
+
+
 @pytest.mark.parametrize(
     ("unit_price_minor", "ceiling", "expected_status", "expected_code"),
     [

@@ -8,7 +8,8 @@ from world_engine.domain.models import ResourceAccount, WorldState
 
 def reserve_strategy(
     state: WorldState, organization_id: UUID, source_id: UUID, *, mission: str,
-    review_days: int = 30, scale: int = 1, officer_id: UUID | None = None,
+    review_days: int = 30, scale: int = 1, officer_id: UUID | None = None, first_review_days: int = 2,
+    allow_current_leader: bool = False,
 ) -> WorldState:
     from world_engine.domain.organization_strategy import (
         OrganizationalStrategy, OrganizationalStrategyGoal, StrategyCondition,
@@ -19,7 +20,9 @@ def reserve_strategy(
     governance = organization.components["governance"]
     officer_id = str(officer_id) if officer_id is not None else governance.get("leader_id")
     if not officer_id or officer_id not in governance.get("members", ()):
-        return state
+        if not allow_current_leader:
+            return state
+        officer_id = None
     authority = "authority.internal_reserves"
     clause = "charter.internal_reserves"
     source = state.resources[source_id]
@@ -30,13 +33,14 @@ def reserve_strategy(
         for ident in targets.values()
     }
     officers = [dict(office) for office in governance.get("offices", ())]
-    for office in officers:
-        if office.get("holder_id") == officer_id:
-            office["authority"] = list(dict.fromkeys([*office.get("authority", []), authority]))
-            break
-    else:
-        officers.append({"office_id": "office.reserve_keeper", "title": "储备经办", "holder_id": officer_id,
-                         "authority": [authority]})
+    if officer_id is not None:
+        for office in officers:
+            if office.get("holder_id") == officer_id:
+                office["authority"] = list(dict.fromkeys([*office.get("authority", []), authority]))
+                break
+        else:
+            officers.append({"office_id": "office.reserve_keeper", "title": "储备经办", "holder_id": officer_id,
+                             "authority": [authority]})
     organization = organization.model_copy(update={"components": organization.components | {
         "governance": governance | {
             "offices": officers,
@@ -64,8 +68,9 @@ def reserve_strategy(
     return install_organizational_strategy(state, OrganizationalStrategy(
         strategy_id="internal_reserves", organization_id=organization_id,
         mission=mission, charter_clause_id=clause, authority_tag=authority,
-        first_review_tick=state.current_tick + 2 * state.calendar.day_seconds,
+        first_review_tick=state.current_tick + first_review_days * state.calendar.day_seconds,
         review_interval_ticks=review_days * state.calendar.day_seconds,
+        allow_current_leader=allow_current_leader,
         goals=[
             goal("operations", "维持日常事务储备", 90, 4, 2, 1),
             goal("development", "在有余力时积累发展储备", 50, 6, 6, 2),

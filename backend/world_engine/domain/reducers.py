@@ -1572,6 +1572,21 @@ def apply_event(state: WorldState, raw_event: DomainEvent | dict[str, object]) -
     if isinstance(event, KnowledgeAcquiredEvent):
         if any(record.id == event.record.id for record in state.knowledge):
             raise InvalidEvent(f"Knowledge record {event.record.id} already exists.")
+        if event.record.topic_inspection is not None:
+            from .npc_goal_completion import known_inspection_topic
+
+            actor = state.entities.get(event.record.owner_id)
+            topic_id = event.record.source_refs[0]
+            if (
+                actor is None or actor.status != "active" or actor.location_id != event.record.subject_id
+                or event.record.received_tick != state.current_tick
+                or event.visibility != event.record.visibility.model_dump(mode="json", include={"policy", "subject_ids"})
+                or not known_inspection_topic(
+                    state, actor_id=actor.id, place_id=actor.location_id, topic_id=topic_id,
+                    observation_tick=state.current_tick,
+                )
+            ):
+                raise InvalidEvent("An inspection receipt must match the actor's active topic and observation boundary.")
         if event.record.disclosure is not None:
             try:
                 validate_disclosure_record(event.record, state)

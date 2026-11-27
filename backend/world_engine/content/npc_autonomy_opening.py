@@ -11,6 +11,7 @@ from world_engine.domain.models import WorldState
 from world_engine.domain.npc_goal_completion import NPC_GOAL_COMPLETION_POLICY
 from world_engine.domain.npc_plan_review import (
     NPC_PLAN_REVIEW_HANDLER_ID,
+    NPC_STANDING_REVIEW_POLICY,
     build_npc_plan_review_schedule,
 )
 from world_engine.domain.npc_plans import (
@@ -56,6 +57,37 @@ _DIVERSE_TRAVEL_PROFILES = {
         "purpose": "Reach a courier handoff point on an open route",
     },
 }
+
+
+def add_standing_npc_reviews(state: WorldState, *, world_id: UUID) -> WorldState:
+    """Stagger normal reviews for every named NPC with a standing goal."""
+    if state.metadata.get(NPC_STANDING_REVIEW_POLICY) is not True:
+        return state
+    index = state.metadata.get("content_index", {})
+    leading = {UUID(value) for value in index.get("key_npc_ids", ())}
+    scheduled_actors = {
+        item.payload["actor_id"] for item in state.scheduled_events if item.handler_id == NPC_PLAN_REVIEW_HANDLER_ID
+    }
+    new_reviews = []
+    day = state.calendar.day_seconds
+    candidates = {
+        goal.owner_id for goal in state.goals if goal.status == "active" and goal.owner_id != state.player_id
+    }
+    for actor_id in sorted(candidates, key=str):
+        actor = state.entities.get(actor_id)
+        if (
+            actor is None or actor.kind not in _CHARACTER_KINDS or not actor.name
+            or actor.status != "active" or str(actor_id) in scheduled_actors
+        ):
+            continue
+        phase = uuid5(actor_id, NPC_STANDING_REVIEW_POLICY).int
+        key_npc = actor_id in leading
+        cadence = (24 + phase % 19) if key_npc else (72 + phase % 47)
+        first = (1 + phase % cadence) * day + (8 + phase % 11) * day // 24
+        new_reviews.append(build_npc_plan_review_schedule(
+            state, world_id, actor_id, state.current_tick + first, repeat_ticks=cadence * day, max_runs=10_000,
+        ))
+    return state.model_copy(update={"scheduled_events": [*state.scheduled_events, *new_reviews]})
 
 
 def enable_limited_npc_autonomy(state: WorldState, *, world_id: UUID) -> WorldState:

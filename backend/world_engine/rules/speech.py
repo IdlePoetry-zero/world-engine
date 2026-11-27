@@ -119,22 +119,10 @@ def build_private_speech_events(
         ):
             raise SpeechActionError("speech_reply_unavailable", "That private utterance is unavailable for a first reply.")
     topic_id = intent.topic_record_id
+    source_refs = []
     if topic_id is not None:
-        topic = next((item for item in state.knowledge if item.id == topic_id), None)
-        if (
-            topic is None or topic.holder_id != speaker.id or topic.kind != "observation"
-            or topic.source_event_id is None or topic.received_tick > state.current_tick
-            or not any(row.holder_id == targets[0].id and row.source_event_id == topic.source_event_id
-                       and row.kind == "observation" and row.received_tick <= state.current_tick for row in state.knowledge)
-            or not any(
-                goal.status == "active" and goal.owner_id == speaker.id
-                and (goal.deadline is None or state.current_tick <= goal.deadline)
-                and any(condition.kind == "discuss_known_topic" and condition.subject_id == speaker.id
-                        and condition.target_id == targets[0].id and condition.evidence_id == topic_id
-                        for condition in goal.conditions)
-                for goal in state.goals
-            )
-        ):
+        source_refs = _topic_speech_sources(state, speaker.id, targets[0].id, topic_id)
+        if not source_refs:
             raise SpeechActionError("speech_topic_unavailable", "That topic is unavailable for this private exchange.")
 
     events: list[KnowledgeAcquiredEvent | RelationEstablishedEvent | RelationDimensionChangedEvent] = []
@@ -152,7 +140,7 @@ def build_private_speech_events(
             claim=f'{speaker_name} privately said to {target_name}: 「{intent.utterance}」',
             received_tick=state.current_tick,
             kind="memory",
-            source_refs=[topic_id] if topic_id is not None else [],
+            source_refs=source_refs,
             fact=None,
             assessment=None,
             speech_reply_to=reply_to,
@@ -174,6 +162,42 @@ def build_private_speech_events(
             else:
                 events.extend(_reciprocal_familiarity(state, speaker.id, target.id, event_id, context.world_id))
     return tuple(events)
+
+
+def _topic_speech_sources(state: WorldState, speaker_id: UUID, target_id: UUID, topic_id: UUID) -> list[UUID]:
+    requested = next((item for item in state.knowledge if item.id == topic_id), None)
+    if requested is None or requested.received_tick > state.current_tick:
+        return []
+
+    reporting = requested.topic_inspection in {"discovered", "nothing_hidden_found"}
+    original_id = requested.source_refs[0] if reporting else topic_id
+    topic = next((item for item in state.knowledge if item.id == original_id), None) if reporting else requested
+    if (
+        (reporting and requested.owner_id != speaker_id)
+        or topic is None or topic.holder_id != speaker_id or topic.kind != "observation"
+        or topic.source_event_id is None or topic.received_tick > state.current_tick
+        or not any(
+            row.holder_id == target_id and row.source_event_id == topic.source_event_id
+            and row.kind == "observation" and row.received_tick <= state.current_tick
+            for row in state.knowledge
+        )
+    ):
+        return []
+    condition_kind = "report_topic_inspection" if reporting else "discuss_known_topic"
+    completed = {goal.id for goal in state.goals if goal.owner_id == speaker_id and goal.status == "succeeded"}
+    if not any(
+        goal.status == "active" and goal.owner_id == speaker_id
+        and (goal.deadline is None or state.current_tick <= goal.deadline)
+        and all(condition.target_id in completed for condition in goal.conditions if condition.kind == "goal_completed")
+        and any(
+            condition.kind == condition_kind and condition.subject_id == speaker_id
+            and condition.target_id == target_id and condition.evidence_id == original_id
+            for condition in goal.conditions
+        )
+        for goal in state.goals
+    ):
+        return []
+    return [topic_id, original_id] if reporting else [topic_id]
 
 
 def speech_relation_evidence(

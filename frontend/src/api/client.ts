@@ -736,12 +736,17 @@ export type WorldBookImportResult = { entry_count: number; state_version: string
 export type ActionDraft = {
   draft_id: string
   revision: number
-  action_kind: 'trade' | 'propose_relationship_invitation' | null
+  action_kind: 'trade' | 'propose_relationship_invitation' | 'resolve_institutional_credit' | null
   can_confirm: boolean
   review: string
 }
 export type DraftControl = { operation: 'prepare' } |
   { operation: 'update' | 'confirm' | 'cancel'; draft_id: string; revision: number }
+export type SceneCreditAction = {
+  kind: 'resolve_institutional_credit'
+  credit_id: string
+  expected_revision: string
+} & ({ operation: 'accept' | 'decline' | 'withdraw' } | { operation: 'pay'; amount_minor: string })
 export type MessageRequest = {
   request_id: string
   world_id: string
@@ -754,6 +759,7 @@ export type MessageRequest = {
   draft?: DraftControl
   scene_observation?: true
   case_anchor_id?: string
+  scene_action?: SceneCreditAction
   profile: { speed: 'fast' | 'balanced' | 'patient'; depth: 'standard' | 'deep' | 'exhaustive' }
 }
 export type MessageResponse = { message_id: string; kind: string; content?: string; command_id?: string; job_id?: string; world_effect: boolean; committed_tick?: string; elapsed_ticks?: string; references?: string[]; state_version?: string; action_draft?: ActionDraft; closed_draft_id?: string }
@@ -1286,4 +1292,148 @@ export const api = {
     const query = actorId ? `?actor_id=${encodeURIComponent(actorId)}` : ''
     return `${apiBase}/worlds/${encodeURIComponent(worldId)}/branches/${encodeURIComponent(branchId)}/media/${encodeURIComponent(contentHash)}${query}`
   },
+}
+
+export type WorldPackAuthoringDraft = {
+  manifest: Record<string, unknown>
+  template: Record<string, unknown>
+}
+
+export type WorldPackAuthoringPreview = {
+  can_export: boolean
+  roundtrip_verified: boolean
+  archive_sha256: string
+  manifest: Record<string, unknown>
+  compatibility: Record<string, unknown>
+  opening_count: number
+  asset_count: number
+  asset_bytes: number
+  [key: string]: unknown
+}
+
+export type WorldPackAuthoringExportRequest = WorldPackAuthoringDraft & {
+  expected_archive_sha256: string
+}
+
+export function previewAuthorWorldPack(body: WorldPackAuthoringDraft): Promise<WorldPackAuthoringPreview> {
+  return post<WorldPackAuthoringPreview>('/packs/authoring/preview', body)
+}
+
+export async function exportAuthorWorldPack(body: WorldPackAuthoringExportRequest): Promise<Blob> {
+  const headers = new Headers({ 'Content-Type': 'application/json', 'Accept': 'application/zip' })
+  const response = await fetch(`${apiBase}/packs/authoring/export`, {
+    method: 'POST', body: JSON.stringify(body), headers, credentials: 'same-origin',
+  })
+  if (!response.ok) {
+    let error: ApiErrorBody = {}
+    try {
+      const envelope = await response.json() as ApiErrorEnvelope
+      error = envelope.error ?? envelope
+    } catch { /* retain a readable status error */ }
+    throw new ApiError(response.status, error)
+  }
+  return response.blob()
+}
+
+export type AutonomyCoverageCounters = {
+  routine_count: number
+  review_count: number
+  decision_count: number
+  opportunity_count: number
+  action_count: number
+  effect_count: number
+  ambient_check_count: number
+  ambient_accepted_count: number
+  ambient_followup_count: number
+  other_event_count: number
+}
+
+export type AutonomyCoverageCategory = AutonomyCoverageCounters & {
+  eligible_count: number
+  eligible_ticks: number
+  eligible_without_recorded_action_count: number
+  no_action_reason_unknown_count: number
+  eligible_without_recorded_opportunity_count: number
+  no_recorded_opportunity_reason_unknown_count: number
+  opportunity_without_recorded_action_count: number
+  eligibility_incomplete_count: number
+}
+
+export type AutonomyCoveragePeriodCategory = Omit<AutonomyCoverageCategory, 'eligibility_incomplete_count'>
+
+export type AutonomyCoverageSummary = {
+  schema_version: number
+  view: 'portable_aggregate'
+  contains_entity_identifiers: false
+  contains_names_or_event_prose: false
+  window: { start_tick: number; end_tick_exclusive: number }
+  period_ticks: number | null
+  actors: AutonomyCoverageCategory
+  organizations: AutonomyCoverageCategory
+  periods: {
+    start_tick: number
+    end_tick_exclusive: number
+    actors: AutonomyCoveragePeriodCategory
+    organizations: AutonomyCoveragePeriodCategory
+  }[]
+  ledger: {
+    committed_event_count: number
+    ignored_uncommitted_count: number
+    ambient_causation_sources_dropped: number
+  }
+}
+
+export type AutonomyCoverageDetail = {
+  schema_version: number
+  view: 'author_detail'
+  window: { start_tick: number; end_tick_exclusive: number }
+  subjects: {
+    subject_id: string
+    subject_class: 'actor' | 'organization'
+    entity_kind: string
+    eligibility_intervals: {
+      start_tick: number
+      end_tick_exclusive: number | null
+      entry_kind: string
+      exit_kind: string | null
+    }[]
+    eligible_ticks_in_window: number | null
+    eligibility_incomplete: boolean
+    routine_count: number
+    review_count: number
+    decision_count: number
+    opportunity_count: number
+    action_count: number
+    effect_count: number
+    ambient_check_count: number
+    ambient_accepted_count: number
+    ambient_followup_count: number
+    other_event_count: number
+    recorded_non_action_reasons: string[]
+    no_action_reason: string
+    coverage_status: string
+    opportunity_status: string
+    period_activity: (AutonomyCoverageCounters & { start_tick: number; end_tick_exclusive: number })[]
+  }[]
+}
+
+export type AutonomyCoverageResult = {
+  from_sequence: string
+  through_sequence: string
+  summary: AutonomyCoverageSummary
+  detail: AutonomyCoverageDetail
+}
+
+export function fetchAutonomyCoverage(
+  worldId: string,
+  branchId: string,
+  after?: string,
+  signal?: AbortSignal,
+): Promise<AutonomyCoverageResult> {
+  const query = new URLSearchParams({ branch_id: branchId })
+  if (after !== undefined) query.set('after', after)
+  return request<AutonomyCoverageResult>(
+    `/worlds/${encodeURIComponent(worldId)}/autonomy-coverage?${query.toString()}`,
+    { signal },
+  )
 }

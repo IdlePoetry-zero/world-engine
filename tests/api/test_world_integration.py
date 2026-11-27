@@ -57,6 +57,65 @@ def create(client, key="creation-1", title="Integration"):
     })
 
 
+def test_authored_pack_preview_binds_export_to_changes_and_reimports(service):
+    client, application, _, _ = service
+    authored = {
+        "manifest": {"pack_id": "author.roundtrip-test", "version": "1.0.0", "title": "Authored Opening"},
+        "template": {"scenario": application.catalog.build_world("fixture", "Portable", "Traveler").state.model_dump(mode="json")},
+    }
+    preview = client.post("/api/v1/packs/authoring/preview", json=authored)
+    assert preview.status_code == 200
+    report = preview.json()
+    assert report["can_export"] is True and report["roundtrip_verified"] is True
+    checked = authored | {"expected_archive_sha256": report["archive_sha256"]}
+    changed = checked | {"manifest": authored["manifest"] | {"title": "Revised Opening"}}
+    assert client.post("/api/v1/packs/authoring/export", json=changed).status_code == 409
+    archive = client.post("/api/v1/packs/authoring/export", json=checked)
+    assert archive.status_code == 200 and archive.headers["content-type"] == "application/zip"
+    reopened = client.post("/api/v1/packs/import/preview", headers={"Content-Type": "application/zip"}, content=archive.content)
+    assert reopened.status_code == 200 and reopened.json()["archive_sha256"] == report["archive_sha256"]
+    imported = client.post(
+        "/api/v1/packs/import", headers={
+            "Content-Type": "application/zip", "Idempotency-Key": "authored-roundtrip",
+            "X-World-Pack-Sha256": report["archive_sha256"],
+        }, content=archive.content,
+    )
+    assert imported.status_code == 201
+
+
+def test_autonomy_coverage_counts_eligible_actor_without_recorded_action(service):
+    client, _, _, _ = service
+    created = create(client).raise_for_status().json()
+    endpoint = f"/api/v1/worlds/{created['world_id']}/autonomy-coverage"
+    branch = {"branch_id": created["active_branch_id"]}
+    report = client.get(endpoint, params=branch).raise_for_status().json()
+    actors = report["summary"]["actors"]
+    assert actors["eligible_count"] == 1
+    assert actors["action_count"] == 0 and actors["no_action_reason_unknown_count"] == 1
+    assert report["summary"]["contains_entity_identifiers"] is False
+    assert report["detail"]["subjects"][0]["subject_class"] == "actor"
+    assert client.get(endpoint, params=branch | {"after": "400000"}).status_code == 422
+
+
+def test_authored_pack_api_resolves_local_entity_and_route_aliases(service):
+    from world_engine.application.authored_world_pack_builder import minimal_authored_world_pack
+
+    client, _, _, _ = service
+    document = minimal_authored_world_pack()
+    report = client.post("/api/v1/packs/authoring/preview", json=document).raise_for_status().json()
+    archive = client.post("/api/v1/packs/authoring/export", json={
+        **document, "expected_archive_sha256": report["archive_sha256"],
+    }).raise_for_status().content
+    world = client.post("/api/v1/packs/import", content=archive, headers={
+        "Content-Type": "application/zip", "Idempotency-Key": "authored-alias-world",
+        "X-World-Pack-Sha256": report["archive_sha256"], "X-Story-Opening": "first-step",
+    }).raise_for_status().json()
+    state = client.get(f"/api/v1/worlds/{world['world_id']}/view").raise_for_status().json()["state"]
+    player = state["entities"][state["player_id"]]
+    assert state["entities"][player["location_id"]]["name"] == "河岸渡口"
+    assert any(route["destination_name"] == "北岸小路" for route in state["travel_options"])
+
+
 def test_world_pack_preview_import_and_author_download(service):
     client, application, _, _ = service
     scenario = application.catalog.build_world("fixture", "Portable", "Traveler").state
@@ -381,7 +440,7 @@ def test_public_create_selects_optional_family_23_and_persists_occupations(tmp_p
         client.get("/api/v1/session").raise_for_status()
         packs = client.get("/api/v1/packs").raise_for_status().json()["items"]
         assert all(pack["version"] == "2.0.0" for pack in packs)
-        assert all(pack["available_versions"] == ["2.0.0", "2.2.0", "2.3.0", "2.8.0", "2.12.0", "2.13.0", "2.14.0"] for pack in packs)
+        assert all(pack["available_versions"] == ["2.0.0", "2.2.0", "2.3.0", "2.8.0", "2.12.0", "2.13.0", "2.14.0", "2.15.0"] for pack in packs)
 
         endpoint = "/api/v1/worlds"
         headers = {"Idempotency-Key": "family-occupation-23"}

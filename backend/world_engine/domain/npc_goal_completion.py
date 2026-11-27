@@ -16,6 +16,28 @@ NPC_STEP_GOAL_COMPLETION_POLICY = "npc_goal_completion_each_step_v1"
 NPC_GOAL_DEPENDENCY_COMPLETION_POLICY = "npc_goal_dependency_completion_v1"
 
 
+def known_inspection_topic(
+    state: WorldState, *, actor_id: UUID, place_id: UUID, topic_id: UUID, observation_tick: int,
+) -> bool:
+    """An inspection must derive from an active goal with genuinely known evidence."""
+    return any(
+        record.id == topic_id and record.holder_id == actor_id and record.subject_id == place_id
+        and record.received_tick <= state.current_tick
+        and (record.valid_from_tick is None or record.valid_from_tick <= state.current_tick)
+        and record.visibility.policy == "subject_ids" and actor_id in record.visibility.subject_ids
+        for record in state.knowledge
+    ) and any(
+        goal.owner_id == actor_id and goal.status == "active" and goal.created_tick <= state.current_tick
+        and (goal.deadline is None or observation_tick <= goal.deadline)
+        and any(
+            condition.kind == "inspect_known_topic" and condition.subject_id == actor_id
+            and condition.target_id == place_id and condition.evidence_id == topic_id
+            for condition in goal.conditions
+        )
+        for goal in state.goals
+    )
+
+
 def npc_goal_fulfillment_enabled(state: WorldState, goal: GoalRecord, *, plan_completed: bool) -> bool:
     return (
         goal.auto_complete or state.metadata.get(NPC_STEP_GOAL_COMPLETION_POLICY) is True
@@ -94,6 +116,28 @@ def goal_condition_met(
             and memory.subject_id == owner_id and condition.evidence_id in memory.source_refs
             and memory.visibility.policy == "subject_ids" and set(memory.visibility.subject_ids) == {owner_id, condition.target_id}
             for memory in state.knowledge
+        )
+    if condition.kind == "inspect_known_topic":
+        return condition.subject_id == owner_id and any(
+            record.owner_id == owner_id and record.subject_id == condition.target_id
+            and record.source_refs == [condition.evidence_id]
+            and record.topic_inspection in {"discovered", "nothing_hidden_found"}
+            for record in state.knowledge
+        )
+    if condition.kind == "report_topic_inspection":
+        return condition.subject_id == owner_id and any(
+            record.kind == "memory" and record.owner_id == owner_id and record.holder_id == condition.target_id
+            and record.subject_id == owner_id and len(record.source_refs) == 2
+            and record.source_refs[1] == condition.evidence_id
+            and record.visibility.policy == "subject_ids"
+            and set(record.visibility.subject_ids) == {owner_id, condition.target_id}
+            and any(
+                source.id == record.source_refs[0] and source.owner_id == owner_id
+                and source.source_refs == [condition.evidence_id]
+                and source.topic_inspection in {"discovered", "nothing_hidden_found"}
+                for source in state.knowledge
+            )
+            for record in state.knowledge
         )
     return any(
         prerequisite.id == condition.target_id and prerequisite.owner_id == owner_id

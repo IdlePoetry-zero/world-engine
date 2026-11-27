@@ -1,0 +1,204 @@
+.autonomy-coverage-panel {
+  margin: 16px 0;
+  padding: 16px;
+  color: #a8b9ad;
+  background: rgba(20, 36, 31, .58);
+  border: 1px solid rgba(176, 207, 187, .12);
+  border-radius: 7px;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.autonomy-coverage-heading,
+.autonomy-coverage-subheading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.autonomy-coverage-heading h2 {
+  margin: 4px 0 0;
+  color: #d5e2da;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.autonomy-coverage-intro {
+  max-width: 90ch;
+  margin: 9px 0 14px;
+  color: #899b92;
+  font-size: 10px;
+}
+
+.autonomy-coverage-form label {
+  display: block;
+  margin-bottom: 6px;
+  color: #bdcdc3;
+  font-size: 10px;
+}
+
+.autonomy-coverage-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.autonomy-coverage-controls input {
+  width: min(100%, 250px);
+  height: 33px;
+  font: 11px var(--mono);
+}
+
+.autonomy-coverage-form small {
+  display: block;
+  margin-top: 6px;
+  color: #75877f;
+  font-size: 9px;
+}
+
+.autonomy-coverage-form [aria-invalid='true'] {
+  border-color: rgba(214, 133, 119, .55);
+}
+
+.autonomy-coverage-error {
+  margin: 8px 0 0;
+  color: #e0a194;
+  font-size: 10px;
+}
+
+.autonomy-coverage-status {
+  margin: 8px 0 0;
+  color: #a9cbb4;
+  font-size: 10px;
+}
+
+.autonomy-coverage-report {
+  margin-top: 16px;
+  padding-top: 13px;
+  border-top: 1px solid rgba(176, 207, 187, .1);
+}
+
+.autonomy-coverage-report-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin-bottom: 12px;
+  color: #91a49a;
+  font: 9px var(--mono);
+}
+
+.autonomy-coverage-categories {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.autonomy-coverage-category {
+  min-width: 0;
+  padding: 11px;
+  background: rgba(255, 255, 255, .018);
+  border: 1px solid rgba(176, 207, 187, .085);
+  border-radius: 5px;
+}
+
+.autonomy-coverage-category h3,
+.autonomy-coverage-subheading h3 {
+  margin: 0;
+  color: #c9d8ce;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.autonomy-coverage-category dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px 12px;
+  margin: 9px 0 0;
+}
+
+.autonomy-coverage-category dl > div {
+  min-width: 0;
+}
+
+.autonomy-coverage-category dt {
+  color: #7f9188;
+  font-size: 9px;
+}
+
+.autonomy-coverage-category dd {
+  margin: 1px 0 0;
+  color: #c4d5c9;
+  font: 11px var(--mono);
+}
+
+.autonomy-coverage-periods {
+  margin-top: 14px;
+}
+
+.autonomy-coverage-subheading > span {
+  color: #70837a;
+  font-size: 9px;
+}
+
+.autonomy-coverage-table-wrap {
+  margin-top: 7px;
+  overflow-x: auto;
+}
+
+.autonomy-coverage-table-wrap table {
+  width: 100%;
+  border-collapse: collapse;
+  color: #9cada3;
+  font-size: 9px;
+  text-align: left;
+}
+
+.autonomy-coverage-table-wrap th,
+.autonomy-coverage-table-wrap td {
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(176, 207, 187, .075);
+  white-space: nowrap;
+}
+
+.autonomy-coverage-table-wrap thead th {
+  color: #72867c;
+  font-size: 8px;
+  font-weight: 500;
+}
+
+.autonomy-coverage-table-wrap tbody th {
+  color: #9db0a5;
+  font: 9px var(--mono);
+  font-weight: 400;
+}
+
+.autonomy-coverage-table-wrap tbody td {
+  color: #b2c4b8;
+  font-family: var(--mono);
+}
+
+@media (max-width: 760px) {
+  .autonomy-coverage-heading,
+  .autonomy-coverage-subheading {
+    align-items: flex-start;
+  }
+
+  .autonomy-coverage-categories {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 460px) {
+  .autonomy-coverage-panel {
+    padding: 12px;
+  }
+
+  .autonomy-coverage-heading {
+    flex-direction: column;
+  }
+
+  .autonomy-coverage-category dl {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

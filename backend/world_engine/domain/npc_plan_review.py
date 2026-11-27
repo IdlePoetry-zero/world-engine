@@ -29,6 +29,7 @@ _MAX_TICK = 2**63 - 1
 _MAX_RUNS = 1_000_000
 NPC_FAILURE_REVIEW_POLICY = "npc_failure_review_v1"
 NPC_GOAL_FOLLOWUP_REVIEW_POLICY = "npc_goal_followup_review_v1"
+NPC_STANDING_REVIEW_POLICY = "npc_standing_reviews_v1"
 NPC_MODEL_UNAVAILABLE_REASON = "npc_model_unavailable"
 # These completed model calls did not produce an acceptable plan review. They
 # are recorded as model-sourced deferrals and rearmed through the same bounded,
@@ -347,14 +348,22 @@ def _rearm_npc_review(old: ScheduledEventRecord, due_tick: int) -> ScheduledEven
 def build_npc_goal_followup_review(
     state: WorldState, world_id: UUID, plan: NpcPlan, fulfilled_ids: tuple[UUID, ...],
 ) -> ScheduledEventRecord | None:
-    """Rearm an exhausted review once a plan unblocks an actor's next goal."""
+    """Give a newly available goal a timely decision opportunity."""
     if state.metadata.get(NPC_GOAL_FOLLOWUP_REVIEW_POLICY) is not True or plan.status != "completed":
         return None
     old = _exhausted_npc_review(state, world_id, plan.actor_id)
-    if old is None:
+    from .ambient_events import AMBIENT_FOLLOWUP_POLICY
+
+    pending = None
+    if old is None and state.metadata.get(AMBIENT_FOLLOWUP_POLICY) is True:
+        schedule_id = npc_plan_review_schedule_id(world_id, plan.actor_id)
+        pending = next((row for row in state.scheduled_events if row.id == schedule_id and row.status == "queued"), None)
+        if pending is not None:
+            validate_npc_plan_review_schedule(state, pending, world_id)
+    if old is None and pending is None:
         return None
     due_tick = state.current_tick + 120
-    if old.completed_runs > 1:
+    if old is not None and old.completed_runs > 1:
         due_tick = max(due_tick, old.due_tick + max(120, state.calendar.day_seconds // 24))
     if due_tick > _MAX_TICK:
         return None
@@ -377,7 +386,13 @@ def build_npc_goal_followup_review(
             prerequisites & completed_by_plan and prerequisites <= completed
             and not npc_goal_conditions_met(state, goal, fulfilled=newly_fulfilled)
         ):
-            return _rearm_npc_review(old, due_tick)
+            if old is not None:
+                return _rearm_npc_review(old, due_tick)
+            if (
+                pending.due_tick > due_tick
+                and any(condition.kind == "report_topic_inspection" for condition in goal.conditions)
+            ):
+                return pending.model_copy(update={"due_tick": due_tick, "revision": pending.revision + 1})
     return None
 
 

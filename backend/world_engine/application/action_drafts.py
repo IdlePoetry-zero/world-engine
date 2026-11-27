@@ -7,7 +7,31 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from world_engine.domain.errors import Conflict, NotFound
-from world_engine.rules.contracts import ProposeRelationshipInvitationIntent, TradeIntent
+from world_engine.rules.contracts import ProposeRelationshipInvitationIntent, ResolveInstitutionalCreditIntent, TradeIntent
+
+
+class CreditResolutionSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["resolve_institutional_credit"]
+    credit_id: UUID
+    operation: Literal["accept", "decline", "withdraw", "pay"]
+    expected_revision: Annotated[str, Field(pattern=r"^[1-9][0-9]{0,18}$")]
+    amount_minor: Annotated[str, Field(pattern=r"^[1-9][0-9]{0,29}$")] | None = None
+
+    @model_validator(mode="after")
+    def payment_and_revision(self):
+        if (self.operation == "pay") != (self.amount_minor is not None):
+            raise ValueError("A payment requires a positive amount in minor units.")
+        if int(self.expected_revision) > 2**63 - 1:
+            raise ValueError("The credit revision exceeds the supported range.")
+        return self
+
+    def rule_intent(self) -> ResolveInstitutionalCreditIntent:
+        return ResolveInstitutionalCreditIntent(
+            credit_id=self.credit_id, operation=self.operation, expected_revision=int(self.expected_revision),
+            amount_minor=int(self.amount_minor) if self.amount_minor is not None else None,
+        )
 
 
 class DraftControl(BaseModel):
@@ -36,7 +60,9 @@ class ActionDraft(BaseModel):
     location_id: UUID | None
     revision: int = 1
     state_version: int
-    action: Annotated[TradeIntent | ProposeRelationshipInvitationIntent, Field(discriminator="kind")] | None
+    action: Annotated[
+        TradeIntent | ProposeRelationshipInvitationIntent | ResolveInstitutionalCreditIntent, Field(discriminator="kind"),
+    ] | None
     source_text: str
     review: str
 

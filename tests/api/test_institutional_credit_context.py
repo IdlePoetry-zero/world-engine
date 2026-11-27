@@ -4,6 +4,8 @@ import json
 from decimal import Decimal
 from uuid import UUID, uuid4
 
+import pytest
+
 from world_engine.application.institutional_credit_context import MAX_CONTEXT_ROWS, institutional_credit_context
 from world_engine.domain.components import GovernanceComponent, OfficeRecord, TreasuryComponent
 from world_engine.domain.institutional_credit import (
@@ -75,6 +77,91 @@ def _offer(lender_id, borrower_id, *, tick: int = 9, credit_id=None):
         maturity_tick=tick + 12,
         current_tick=tick,
     )
+
+
+@pytest.mark.asyncio
+async def test_scene_credit_preview_rechecks_projection_and_confirmation(tmp_path):
+    from world_engine.api.contracts import MessageRequest
+    from world_engine.application.actions import RulesActionDispatcher
+    from world_engine.application.conversation import ConversationApplication, ConversationStore
+    from world_engine.application.operations import OperationsStore
+    from world_engine.application.worlds import WorldApplication
+    from world_engine.domain.models import AccessScope, CommandEnvelope, NewWorld
+    from world_engine.rules.contracts import ACTION_INTENT_ADAPTER, OfferInstitutionalCreditIntent, RuleContext
+    from world_engine.rules.engine import RuleEngine
+    from world_engine.storage.database import Database
+    from world_engine.storage.repository import WorldRepository
+
+    class NoModel:
+        async def generate(self, *_args):
+            raise AssertionError("A typed button and confirmation require no action-interpretation model.")
+
+    access = AccessScope(tenant_id=uuid4(), user_id=uuid4())
+    protagonist = _signer("Treasurer")
+    resources = {}
+    borrower = _organization(name="Borrower org", actor_id=protagonist.id, currencies=("custom.credit",), resources=resources)
+    lender = _organization(name="Lender org", actor_id=protagonist.id, currencies=("custom.credit",), resources=resources)
+    draft = NewWorld(title="Credit decision", state=WorldState(
+        player_id=protagonist.id, current_tick=9,
+        entities={entity.id: entity for entity in (protagonist, borrower, lender)},
+        resources=resources,
+    ))
+    database = Database(f"sqlite:///{(tmp_path / 'credit.db').as_posix()}")
+    try:
+        database.create_schema()
+        repository = WorldRepository(database)
+        repository.create_world(access, draft)
+        initial = repository.read_world(access, draft.world_id, draft.branch_id)
+        models = NoModel()
+        conversation = ConversationApplication(
+            WorldApplication(repository, None), models, ConversationStore(OperationsStore(tmp_path / "operations.db")),
+        )
+        conversation.actions = RulesActionDispatcher(repository, models, RuleEngine(), ACTION_INTENT_ADAPTER, RuleContext)
+        message = {
+            "world_id": draft.world_id, "branch_id": draft.branch_id, "actor_id": protagonist.id,
+            "session_id": uuid4(), "expected_state_version": str(initial.branch.state_version), "mode": "action",
+        }
+        offer_intent = OfferInstitutionalCreditIntent(
+            lender_organization_id=lender.id, borrower_organization_id=borrower.id, currency_resource_id="custom.credit",
+            principal_minor=5, accepted_through_tick=11, maturity_tick=21,
+        )
+        command_id = uuid4()
+        offered = RuleEngine().evaluate(initial.state, offer_intent, RuleContext(
+            world_id=draft.world_id, branch_id=draft.branch_id, actor_id=protagonist.id,
+            command_id=command_id, ruleset_version=initial.world.ruleset_version,
+        ))
+        assert offered.outcome.status == "succeeded", offered.outcome
+        repository.commit_command(access, draft.world_id, draft.branch_id, CommandEnvelope(
+            command_id=command_id, actor_id=protagonist.id, idempotency_key="offer-before-panel",
+            expected_state_version=initial.branch.state_version, command_type="action.offer_institutional_credit",
+            payload=offer_intent.model_dump(mode="json"),
+        ), offered.events)
+        before = repository.read_world(access, draft.world_id, draft.branch_id)
+        offer, = before.state.institutional_credit_contracts
+        message |= {"expected_state_version": str(before.branch.state_version),
+                    "text": "核对拒绝借款。", "draft": {"operation": "prepare"}}
+        choice = {"kind": "resolve_institutional_credit", "credit_id": offer.credit_id, "operation": "decline",
+                  "expected_revision": "1"}
+        invalid = await conversation.send(access, MessageRequest(
+            **message, request_id=uuid4(), scene_action=choice | {"operation": "pay", "amount_minor": "1"},
+        ))
+        assert "action_draft" not in invalid and invalid["world_effect"] is False
+        preview = await conversation.send(access, MessageRequest(**message, request_id=uuid4(), scene_action=choice))
+        assert preview["world_effect"] is False and preview["action_draft"]["can_confirm"]
+        assert repository.read_world(access, draft.world_id, draft.branch_id).state_hash == before.state_hash
+        readback = preview["action_draft"]
+        confirmation = message | {"draft": {"operation": "confirm", "draft_id": readback["draft_id"], "revision": readback["revision"]}}
+        submitted = MessageRequest(**confirmation, request_id=uuid4())
+        committed = await conversation.send(access, submitted)
+        assert committed["world_effect"] is True
+        final = repository.read_world(access, draft.world_id, draft.branch_id)
+        assert final.state.institutional_credit_contracts[0].status == "declined"
+        assert final.state.current_tick == before.state.current_tick
+        assert final.state.resources == before.state.resources
+        assert await conversation.send(access, submitted) == committed
+        assert repository.replay(access, draft.world_id, draft.branch_id, from_genesis=True).state_hash == final.state_hash
+    finally:
+        database.dispose()
 
 
 def test_context_uses_direct_signing_authority_and_only_visible_shared_treasury_units():

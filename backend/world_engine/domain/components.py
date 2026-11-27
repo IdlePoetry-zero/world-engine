@@ -902,12 +902,21 @@ class KnowledgeRecord(ComponentModel):
         default=None, exclude_if=lambda value: value is None,
     )
     speech_reply_to: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
+    topic_inspection: Literal["discovered", "search_failed", "nothing_hidden_found"] | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     visibility: VisibilityScope = Field(default_factory=VisibilityScope)
 
     @model_validator(mode="after")
     def has_knowledge_owner(self) -> KnowledgeRecord:
         if self.owner_id is None and self.holder_id is None:
             raise ValueError("knowledge requires an owner_id or holder_id")
+        if self.topic_inspection is not None and (
+            self.kind != "observation" or self.owner_id is None or self.holder_id is not None
+            or self.subject_id is None or len(self.source_refs) != 1 or self.visibility.policy != "subject_ids"
+            or self.visibility.subject_ids != [self.owner_id]
+        ):
+            raise ValueError("a topic inspection must cite one source and belong to the inspecting actor")
         if self.speech_reply_to is not None and (
             self.kind != "memory" or self.owner_id is None or self.holder_id is None
             or self.owner_id == self.holder_id or self.subject_id != self.owner_id or self.speech_reply_to == self.id
@@ -959,6 +968,8 @@ class GoalCondition(ComponentModel):
         "entity_status",
         "goal_completed",
         "discuss_known_topic",
+        "inspect_known_topic",
+        "report_topic_inspection",
     ]
     subject_id: UUID | None = None
     target_id: UUID | None = None
@@ -985,10 +996,14 @@ class GoalCondition(ComponentModel):
             raise ValueError("entity_status requires subject_id and status")
         if self.kind == "goal_completed" and self.target_id is None:
             raise ValueError("goal_completed requires target_id")
-        if self.kind == "discuss_known_topic" and (
+        if self.kind in {"discuss_known_topic", "report_topic_inspection"} and (
             self.subject_id is None or self.target_id is None or self.evidence_id is None
         ):
             raise ValueError("discuss_known_topic requires a speaker, listener, and known topic")
+        if self.kind == "inspect_known_topic" and (
+            self.subject_id is None or self.target_id is None or self.evidence_id is None
+        ):
+            raise ValueError("inspect_known_topic requires an actor, place, and known topic")
         return self
 
 

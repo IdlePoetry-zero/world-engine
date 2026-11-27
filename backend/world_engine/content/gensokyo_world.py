@@ -3,11 +3,12 @@
 from uuid import UUID
 
 from world_engine.application.world_packs import WorldPackManifest, write_world_pack
-from world_engine.domain.ambient_events import AmbientEventPolicy, build_ambient_event_schedule
+from world_engine.domain.ambient_events import AMBIENT_FOLLOWUP_POLICY, AmbientEventPolicy, build_ambient_event_schedule
 from world_engine.domain.challenges import ChallengeDefinition
 from world_engine.domain.components import GoalRecord, KnowledgeRecord, PlaceComponent, ProvenanceReference, RelationRecord
 from world_engine.domain.models import ResourceAccount, StoryArrival, WorldEntity, WorldState
-from world_engine.domain.npc_plan_review import build_npc_plan_review_schedule
+from world_engine.domain.npc_plan_review import NPC_GOAL_FOLLOWUP_REVIEW_POLICY, build_npc_plan_review_schedule
+from world_engine.domain.npc_plans import NPC_SHARED_EXPLORATION_POLICY
 from world_engine.domain.social_contact_settlement import build_social_contact_schedules
 from world_engine.domain.story_nodes import StoryFollowup, StoryNode
 from world_engine.domain.travel_journeys import COMPACT_ROUTINE_JOURNEY_POLICY
@@ -35,6 +36,7 @@ from .strategy_examples import reserve_strategy
 PACK_ID = "author.gensokyo-world"
 PACK_VERSION = "1.5.0"
 SOCIAL_PACK_VERSION = "1.6.0"
+CAUSAL_PACK_VERSION = "1.7.0"
 PACK_TITLE = "东方幻想乡·异变年代"
 
 _AMBIENT_PRESETS = (
@@ -415,20 +417,33 @@ def _attach_organizations(entities: dict[UUID, WorldEntity], entries: list[World
         })
 
 
-def _install_local_strategies(state: WorldState) -> WorldState:
+def _install_local_strategies(state: WorldState, *, causal_world: bool = False) -> WorldState:
     # These author-supplied operating policies use the existing organizations.
     # The resource allocation describes the simulation's opening inventory.
     policies = (
         ("scarlet-household", "sakuya", 12, "维持馆务、照护和来客接待，并逐步准备后续活动所需物资。"),
         ("moriya-faith", "sanae", 10, "维持神社日常和山上访客接待，并为后续活动预留物资。"),
     )
+    if causal_world:
+        policies += (
+            ("prismriver-ensemble", "lunasa", 8, "协调演出准备与成员安排，照看共用器材。"),
+            ("mountain-tengu", "aya", 10, "维持山路联络和日常巡查，按人员与物资情况筹备对外来往。"),
+            ("mountain-kappa", "nitori", 9, "保障维修与共同研究所需的工具和物料。"),
+            ("myouren-community", "byakuren", 9, "维持寺院公共事务、来客接待与供物储备。"),
+            ("eagle-ravi", "ringo", 8, "保留值勤补给，协调成员相互联络。"),
+            ("kiketsu", "yachie", 10, "维持组内补给与联系，按实际成员能力安排后续事务。"),
+            ("keiga", "saki", 10, "维持日常补给与组员活动所需的安排。"),
+            ("mining-operation", "megumu", 10, "保障现有矿务的联络、工具及基础物资。"),
+        )
     resource_id = "gensokyo.care_supply"
     issuer_id = _id(f"world:stock:issue:{resource_id}")
-    for key, officer, amount, mission in policies:
+    for index, (key, officer, amount, mission) in enumerate(policies):
         organization_id = _id(f"organization:{key}")
         organization = state.entities.get(organization_id)
         officer_id = actor_id(officer)
-        if organization is None or str(officer_id) not in organization.components.get("governance", {}).get("members", ()):
+        if organization is None or (
+            not causal_world and str(officer_id) not in organization.components.get("governance", {}).get("members", ())
+        ):
             continue
         stock_id = _id(f"world:strategy-source:{key}")
         issuer = state.resources[issuer_id]
@@ -436,7 +451,10 @@ def _install_local_strategies(state: WorldState) -> WorldState:
             issuer_id: issuer.model_copy(update={"balance": issuer.balance - amount}),
             stock_id: ResourceAccount(owner_id=organization_id, resource_id=resource_id, balance=amount),
         }})
-        state = reserve_strategy(state, organization_id, stock_id, mission=mission, officer_id=officer_id)
+        state = reserve_strategy(
+            state, organization_id, stock_id, mission=mission, officer_id=officer_id,
+            first_review_days=2 + index if causal_world else 2, allow_current_leader=causal_world,
+        )
     return state
 
 
@@ -600,8 +618,10 @@ def _standing_goals(key: str, entities: dict[UUID, WorldEntity]) -> tuple[GoalRe
     ),)
 
 
-def build_opening(chapter: Chapter, *, social_world: bool = False,
+def build_opening(chapter: Chapter, *, social_world: bool = False, causal_world: bool = False,
                   ambient_overrides: dict[str, dict[str, int]] | None = None) -> dict:
+    social_world = social_world or causal_world
+    pack_version = CAUSAL_PACK_VERSION if causal_world else SOCIAL_PACK_VERSION if social_world else PACK_VERSION
     references = build_reference_entries()
     history = {
         entry.source_key: entry for entry in references if entry.source_key in HISTORY_WORKS
@@ -687,7 +707,7 @@ def build_opening(chapter: Chapter, *, social_world: bool = False,
         story_reactions=permit_reactions,
         challenges=challenges, contest_definitions=contests,
         metadata={
-            "pack_id": PACK_ID, "pack_version": SOCIAL_PACK_VERSION if social_world else PACK_VERSION,
+            "pack_id": PACK_ID, "pack_version": pack_version,
             "public_title": PACK_TITLE,
             "public_description": chapter.position + " 你可以自行访人、修习或旅行，也可让异变自行发展。"
             f"如要介入首轮调查，可在{entities[meeting].name}登记线索并联系{entities[actor_id(chapter.contact)].name}。"
@@ -696,6 +716,9 @@ def build_opening(chapter: Chapter, *, social_world: bool = False,
             "resource_catalog": RESOURCE_LABELS,
             COMPACT_ROUTINE_JOURNEY_POLICY: True,
             **({"social_world_v1": True} if social_world else {}),
+            **({
+                AMBIENT_FOLLOWUP_POLICY: True, NPC_SHARED_EXPLORATION_POLICY: True, NPC_GOAL_FOLLOWUP_REVIEW_POLICY: True,
+            } if causal_world else {}),
         },
     )
     standing_actor_ids = {actor_id(key) for key in _STANDING_RELATIONSHIP_GOALS}
@@ -711,10 +734,17 @@ def build_opening(chapter: Chapter, *, social_world: bool = False,
     state = WorldState.model_validate(state.model_dump(mode="python") | {
         "scheduled_events": [incident, *reviews],
     })
-    state = _install_local_strategies(state)
+    state = _install_local_strategies(state, causal_world=causal_world)
     if social_world:
         scheduled = list(build_social_contact_schedules(state, _id(f"world:social-contacts:{chapter.key}")))
-        for kind, key, every, chance, hour in _AMBIENT_PRESETS:
+        presets = _AMBIENT_PRESETS
+        if causal_world:
+            presets += tuple(
+                ("organization", key, 8 + index % 4, 2_000, 9 + index)
+                for index, key in enumerate(_GROUPS)
+                if key not in {"scarlet-household", "moriya-faith"}
+            )
+        for kind, key, every, chance, hour in presets:
             prefix = "place" if kind == "region" else "organization"
             scope_id = _id(f"{prefix}:{key}")
             scope = state.entities.get(scope_id)
@@ -738,23 +768,26 @@ def build_opening(chapter: Chapter, *, social_world: bool = False,
     }
 
 
-def build_archive(*, social_world: bool = False,
+def build_archive(*, social_world: bool = False, causal_world: bool = False,
                   ambient_overrides: dict[str, dict[str, int]] | None = None) -> bytes:
     if ambient_overrides is not None:
         allowed_keys = {"check_every_days", "chance_basis_points", "cooldown_days", "concurrent_limit"}
-        if not social_world or not isinstance(ambient_overrides, dict) or not set(ambient_overrides) <= {
-            key for _, key, *_ in _AMBIENT_PRESETS
-        }:
+        supported = {key for _, key, *_ in _AMBIENT_PRESETS}
+        if causal_world:
+            supported.update(_GROUPS)
+        if not (social_world or causal_world) or not isinstance(ambient_overrides, dict) or not set(ambient_overrides) <= supported:
             raise ValueError("Ambient overrides require a social world and registered region or group names.")
         for values in ambient_overrides.values():
             if not isinstance(values, dict) or not set(values) <= allowed_keys:
                 raise ValueError("Ambient overrides may only change frequency, chance, cooldown and concurrency.")
     return write_world_pack(
         manifest=WorldPackManifest(
-            pack_id=PACK_ID, version=SOCIAL_PACK_VERSION if social_world else PACK_VERSION, title=PACK_TITLE,
+            pack_id=PACK_ID,
+            version=CAUSAL_PACK_VERSION if causal_world else SOCIAL_PACK_VERSION if social_world else PACK_VERSION,
+            title=PACK_TITLE,
         ),
         template={"story_openings": [
-            build_opening(chapter, social_world=social_world, ambient_overrides=ambient_overrides)
+            build_opening(chapter, social_world=social_world, causal_world=causal_world, ambient_overrides=ambient_overrides)
             for chapter in CHAPTERS
         ]},
     )

@@ -587,7 +587,7 @@ def apply_npc_plan_revised(
             review_schedule = build_npc_goal_followup_review(state, event.world_id, revised, event.fulfilled_goal_ids)
             if (revised.current_step != previous.current_step + 1 or review_schedule is None
                     or review_schedule.due_tick != event.goal_followup_review_tick):
-                raise ValueError("Goal follow-up review does not match the exhausted actor schedule")
+                raise ValueError("Goal follow-up review does not match the actor schedule")
         return _apply_plan_payload(state, plans, review_schedule=review_schedule, goals=goals)
     except InvalidEvent:
         raise

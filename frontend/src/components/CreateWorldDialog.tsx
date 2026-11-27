@@ -26,6 +26,7 @@ const packVersionDescriptions: Record<string, string> = {
   '2.12.0': 'NPC 作息与出行',
   '2.13.0': '机构自治与储备策略',
   '2.14.0': '自主社会与地区事件',
+  '2.15.0': '自主目标、机构评估与议题后续',
 }
 
 function packVersionLabel(version: string, defaultVersion: string) {

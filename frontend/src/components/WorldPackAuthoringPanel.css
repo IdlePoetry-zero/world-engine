@@ -1,0 +1,49 @@
+.world-pack-authoring { min-width: 0; }
+.world-pack-authoring-notice { margin-top: 13px; padding: 10px 11px; color: #a9c2ae; background: rgba(143, 192, 154, .055); border: 1px solid rgba(143, 192, 154, .12); border-radius: 4px; }
+.world-pack-authoring-notice strong { color: #c1d8c5; font-size: 9px; }
+.world-pack-authoring-notice p { margin: 5px 0 0; color: #8da196; font-size: 8px; line-height: 1.65; }
+.world-pack-authoring-source-actions { display: flex; align-items: end; flex-wrap: wrap; gap: 8px 12px; margin-top: 11px; }
+.world-pack-authoring-source-actions .author-simple-field { flex: 1 1 270px; min-width: min(100%, 210px); }
+.world-pack-authoring-file-name { margin: 5px 0 0; color: #91ae99; font-size: 8px; overflow-wrap: anywhere; }
+.world-pack-authoring-editor { margin-top: 12px; }
+.world-pack-authoring-editor .author-json-input { box-sizing: border-box; min-height: 300px; max-height: 64vh; padding: 10px; color: #c0d2c4; background: rgba(4, 12, 10, .48); border: 1px solid rgba(197, 220, 204, .13); border-radius: 4px; font: 10px/1.65 var(--mono); tab-size: 2; white-space: pre; overflow: auto; }
+.world-pack-authoring-editor .author-json-input:focus-visible { border-color: #8fb796; outline: 2px solid rgba(143, 183, 150, .36); outline-offset: 1px; }
+.world-pack-authoring-json-error,
+.world-pack-authoring-json-ok { margin: 6px 0 0; font-size: 8px; line-height: 1.55; }
+.world-pack-authoring-json-error { color: #e2a596; }
+.world-pack-authoring-json-ok { color: #8cac94; }
+.world-pack-authoring-actions { flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.world-pack-authoring-actions .button { min-height: 35px; }
+.world-pack-authoring-error { color: #e3a99a; font-size: 9px; line-height: 1.55; overflow-wrap: anywhere; }
+.world-pack-authoring-error p { margin: 0; }
+.world-pack-authoring-error ul { margin: 5px 0 0; padding-inline-start: 18px; }
+.world-pack-authoring-error li { margin-block: 3px; }
+.world-pack-authoring-error code { color: #e7c6b5; overflow-wrap: anywhere; }
+.world-pack-authoring-review { min-width: 0; }
+.world-pack-authoring-review .author-preview-heading { align-items: center; }
+.world-pack-authoring-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin: 12px 0; }
+.world-pack-authoring-summary > div { min-width: 0; padding: 8px; background: rgba(205, 225, 210, .035); border: 1px solid rgba(205, 225, 210, .065); border-radius: 4px; }
+.world-pack-authoring-summary dt { color: #80968a; font-size: 8px; }
+.world-pack-authoring-summary dd { margin: 4px 0 0; color: #c0d1c4; font-size: 9px; overflow-wrap: anywhere; }
+.world-pack-authoring-digest { display: grid; gap: 5px; margin-top: 10px; color: #81988a; font-size: 8px; }
+.world-pack-authoring-digest code { color: #b0c5b4; font: 8px/1.55 var(--mono); overflow-wrap: anywhere; user-select: all; }
+.world-pack-authoring-report { margin-top: 12px; color: #9bb1a1; font-size: 8px; }
+.world-pack-authoring-report summary { padding: 5px 0; cursor: pointer; }
+.world-pack-authoring-report summary:focus-visible { outline: 2px solid #a6cdb3; outline-offset: 2px; }
+.world-pack-authoring-report-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 6px; }
+.world-pack-authoring-report-grid > div { min-width: 0; }
+.world-pack-authoring-report-grid h5 { margin: 0 0 5px; color: #94aa99; font-size: 8px; font-weight: 500; }
+.world-pack-authoring-report-grid pre { max-height: 220px; overflow: auto; margin: 0; padding: 8px; color: #a9bcae; background: rgba(4, 12, 10, .3); border: 1px solid rgba(197, 220, 204, .08); border-radius: 4px; font: 8px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+
+@media (max-width: 760px) {
+  .world-pack-authoring-editor .author-json-input { min-height: 250px; max-height: 55vh; }
+  .world-pack-authoring-report-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 420px) {
+  .world-pack-authoring-source-actions { align-items: stretch; }
+  .world-pack-authoring-source-actions .author-simple-field { flex-basis: 100%; }
+  .world-pack-authoring-source-actions > button { align-self: start; }
+  .world-pack-authoring-summary { grid-template-columns: 1fr; }
+  .world-pack-authoring-actions .button { flex: 1 1 100%; }
+}

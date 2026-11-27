@@ -51,6 +51,7 @@ class ExploreIntent(IntentModel):
     kind: Literal["explore"] = "explore"
     place_id: UUID
     focus: Literal["general", "people", "routes", "supplies", "history"] = "general"
+    topic_record_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class SpeakIntent(IntentModel):

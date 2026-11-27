@@ -10,9 +10,15 @@ from pydantic import StringConstraints, ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from world_engine.application.errors import ApplicationFailure
+from world_engine.application.authored_world_pack_builder import (
+    AuthoredWorldPackBuildError, AuthoredWorldPackBuilder, loads_authored_world_pack,
+)
 from world_engine.application.template_migration import TemplateMigrationApplication
 from world_engine.application.world_pack_import import WorldPackApplication
-from world_engine.application.world_packs import MAX_WORLD_PACK_BYTES, STORY_OPENING_ID_PATTERN, OpeningPlayerSetup
+from world_engine.application.world_packs import (
+    MAX_WORLD_PACK_BYTES, STORY_OPENING_ID_PATTERN, OpeningPlayerSetup, WorldPackArchiveError,
+)
+from world_engine.domain.json_types import JsonObject
 from world_engine.domain.models import MembershipRole
 
 from .contracts import RequestModel
@@ -22,10 +28,14 @@ from .serialization import wire
 async def _archive_body(request: Request) -> bytes:
     if request.headers.get("content-type", "").split(";", 1)[0].lower() != "application/zip":
         raise ApplicationFailure("WORLD_PACK_FORMAT_REQUIRED", "请上传世界包 ZIP。", status_code=415)
+    return await _bounded_pack_body(request)
+
+
+async def _bounded_pack_body(request: Request) -> bytes:
     body = bytearray()
     async for chunk in request.stream():
         if len(body) + len(chunk) > MAX_WORLD_PACK_BYTES:
-            raise ApplicationFailure("WORLD_PACK_TOO_LARGE", "世界包超出 ZIP 上传大小限制。", status_code=413)
+            raise ApplicationFailure("WORLD_PACK_TOO_LARGE", "世界包资料超出大小限制。", status_code=413)
         body.extend(chunk)
     return bytes(body)
 
@@ -35,8 +45,60 @@ class TemplateUpdateCommit(RequestModel):
     label: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=160)]
 
 
+class PackAuthoringPreview(RequestModel):
+    manifest: JsonObject
+    template: JsonObject
+
+
+class PackAuthoringExport(PackAuthoringPreview):
+    expected_archive_sha256: Annotated[str, StringConstraints(pattern=r"^[a-f0-9]{64}$")]
+
+
+async def _pack_authoring_body(request: Request, contract: type[PackAuthoringPreview]):
+    if request.headers.get("content-type", "").split(";", 1)[0].lower() != "application/json":
+        raise ApplicationFailure("PACK_AUTHORING_JSON_REQUIRED", "请提交 JSON 世界包清单和开局模板。", status_code=415)
+    raw = await _bounded_pack_body(request)
+    try:
+        return contract.model_validate(loads_authored_world_pack(raw.decode("utf-8")))
+    except (ValueError, UnicodeError, RecursionError):
+        raise ApplicationFailure("PACK_AUTHORING_INPUT_INVALID", "请核对清单、开局模板与预览摘要。", status_code=422) from None
+
+
 def world_pack_router(service: WorldPackApplication, scope, authoring=None):
     router = APIRouter(prefix="/api/v1")
+    pack_authoring = AuthoredWorldPackBuilder()
+
+    async def validate_author_pack(body: PackAuthoringPreview):
+        try:
+            preview = await run_in_threadpool(pack_authoring.build, {"manifest": body.manifest, "template": body.template})
+        except AuthoredWorldPackBuildError as error:
+            message = f"{error.path} · {error}" if error.path else str(error)
+            raise ApplicationFailure("PACK_AUTHORING_ALIAS_INVALID", message, status_code=422) from None
+        except WorldPackArchiveError as error:
+            raise ApplicationFailure(error.code, str(error), status_code=422) from None
+        importing = await run_in_threadpool(service.preview, preview.archive)
+        if not importing["can_import"]:
+            message = " ".join(importing["blockers"][:3]) or "当前引擎无法导入该世界包。"
+            raise ApplicationFailure("PACK_AUTHORING_IMPORT_BLOCKED", message, status_code=422)
+        return preview
+
+    @router.post("/packs/authoring/preview")
+    async def preview_author_pack(request: Request):
+        scope(request)
+        return wire((await validate_author_pack(await _pack_authoring_body(request, PackAuthoringPreview))).report)
+
+    @router.post("/packs/authoring/export")
+    async def export_author_pack(request: Request):
+        scope(request)
+        body = await _pack_authoring_body(request, PackAuthoringExport)
+        preview = await validate_author_pack(body)
+        if preview.archive_sha256 != body.expected_archive_sha256:
+            raise ApplicationFailure("PACK_AUTHORING_PREVIEW_CHANGED", "开局内容与预览不一致，请重新预览。")
+        return Response(
+            preview.archive, media_type="application/zip",
+            headers={"Content-Disposition": 'attachment; filename="world-pack.zip"',
+                     "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
 
     @router.post("/packs/import/preview")
     async def preview_world_pack(request: Request):

@@ -49,6 +49,7 @@ from .gm_action_context import build_gm_action_context
 from .safe_conduct_context import safe_conduct_response_feedback
 from .study_chat import study_message_key, study_queue_reply
 from .itinerary_chat import itinerary_message_key, itinerary_queue_reply
+from .institutional_credit_context import institutional_credit_context
 from .long_action_readback import own_long_action_readbacks
 from .waypoint_chat import explicit_waypoint_choice
 from .world_book_import import matching_world_book_entries
@@ -799,6 +800,44 @@ class ConversationApplication:
             if not committed:
                 return result
             return result | {"closed_draft_id": str(previous.draft_id)}
+
+        if (selection := getattr(request, "scene_action", None)) is not None:
+            if int(request.expected_state_version) != view.branch.state_version:
+                raise StaleVersion(int(request.expected_state_version), view.branch.state_version)
+            projected = project_player_state(view.state.model_dump(mode="json"), str(request.actor_id))
+            credit = institutional_credit_context(
+                view.state, request.actor_id, visible_organization_ids=set(map(UUID, projected["entities"])),
+            )
+            action = selection.rule_intent()
+            contract = next(
+                (row for row in credit["institutional_credit_contracts"] if row["credit_id"] == str(action.credit_id)),
+                None,
+            )
+            if (
+                contract is None or contract["revision"] != action.expected_revision
+                or not contract.get(f"can_{action.operation}")
+                or (action.amount_minor is not None and action.amount_minor > int(contract["remaining_total_minor"]))
+            ):
+                return self._response(request, "clarification", "这项操作当前不可用。请刷新后核对可处理的借款。", False)
+            operation = {"accept": "接受", "decline": "拒绝", "withdraw": "撤回", "pay": "还款"}[action.operation]
+            currency = contract["currency_resource_id"]
+            source = (
+                f"请还款 {action.amount_minor} {currency}，机构借款 {action.credit_id}，版本 {action.expected_revision}。"
+                if action.operation == "pay" else f"我{operation}这笔机构借款 {action.credit_id}，版本 {action.expected_revision}。"
+            )
+            parties = f"{contract.get('lender_name') or '出借机构'} → {contract.get('borrower_name') or '借方机构'}"
+            terms = (
+                f"本次 {action.amount_minor} {currency} 最小单位。"
+                if action.operation == "pay"
+                else f"本金 {contract['principal_minor']}，应还总额 {contract['total_due_minor']}（{currency} 最小单位）。"
+            )
+            review_text = f"{operation}机构借款（{parties}）。{terms}请确认是否执行。"
+            draft = ActionDraft(
+                draft_id=request.request_id, location_id=location, state_version=view.branch.state_version,
+                source_text=source, action=action, review=review_text,
+            )
+            self.store.drafts.save(scope, request, draft)
+            return self._response(request, "clarification", review_text, False) | {"action_draft": draft.readback()}
 
         source_text = request.text if previous is None else f"{previous.source_text}\n补充：{request.text}"
         if len(source_text) > 100_000:

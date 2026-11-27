@@ -5,6 +5,7 @@ import { errorMessage } from '../utils'
 import { Icon } from '../components/Icon'
 import { InlineState, PageEmpty } from '../components/States'
 import { HistoryMediaControl } from '../components/HistoryMediaControl'
+import { AutonomyCoveragePanel } from '../components/AutonomyCoveragePanel'
 import { TemplateUpdatePanel } from '../components/TemplateUpdatePanel'
 import { buildRestoreLaunchCommand } from './restoreLaunchCommand'
 
@@ -329,6 +330,8 @@ export function HistoryPage({ world, branches, branchId, onBranchChange, onBranc
       </a>}
       {visibleHistory?.hasSourcePack && branchId && <TemplateUpdatePanel key={scopeKey} worldId={world.world_id}
         branchId={branchId} branchLabel={currentBranch?.label || branchId} onBranchCreated={onBranchCreated} />}
+      {currentBranch && worldId && branchId && <AutonomyCoveragePanel key={scopeKey} scopeKey={scopeKey}
+        worldId={worldId} branchId={branchId} branchHeadSequence={currentBranch.head_seq} />}
       <BackupPreview />
     </>}
     <div className="history-heading">

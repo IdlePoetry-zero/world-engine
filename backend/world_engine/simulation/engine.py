@@ -12,7 +12,7 @@ from world_engine.domain import DomainEvent, GovernanceSuccessionEvent, LifeEnde
 from world_engine.domain.ambient_events import (
     AMBIENT_EVENT_HANDLER, AMBIENT_EVENT_VERSION, AmbientEventPolicy, AmbientEventResolvedEvent,
     ambient_agenda_author_ids, ambient_event_id, ambient_participants, ambient_policy_result, ambient_roll,
-    validate_ambient_proposal,
+    validate_ambient_follow_up, validate_ambient_proposal,
 )
 from world_engine.domain.components import (
     GovernanceComponent, InventoryComponent, LifeComponent, NeedsComponent, ScheduledEventRecord,
@@ -3561,10 +3561,12 @@ class SimulationEngine:
             outcome, proposal, model_call_id = response.ambient_outcome, response.ambient_proposal, response.ambient_model_call_id
             if proposal is not None:
                 try:
+                    eligible = ambient_participants(state, policy, controlled=context.externally_controlled_actor_ids)
                     validate_ambient_proposal(
-                        proposal, ambient_participants(state, policy, controlled=context.externally_controlled_actor_ids),
+                        proposal, eligible,
                         agenda_authors=ambient_agenda_author_ids(state, policy),
                     )
+                    validate_ambient_follow_up(proposal, state, eligible)
                 except ValueError:
                     outcome, proposal = "deferred", None
         event = AmbientEventResolvedEvent(

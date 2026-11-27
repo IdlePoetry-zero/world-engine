@@ -3,6 +3,7 @@ import type { CharacterEntity, RelationView, SceneOpportunity, WorldState } from
 import { initials } from '../utils'
 import { formatWorldDuration, formatWorldRelativeTick } from '../worldTime'
 import { Icon } from './Icon'
+import { SceneWorldGraph } from './SceneWorldGraph'
 import './PlaySceneCard.css'
 
 export type PlayScenePortraitPosition = 'left' | 'center' | 'right'
@@ -82,7 +83,6 @@ export function PlaySceneCard({ state, loading, viewError, stage, canPrepareActi
     (entity.kind === 'character' || entity.kind === 'person') && entity.id !== player?.id
     && entity.location_id === place.id && entity.status !== 'dead' && entity.status !== 'retired'
   )) : []
-  const exits = place ? state?.travel_options ?? [] : []
   const opportunities = state?.scene_opportunities ?? []
   const localObservations = place ? state?.local_ambient_observations ?? [] : []
   const anchors = place ? state?.available_case_anchors ?? [] : []
@@ -179,17 +179,8 @@ export function PlaySceneCard({ state, loading, viewError, stage, canPrepareActi
               relation={outgoingRelations.get(person.id)} state={state} formatDate={formatDate}
               canTalk={canPrepareAction} onPrepareDraft={onPrepareDraft} />} /> : <p className="play-scene-empty">这里暂时没有其他可见人物。</p>}
           </section>
-          <div className="play-scene-section">
-            <h3><Icon name="compass" size={16} />可走路线 <small>{exits.length}</small></h3>
-            {departureHint && <p className="play-scene-empty">{departureHint}</p>}
-            {exits.length ? <SceneList label="路线" items={exits} render={(route) => {
-              const duration = exactTick(route.travel_ticks)
-              return <button type="button" className="play-scene-exit" key={route.route_id} disabled={!canPlanRoute || duration === null || duration <= 0n}
-                onClick={() => onPlanRoute(route.route_id)}>
-                <span><strong>{route.destination_name}</strong><small>{duration === null ? '耗时待确认' : formatWorldDuration(duration, daySeconds, yearDays)}</small></span><Icon name="arrow-up-right" size={15} />
-              </button>
-            }} /> : <p className="play-scene-empty">当前没有可用的出发路线。</p>}
-          </div>
+          <SceneWorldGraph state={state} loading={loading} viewError={viewError} canPlanRoute={canPlanRoute}
+            departureHint={departureHint} onPlanRoute={onPlanRoute} />
         </div>}
         {available && player && <section className="play-scene-section" aria-label="已知目标">
           <h3><Icon name="crosshair" size={16} />已知目标</h3>

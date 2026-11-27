@@ -15,6 +15,7 @@ from world_engine.domain.errors import AccessDenied, Conflict, InvalidEvent, Not
 from world_engine.domain.challenges import CHALLENGE_COMMAND, CHALLENGE_RESOLVED, open_challenges, own_report_receipts, settle_challenge
 from world_engine.domain.contests import CONTEST_CHANGED, CONTEST_COMMAND, ContestAction, ContestRecord, contest_view, describe_contest, plan_contest
 from world_engine.domain.leadership_ballots import leadership_ballot_is_invalidated
+from world_engine.domain.npc_plan_review import NPC_STANDING_REVIEW_POLICY
 from world_engine.domain.models import (
     AccessScope, BranchRecord, CommandEnvelope, MembershipRole, NewWorld, WorldEntity, WorldRecord, WorldState,
     WorldView,
@@ -144,6 +145,10 @@ class WorldApplication:
                     "所选背景无法使用此 NPC 自主模式。",
                     status_code=422,
                 ) from error
+        if initial_state.metadata.get(NPC_STANDING_REVIEW_POLICY) is True:
+            from world_engine.content.npc_autonomy_opening import add_standing_npc_reviews
+
+            initial_state = add_standing_npc_reviews(initial_state, world_id=world_id)
         initial = initial_state.model_dump(mode="python")
         initial["metadata"] = {**initial["metadata"], "creation_payload_hash": payload_hash}
         new_world = NewWorld(

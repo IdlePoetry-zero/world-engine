@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 AMBIENT_EVENT_HANDLER = "world.ambient_event"
 AMBIENT_EVENT_VERSION = "1.0.0"
 AMBIENT_EVENT_RESOLVED = "core.ambient_event_resolved.v1"
+AMBIENT_FOLLOWUP_POLICY = "ambient_followup_v1"
 _MAX_TICK = 2**63 - 1
 _PLACE_KINDS = frozenset({"place", "location"})
 _ORGANIZATION_KINDS = frozenset({"organization", "polity", "faction", "company", "government"})
@@ -45,11 +46,14 @@ class AmbientEventProposal(BaseModel):
     title: str = Field(min_length=1, max_length=100)
     description: str = Field(min_length=1, max_length=420)
     duration_days: StrictInt = Field(default=1, ge=1, le=14)
+    follow_up: Literal["inspect_site"] | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def distinct_participants(self) -> AmbientEventProposal:
         if self.initiator_id in self.participant_ids or len(self.participant_ids) != len(set(self.participant_ids)):
             raise ValueError("The initiator and participants must be distinct")
+        if self.follow_up is not None and self.kind not in {"request_for_help", "local_observation", "organization_agenda"}:
+            raise ValueError("Only a request, observation, or organization agenda can suggest an inspection")
         return self
 
 
@@ -186,6 +190,31 @@ def validate_ambient_proposal(
         raise ValueError("An organization agenda requires a current officer or leader of the organization")
 
 
+def ambient_inspection_actor(proposal: AmbientEventProposal) -> UUID:
+    return proposal.participant_ids[0] if proposal.participant_ids else proposal.initiator_id
+
+
+def ambient_inspection_actors(state: WorldState, eligible: dict[UUID, UUID]) -> frozenset[UUID]:
+    from .npc_plans import NPC_SHARED_EXPLORATION_POLICY
+
+    if (
+        state.metadata.get(AMBIENT_FOLLOWUP_POLICY) is not True
+        or state.metadata.get(NPC_SHARED_EXPLORATION_POLICY) is not True
+    ):
+        return frozenset()
+    return frozenset(
+        actor_id for actor_id, place_id in eligible.items()
+        if state.entities[place_id].components.get("hidden") is not True
+    )
+
+
+def validate_ambient_follow_up(
+    proposal: AmbientEventProposal, state: WorldState, eligible: dict[UUID, UUID],
+) -> None:
+    if proposal.follow_up is not None and ambient_inspection_actor(proposal) not in ambient_inspection_actors(state, eligible):
+        raise ValueError("The proposed character cannot take up an inspection at this location")
+
+
 def ambient_policy_result(
     state: WorldState, schedule: ScheduledEventRecord, policy: AmbientEventPolicy, roll: int,
 ) -> Literal["missed", "cooldown", "capacity", "empty_scope"] | None:
@@ -246,8 +275,10 @@ def resolve_ambient_event_state(state: WorldState, event: AmbientEventResolvedEv
     }
     if event.proposal is not None:
         proposal = event.proposal
+        eligible = ambient_participants(state, policy)
+        validate_ambient_follow_up(proposal, state, eligible)
         validate_ambient_proposal(
-            proposal, ambient_participants(state, policy), agenda_authors=ambient_agenda_author_ids(state, policy),
+            proposal, eligible, agenda_authors=ambient_agenda_author_ids(state, policy),
         )
         end_tick = state.current_tick + proposal.duration_days * state.calendar.day_seconds
         cooldown = state.current_tick + policy.cooldown_days * state.calendar.day_seconds
@@ -291,4 +322,39 @@ def resolve_ambient_event_state(state: WorldState, event: AmbientEventResolvedEv
             if review is not None:
                 schedules = [row for row in review_state.scheduled_events if row.id != review.id]
                 updates["scheduled_events"] = [*schedules, review]
+        if proposal.follow_up == "inspect_site":
+            from .npc_plan_review import schedule_npc_commitment_review
+
+            actor = ambient_inspection_actor(proposal)
+            topic = uuid5(event.event_id, f"learned:{actor}")
+            counterpart = proposal.initiator_id if actor != proposal.initiator_id else None
+            goal = GoalRecord(
+                id=uuid5(event.event_id, f"inspect-site:{actor}"), owner_id=actor,
+                title=f"现场核查「{proposal.title}」", description=proposal.description,
+                priority=60, deadline=end_tick, created_tick=state.current_tick, updated_tick=state.current_tick,
+                evidence_refs=[topic], auto_complete=True,
+                conditions=[GoalCondition(kind="inspect_known_topic", subject_id=actor,
+                                          target_id=proposal.place_id, evidence_id=topic)],
+            )
+            goals = [goal]
+            if counterpart is not None:
+                goals.append(GoalRecord(
+                    id=uuid5(event.event_id, f"report-inspection:{actor}"), owner_id=actor, counterpart_id=counterpart,
+                    title=f"考虑向委托者反馈「{proposal.title}」的核查结果",
+                    description="在核查完成后，可依据自己的发现决定是否和原知情者沟通。",
+                    priority=55, deadline=end_tick, created_tick=state.current_tick, updated_tick=state.current_tick,
+                    evidence_refs=[topic], auto_complete=True,
+                    conditions=[
+                        GoalCondition(kind="goal_completed", target_id=goal.id),
+                        GoalCondition(kind="report_topic_inspection", subject_id=actor,
+                                      target_id=counterpart, evidence_id=topic),
+                    ],
+                ))
+            updates["goals"] = [*updates.get("goals", state.goals), *goals]
+            review_state = state.model_copy(update=updates)
+            review = schedule_npc_commitment_review(review_state, event.world_id, actor, end_tick)
+            if review is not None:
+                updates["scheduled_events"] = [
+                    *(row for row in review_state.scheduled_events if row.id != review.id), review,
+                ]
     return updates

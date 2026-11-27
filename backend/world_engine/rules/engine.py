@@ -2065,18 +2065,18 @@ class RuleEngine:
     def _explore(
         self, state: WorldState, actor: WorldEntity, intent: ExploreIntent, context: RuleContext
     ) -> RuleResolution:
-        issue = self._exploration_site_issue(state, actor, intent)
+        duration = NPC_EXPLORATION_TICKS
+        observation_tick = state.current_tick + duration
+        issue = self._exploration_site_issue(state, actor, intent, observation_tick=observation_tick)
         if issue is not None:
             return self._rejected(context, *issue)
-        duration = NPC_EXPLORATION_TICKS
         issue = self._duration_issue(state, actor, duration)
         if issue is not None:
             return self._rejected(context, *issue)
-        observation_tick = state.current_tick + duration
         if any(event.status == "queued" and event.due_tick == observation_tick for event in state.scheduled_events):
             return self._rejected(context, "scheduled_boundary_required",
                                   "A world event is due at the search observation boundary.")
-        outcome, events, rolls = self._exploration_search(
+        outcome, events, rolls = self._exploration_with_topic_receipt(
             state, actor, intent, context, observed_tick=observation_tick,
         )
         needs_event, deprivation = self._time_need_effects(state, actor, duration, context)
@@ -2094,6 +2094,7 @@ class RuleEngine:
     @staticmethod
     def _exploration_site_issue(
         state: WorldState, actor: WorldEntity, intent: ExploreIntent,
+        *, observation_tick: int | None = None,
     ) -> tuple[str, str] | None:
         if actor.location_id != intent.place_id:
             return "not_at_place", "The character must be present to explore this place."
@@ -2103,6 +2104,15 @@ class RuleEngine:
             place.components.get("hidden") is True and place.id not in observed_target_ids
         ):
             return "place_unavailable", "The place is not visible to this character."
+        topic_id = intent.topic_record_id
+        if topic_id is not None:
+            from world_engine.domain.npc_goal_completion import known_inspection_topic
+
+            if not known_inspection_topic(
+                state, actor_id=actor.id, place_id=place.id, topic_id=topic_id,
+                observation_tick=state.current_tick if observation_tick is None else observation_tick,
+            ):
+                return "exploration_topic_unavailable", "The actor has no active inspection goal for that known topic."
         return None
 
     def settle_exploration(self, state: WorldState, intent: ExploreIntent, context: RuleContext) -> RuleResolution:
@@ -2113,10 +2123,27 @@ class RuleEngine:
         issue = self._exploration_site_issue(state, actor, intent)
         if issue is not None:
             return self._rejected(context, *issue)
-        outcome, events, rolls = self._exploration_search(
+        outcome, events, rolls = self._exploration_with_topic_receipt(
             state, actor, intent, context, observed_tick=state.current_tick,
         )
         return RuleResolution(outcome=outcome, events=events, rolls=rolls, ruleset_version=context.ruleset_version)
+
+    def _exploration_with_topic_receipt(self, state, actor, intent, context, *, observed_tick):
+        outcome, events, rolls = self._exploration_search(state, actor, intent, context, observed_tick=observed_tick)
+        if intent.topic_record_id is not None:
+            audience = {"policy": "subject_ids", "subject_ids": [str(actor.id)]}
+            events.append(KnowledgeAcquiredEvent(
+                event_id=self._event_id(context, "explore.topic_observation"),
+                visibility=audience,
+                record={
+                    "id": str(self._event_id(context, "explore.topic_observation_record")),
+                    "owner_id": str(actor.id), "subject_id": str(intent.place_id), "kind": "observation",
+                    "claim": outcome.message, "received_tick": observed_tick,
+                    "source_refs": [str(intent.topic_record_id)], "topic_inspection": outcome.code,
+                    "visibility": audience,
+                },
+            ))
+        return outcome, events, rolls
 
     def _exploration_search(
         self, state: WorldState, actor: WorldEntity, intent: ExploreIntent, context: RuleContext, *, observed_tick: int,
@@ -3818,8 +3845,15 @@ class RuleEngine:
             details=settlement.outcome.details, elapsed_ticks=duration, events=events,
         )
 
+    def npc_trade_quote(
+        self, state: WorldState, actor: WorldEntity, intent: TradeIntent, context: RuleContext,
+    ) -> RuleResolution:
+        """Preflight one proposed order before it enters the shared clock."""
+        return self._trade_settlement(state, actor, intent, context)
+
     def _trade_settlement(
         self, state: WorldState, actor: WorldEntity, intent: TradeIntent, context: RuleContext,
+        *, quote_only: bool = False,
     ) -> RuleResolution:
         """Build the atomic exchange against current stock, cash and the current listing."""
         market_entity = state.entities.get(actor.location_id) if actor.location_id is not None else None
@@ -3842,6 +3876,8 @@ class RuleEngine:
         if offer is None or not offer.active:
             return self._rejected(context, "listing_unavailable", "That market listing is not active.")
         seller = state.entities.get(offer.seller_id)
+        if offer.seller_id == actor.id and not quote_only:
+            return self._rejected(context, "trade_own_listing", "A character cannot buy their own market listing.")
         if (seller is not None and seller.id != actor.id and seller.components.get("hidden") is True
                 and seller.id not in _observed_entities(state, actor.id)):
             return self._rejected(context, "listing_unavailable", "That market listing is not active.")

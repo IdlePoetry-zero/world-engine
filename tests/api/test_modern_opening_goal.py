@@ -46,8 +46,17 @@ def test_registered_opening_uses_stable_ids_after_titles_or_list_order_change():
 
 
 @pytest.mark.parametrize(("seed", "entry"), [(4, "single"), (7, "itinerary"), (4, "old_direct"), (4, "direct")])
-def test_modern_station_goal_survives_replay_and_forks(tmp_path, seed, entry):
-    # Stable identities keep the default travel hazard rolls reproducible.
+def test_modern_station_goal_survives_replay_and_forks(tmp_path, monkeypatch, seed, entry):
+    # This test checks the arrival receipt and forks. The new job UUID can
+    # otherwise cause an unrelated travel hazard despite the fixed world seed.
+    if entry in {"single", "itinerary"}:
+        real_roll = RuleEngine._roll
+
+        def roll_for_arrival(context, label, maximum):
+            roll = real_roll(context, label, maximum)
+            return roll.model_copy(update={"value": maximum}) if label == "movement.route_risk" else roll
+
+        monkeypatch.setattr(RuleEngine, "_roll", staticmethod(roll_for_arrival))
     (tmp_path / "local-identity.json").write_text(json.dumps({
         "tenant_id": str(UUID(int=410)), "user_id": str(UUID(int=411)),
     }))

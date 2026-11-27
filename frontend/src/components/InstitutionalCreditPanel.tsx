@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { InstitutionalCreditContext, InstitutionalCreditContract, InstitutionalCreditCounterparty, InstitutionalCreditInstitution, InstitutionalFinanceContext, InstitutionalFinanceCurrency, InstitutionalFinanceOrganization } from '../api/client'
 import { Icon } from './Icon'
+import type { SceneCreditAction } from '../api/client'
 
 const MAX_CREDIT_ROWS = 32
 const MAX_CURRENCIES_PER_ROW = 16
@@ -27,6 +28,7 @@ export function InstitutionalCreditPanel({
   canPrepareQuery,
   onPrepareAction,
   onPrepareQuery,
+  onPreviewResolution,
 }: {
   credit?: InstitutionalCreditContext | null
   finance?: InstitutionalFinanceContext | null
@@ -35,6 +37,7 @@ export function InstitutionalCreditPanel({
   canPrepareQuery: boolean
   onPrepareAction: (text: string) => void
   onPrepareQuery: (text: string) => void
+  onPreviewResolution: (action: SceneCreditAction, label: string) => void
 }) {
   const [paymentInputs, setPaymentInputs] = useState<Record<string, string>>({})
   const [lenderId, setLenderId] = useState('')
@@ -120,6 +123,7 @@ export function InstitutionalCreditPanel({
             onPaymentInput={(value) => setPaymentInputs((current) => ({ ...current, [contract.credit_id]: value }))}
             onPrepareAction={onPrepareAction}
             onPrepareQuery={onPrepareQuery}
+            onPreviewResolution={onPreviewResolution}
           />)}
         </div> : <p className="shipment-empty" role="status">当前没有本角色可处理的机构借款记录。</p>}
       </section>
@@ -288,6 +292,7 @@ function CreditContractCard({
   onPaymentInput,
   onPrepareAction,
   onPrepareQuery,
+  onPreviewResolution,
 }: {
   contract: InstitutionalCreditContract
   institutions: InstitutionalCreditInstitution[]
@@ -298,6 +303,7 @@ function CreditContractCard({
   onPaymentInput: (value: string) => void
   onPrepareAction: (text: string) => void
   onPrepareQuery: (text: string) => void
+  onPreviewResolution: (action: SceneCreditAction, label: string) => void
 }) {
   const [extensionOrganizationId, setExtensionOrganizationId] = useState('')
   const [extensionMaturityInput, setExtensionMaturityInput] = useState('')
@@ -331,6 +337,16 @@ function CreditContractCard({
     : creditStatusLabel(contract.status)
   const statusSpoiled = contract.status === 'overdue' || contract.status === 'declined' || contract.status === 'withdrawn'
   const partyName = (name: string | undefined, id: string) => name?.trim() || `机构 ID ${id}`
+  const prepareResolution = (operation: 'accept' | 'decline' | 'withdraw' | 'pay', label: string) => {
+    if (revision === null) return
+    const selection = { kind: 'resolve_institutional_credit' as const, credit_id: contract.credit_id, expected_revision: revision }
+    if (operation === 'pay') {
+      if (payment === null || !paymentIsWithinBalance) return
+      onPreviewResolution({ ...selection, operation, amount_minor: String(payment) }, `核对机构借款还款 ${payment} 最小单位。`)
+    } else {
+      onPreviewResolution({ ...selection, operation }, `核对${label}机构借款的条款。`)
+    }
+  }
 
   return <article className="shipment-card">
     <header className="shipment-card-heading">
@@ -352,9 +368,9 @@ function CreditContractCard({
     </dl>
     <p className="occupation-id">借款 ID · {contract.credit_id}</p>
 
-    {contract.can_accept && <ResolutionButton label="准备接受" enabled={canPrepareAction && revision !== null} onClick={() => onPrepareAction(`我接受这笔机构借款 ${contract.credit_id}，版本 ${revision}。`)} />}
-    {contract.can_decline && <ResolutionButton label="准备拒绝" enabled={canPrepareAction && revision !== null} onClick={() => onPrepareAction(`我拒绝这笔机构借款 ${contract.credit_id}，版本 ${revision}。`)} />}
-    {contract.can_withdraw && <ResolutionButton label="准备撤回" enabled={canPrepareAction && revision !== null} onClick={() => onPrepareAction(`我撤回这笔机构借款 ${contract.credit_id}，版本 ${revision}。`)} />}
+    {contract.can_accept && <ResolutionButton label="准备接受" enabled={canPrepareAction && revision !== null} onClick={() => prepareResolution('accept', '接受')} />}
+    {contract.can_decline && <ResolutionButton label="准备拒绝" enabled={canPrepareAction && revision !== null} onClick={() => prepareResolution('decline', '拒绝')} />}
+    {contract.can_withdraw && <ResolutionButton label="准备撤回" enabled={canPrepareAction && revision !== null} onClick={() => prepareResolution('withdraw', '撤回')} />}
 
     {contract.can_pay && <>
       {borrowerHasCurrency ? <>
@@ -369,10 +385,9 @@ function CreditContractCard({
         {paymentInput.trim() && payment === null && <p className="shipment-empty" role="alert">请输入 1 到 10³⁰−1 之间的正整数最小货币单位。</p>}
         {payment !== null && !paymentIsWithinBalance && <p className="shipment-empty" role="alert">还款金额不能超过剩余应还。</p>}
         <div className="promise-actions">
-          <button type="button" className="button button-secondary button-small" onClick={() => {
-            if (payment === null || !paymentIsWithinBalance || revision === null) return
-            onPrepareAction(`请还款 ${payment} ${contract.currency_resource_id}，机构借款 ${contract.credit_id}，版本 ${revision}。`)
-          }} disabled={!canPrepareAction || !paymentIsWithinBalance || revision === null} title={canPrepareAction ? '只填入明确金额的还款草稿；编辑后再发送' : '角色当前不能准备行动'}>准备还款</button>
+          <button type="button" className="button button-secondary button-small" onClick={() => prepareResolution('pay', '还款')}
+            disabled={!canPrepareAction || !paymentIsWithinBalance || revision === null}
+            title={canPrepareAction ? '预览还款金额，确认后执行' : '角色当前不能准备行动'}>准备还款</button>
         </div>
       </> : <p className="shipment-empty" role="status">本角色所代表的借方币种清单未列出 {contract.currency_resource_id}，暂不能准备还款。</p>}
     </>}

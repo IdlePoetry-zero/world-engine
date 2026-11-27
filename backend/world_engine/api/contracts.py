@@ -7,7 +7,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 from world_engine.adapters.models.contracts import Capability
-from world_engine.application.action_drafts import DraftControl
+from world_engine.application.action_drafts import CreditResolutionSelection, DraftControl
 from world_engine.application.work_chat import RoutineWorkScheduleRequest
 from world_engine.domain.contests import ContestAction
 from world_engine.domain.travel_itinerary import MAX_TRAVEL_ITINERARY_LEGS
@@ -60,6 +60,7 @@ class MessageRequest(RequestModel):
     draft: DraftControl | None = Field(default=None, exclude_if=lambda value: value is None)
     scene_observation: Literal[True] | None = Field(default=None, exclude_if=lambda value: value is None)
     case_anchor_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
+    scene_action: CreditResolutionSelection | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def validate_structured_message(self) -> MessageRequest:
@@ -67,6 +68,11 @@ class MessageRequest(RequestModel):
             raise ValueError("Scene observation requires its own GM query.")
         if self.case_anchor_id is not None and (self.mode != "action" or self.draft is not None):
             raise ValueError("A case anchor requires a direct action.")
+        if self.scene_action is not None and (
+            self.mode != "action" or self.draft is None or self.draft.operation != "prepare"
+            or self.scene_observation is not None or self.case_anchor_id is not None
+        ):
+            raise ValueError("A scene action requires a new action preview.")
         return self
 
 

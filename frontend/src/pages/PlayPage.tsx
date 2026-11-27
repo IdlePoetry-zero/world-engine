@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent, RefObject } from 'react'
-import type { DraftControl, JobStatusRecord } from '../api/client'
+import type { DraftControl, JobStatusRecord, SceneCreditAction } from '../api/client'
 import { api, ApiError, type Branch, type CharacterEntity, type Conversation, type ConversationItem, type GameMessage, type MarketOfferQuote, type MessageRequest, type NarrativeRewrites, type NarrativeRewriteStyle, type OwnLeadershipBallot, type OwnMembership, type OwnPromise, type OwnSafeConductTreaty, type OwnShipment, type PlayerContinuationOption, type PlayerContinuationOptions, type SafeConductProposalOption, type Settings, type World, type WorldView } from '../api/client'
 import { InlineState, PageEmpty } from '../components/States'
 import { Icon } from '../components/Icon'
@@ -391,7 +391,11 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
       setMessages((current) => current.map((message) => message.id === `local-${request.request_id}` ? { ...message, delivery: 'failed' } : message))
     } finally { setSendingRequest((current) => current?.request_id === request.request_id ? null : current) }
   }
-  const send = (draft?: DraftControl, scene?: { text: string; mode: 'ask_gm'; scene_observation: true } | { text: string; mode: 'action'; case_anchor_id: string }) => {
+  const send = (draft?: DraftControl, scene?:
+    { text: string; mode: 'ask_gm'; scene_observation: true } |
+    { text: string; mode: 'action'; case_anchor_id: string } |
+    { text: string; mode: 'action'; scene_action: SceneCreditAction },
+  ) => {
     const close = draft?.operation === 'confirm' || draft?.operation === 'cancel'
     if (!world || !branchId || !conversation || !profile || !composerReady) return
     if (scene && (!canPrepareSceneDraft || input.trim() || (scene.mode === 'action' && !characterCanAct))) return
@@ -899,6 +903,9 @@ export function PlayPage({ world, view, viewError, branches, branchId, loading, 
             canPrepareQuery={canPrepareQuery}
             onPrepareAction={prepareActionDraft}
             onPrepareQuery={prepareGmQueryDraft}
+            onPreviewResolution={(action, text) => {
+              if (canPrepareAction) send({ operation: 'prepare' }, { text, mode: 'action', scene_action: action })
+            }}
           />
         </section>
         <div className="scene-tool-links">

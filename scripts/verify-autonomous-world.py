@@ -21,6 +21,7 @@ from urllib.parse import quote
 from fastapi.testclient import TestClient
 from world_engine.adapters.models.contracts import RoleTask
 from world_engine.adapters.models.errors import ProviderError, ProviderErrorCode
+from world_engine.application.autonomy_coverage import aggregate_autonomy_coverage
 from world_engine.application.operations import ModelOperations, OperationsStore
 from world_engine.application.visibility import project_event
 from world_engine.runtime import build_application, local_identity
@@ -39,7 +40,7 @@ def main():
     parser.add_argument("--seed", type=int, default=19, help="Seed for a built-in background.")
     parser.add_argument("--builtin-version", default="2.13.0", help="Catalog version for a built-in background.")
     parser.add_argument("--fork", action="store_true", help="Create a branch at the unmodified opening before advancing.")
-    parser.add_argument("--resume", type=Path, help="Resume one unfinished rest or world job from its isolated evidence directory.")
+    parser.add_argument("--resume", type=Path, help="Resume the current segment from its isolated evidence directory.")
     parser.add_argument("--from-genesis", action="store_true", help="Verify the entire terminal ledger, including all earlier checkpoints.")
     parser.add_argument("--provider-unavailable", action="store_true", help="Exercise the native deferral policy without any model responses.")
     parser.add_argument("--cloud", action="store_true", help="Use the official DeepSeek connection exclusively.")
@@ -66,8 +67,8 @@ def main():
                   "response_observations_complete": True}
     else:
         data = args.resume.resolve()
-        if chunk_count != 1 or data.parent != evidence.resolve() or not data.name.startswith("controlled-"):
-            parser.error("Resume accepts one isolated rest or world run inside .runtime/autonomy-evidence.")
+        if data.parent != evidence.resolve() or not data.name.startswith("controlled-"):
+            parser.error("Resume accepts one isolated run inside .runtime/autonomy-evidence.")
         result = json.loads((data / "evidence.json").read_text(encoding="utf-8"))
         if (result.get("opening"), result.get("mode"), result.get("duration")) != (args.opening, args.mode, args.duration):
             parser.error("Use the opening, mode, and duration from the original run.")
@@ -169,10 +170,27 @@ def main():
     with TestClient(app, base_url=origin) as client:
         client.get("/api/v1/session").raise_for_status()
         repository = app.state.worlds.repository
+        first_segment = 0
+        resumed_job_id = None
         if args.resume is not None:
             world_id, branch_id, actor_id = (result[key] for key in ("world_id", "branch_id", "actor_id"))
             path = f"/api/v1/worlds/{world_id}"
-            result["jobs"] = []
+            resumed_job_id = result["active_job"]["job_id"]
+            active = client.get(f"/api/v1/jobs/{resumed_job_id}").raise_for_status().json()
+            result["jobs"] = [row for row in result["jobs"] if row["job_id"] != resumed_job_id]
+            first_segment = len(result["jobs"])
+            if (
+                first_segment >= chunk_count or any(row["status"] != "succeeded" for row in result["jobs"])
+                or active["status"] not in {"running", "queued", "paused", "succeeded"}
+            ):
+                parser.error("The evidence does not describe a resumable sequence of verified segments.")
+            if active["status"] == "paused":
+                record(target_reached=False, replay_status="pending", replay_equal=None,
+                       resumed_pauses=[*result.get("resumed_pauses", []), {
+                    "reason_code": active.get("reason_code"), "tick": active["committed_through_tick"],
+                    "resumed_with_source_sha256": _engine_source_digest(),
+                }])
+                client.post(f"/api/v1/jobs/{resumed_job_id}/control", json={"action": "resume"}).raise_for_status()
         else:
             archive_sha256 = None
             if args.opening in BUILTIN_BACKGROUNDS:
@@ -210,9 +228,9 @@ def main():
             record(world_id=world_id, branch_id=branch_id, actor_id=actor_id, start=start,
                    initial_hash=actor_view["state_hash"], genesis_sequence=actor_view["last_seq"],
                    pack=version, archive_sha256=archive_sha256, engine_sources_sha256=_engine_source_digest(), jobs=[])
-        for i in range(chunk_count):
-            if args.resume is not None:
-                job_id = result["active_job"]["job_id"]
+        for i in range(first_segment, chunk_count):
+            if resumed_job_id is not None and i == first_segment:
+                job_id = resumed_job_id
             else:
                 actor_view = client.get(f"{path}/view", params={"branch_id": branch_id}).raise_for_status().json()
                 version = actor_view["branch"]["state_version"]
@@ -277,9 +295,14 @@ def main():
         ambient_model_calls = set()
         ambient_topics = {}
         topic_followups = Counter()
+        inspection_receipts = {}
+        reports_by_inspection = {}
+        private_replies = {}
+        autonomy_events = []
         while True:
             page = repository.list_events(scope, UUID(world_id), UUID(branch_id), after_seq=cursor)
             for event in page.events:
+                autonomy_events.append(event)
                 raw = event.model_dump(mode="json")
                 event_type = raw["type"]
                 event_counts[event_type] += 1
@@ -317,12 +340,26 @@ def main():
                     counts["social.contact_score_changes"] += len(payload.get("relationship_effects", ()))
                 if event_type == "core.knowledge_acquired.v1":
                     memory = payload["record"]
+                    if memory.get("topic_inspection"):
+                        assert project_event(raw, actor_id) is None or memory["owner_id"] == actor_id
+                        inspection_receipts[memory["id"]] = {
+                            "inspection_event_id": raw["event_id"], "actor_id": memory["owner_id"],
+                            "place_id": memory["subject_id"], "observed_tick": tick,
+                            "outcome": memory["topic_inspection"], "topic_record_id": memory["source_refs"][0],
+                        }
                     if memory["kind"] == "memory" and memory["visibility"]["policy"] == "subject_ids" and all(
                         memory.get(field) not in {None, actor_id} for field in ("owner_id", "holder_id")
                     ):
                         assert project_event(raw, actor_id) is None
                         private_npc_memories += 1
                         reciprocal_replies += bool(memory.get("speech_reply_to"))
+                        if memory.get("speech_reply_to"):
+                            private_replies[memory["speech_reply_to"]] = [raw["event_id"], tick]
+                        if memory["source_refs"] and memory["source_refs"][0] in inspection_receipts:
+                            reports_by_inspection[memory["source_refs"][0]] = {
+                                "feedback_event_id": raw["event_id"], "feedback_record_id": memory["id"],
+                                "listener_id": memory["holder_id"], "feedback_tick": tick,
+                            }
                         people.update((memory["owner_id"], memory["holder_id"]))
                         for evidence_id in memory.get("source_refs", ()):
                             if evidence_id in ambient_topics:
@@ -382,6 +419,33 @@ def main():
                              "successful_calls": len(successful_ids), "accepted_ambient_calls": len(ambient_model_calls),
                              "remote_seconds_by_role": duration_by_role, "attributed_activity_by_period": model_period_usage}
         participating_npcs = set().union(*period_people.values())
+        goals_by_topic = {}
+        for goal in state.state.goals:
+            for condition in goal.conditions:
+                if condition.kind in {"inspect_known_topic", "report_topic_inspection"}:
+                    goals_by_topic.setdefault(str(condition.evidence_id), {})[condition.kind] = {
+                        "status": goal.status, "deadline": goal.deadline,
+                        "updated_tick": goal.updated_tick, "evidence_refs": list(map(str, goal.evidence_refs)),
+                    }
+        causal_chains = []
+        for record_id, inspection in inspection_receipts.items():
+            feedback = reports_by_inspection.get(record_id, {})
+            topic_id = inspection["topic_record_id"]
+            topic = next((item for item in state.state.knowledge if str(item.id) == topic_id), None)
+            assert topic is not None and topic.source_event_id is not None
+            causal_chains.append({
+                "source_event_id": str(topic.source_event_id), "source_tick": topic.received_tick,
+                **inspection, **feedback,
+                "reciprocal_reply": private_replies.get(feedback.get("feedback_record_id")),
+                "goal_states": goals_by_topic.get(topic_id, {}),
+            })
+        genesis = repository.replay(
+            scope, UUID(world_id), UUID(branch_id), through_seq=int(result["genesis_sequence"]),
+        )
+        coverage = aggregate_autonomy_coverage(
+            genesis.state, autonomy_events, current_state=state.state,
+            window_start_tick=int(result["start"]), window_end_tick=state.state.current_tick, period_ticks=period_seconds,
+        )
         record(events=event_counts, controlled_responses=decisions, real_cloud=cloud_summary,
                period_duration_seconds=period_seconds, events_by_period=period_counts,
                terminal_tick_by_period=period_terminal_tick,
@@ -389,7 +453,11 @@ def main():
                ambient_topic_followups=topic_followups,
                private_npc_memories=private_npc_memories, reciprocal_replies=reciprocal_replies,
                autonomous_participants=len(participating_npcs),
-               samples=samples, strategy_reviews=review_samples, distinct_commands=len(command_counts))
+               samples=samples, strategy_reviews=review_samples, distinct_commands=len(command_counts),
+               inspection_causal_chains=causal_chains, autonomy_coverage=coverage.portable)
+        (data / "autonomy-author-detail.json").write_text(
+            json.dumps(coverage.author_detail, ensure_ascii=False, indent=2), encoding="utf-8",
+        )
         if timings is not None:
             record(storage_timings=timings())
         replay_start = perf_counter()

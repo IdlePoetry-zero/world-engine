@@ -309,7 +309,7 @@ def preflight_npc_plan_step(
             return reject("npc_actor_busy", "The character already has an action in progress.", action_kind=action.kind)
         if state.current_tick > 2**63 - 1 - NPC_TRADE_TICKS:
             return reject("tick_overflow", "The trade exceeds the world clock range.", action_kind=action.kind)
-        quote = engine._trade_settlement(state, actor, action, context)
+        quote = engine.npc_trade_quote(state, actor, action, context)
         if quote.outcome.status == "rejected":
             return finish("rejected", quote, action_kind=action.kind)
         return finish("interval_required", quote, action_kind=action.kind, required_ticks=NPC_TRADE_TICKS)

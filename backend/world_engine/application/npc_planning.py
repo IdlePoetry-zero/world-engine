@@ -524,6 +524,7 @@ def _pursuable_goals(
         goal.id for goal in state.goals
         if goal.owner_id == actor_id and goal.created_tick <= state.current_tick
     }
+    known_record_ids = {record.id for record in knowledge.known_records if record.visibility.policy != "author_only"}
     candidates = [
         goal for goal in knowledge.active_goals
         if isinstance(goal, GoalRecord)
@@ -531,7 +532,7 @@ def _pursuable_goals(
         and goal.status == "active"
         and goal.created_tick <= state.current_tick
         and (goal.deadline is None or goal.deadline >= state.current_tick)
-        and _goal_references_are_known(goal, actor_id, known_entities, known_places, own_goal_ids)
+        and _goal_references_are_known(goal, actor_id, known_entities, known_places, own_goal_ids, known_record_ids)
     ]
     candidates.sort(key=lambda goal: (
         -goal.priority,
@@ -549,10 +550,16 @@ def _goal_references_are_known(
     known_entities: set[UUID],
     known_places: set[UUID],
     own_goal_ids: set[UUID],
+    known_record_ids: set[UUID],
 ) -> bool:
     for condition in goal.conditions:
-        if condition.kind == "reach_location":
+        if condition.kind in {"reach_location", "inspect_known_topic"}:
             if condition.subject_id != actor_id or condition.target_id not in known_places:
+                return False
+            if condition.kind == "inspect_known_topic" and condition.evidence_id not in known_record_ids:
+                return False
+        elif condition.kind in {"discuss_known_topic", "report_topic_inspection"}:
+            if condition.target_id not in known_entities or condition.evidence_id not in known_record_ids:
                 return False
         elif condition.kind == "resource_balance_minimum":
             if condition.subject_id != actor_id:
@@ -700,14 +707,19 @@ def _decision_context(
     # build_agent_knowledge includes public/shared facts and the actor's own
     # facts, while excluding future-dated facts. Author-only records remain
     # excluded even if malformed data names the actor as their holder.
-    known_records = [
-        _known_record_view(record)
-        for record in sorted(
-            knowledge.known_records,
-            key=lambda record: (record.received_tick, str(record.id)),
-        )
-        if getattr(record.visibility, "policy", None) != "author_only"
-    ][-64:]
+    required_evidence_ids = {
+        condition.evidence_id for goal in goals for condition in goal.conditions
+        if condition.kind in {"inspect_known_topic", "discuss_known_topic", "report_topic_inspection"}
+    }
+    available_records = sorted(
+        (record for record in knowledge.known_records if record.visibility.policy != "author_only"),
+        key=lambda record: (
+            record.id in required_evidence_ids
+            or (record.topic_inspection is not None and record.source_refs[0] in required_evidence_ids),
+            record.received_tick, str(record.id),
+        ),
+    )
+    known_records = [_known_record_view(record) for record in available_records[-64:]]
     private_replies = []
     answered = {item.speech_reply_to for item in state.knowledge if item.speech_reply_to is not None}
     known_record_ids = {row["id"] for row in known_records}
@@ -853,6 +865,7 @@ _PLAN_FAILURE_FEEDBACK = {
     "npc_trade_market_location_changed": "未能留在原定市场完成交易。",
     "npc_trade_listing_unavailable": "到交割时原货架已不可用。",
     "npc_trade_seller_unavailable": "到交割时卖方无法交易。",
+    "npc_trade_trade_own_listing": "这条挂牌由本人出售，需寻找其他卖家。",
     "npc_exploration_search_failed": "上次巡查没有找到希望发现的线索。",
     "npc_exploration_interrupted": "未能在原定地点完成巡查。",
     "npc_training_interrupted": "练习期间离开了原地点，或该地点已不可用。",
@@ -950,6 +963,9 @@ def _known_record_view(record: object) -> dict[str, Any]:
     fact = getattr(record, "fact", None)
     if fact is not None:
         data["fact"] = fact.model_dump(mode="json", exclude_none=True)
+    if getattr(record, "topic_inspection", None) is not None:
+        data["inspection_result"] = record.topic_inspection
+        data["topic_record_id"] = str(record.source_refs[0])
     return data
 
 
@@ -999,6 +1015,12 @@ def _planning_market_view(state: WorldState, actor_id: UUID, projection: dict[st
     market = projection.get("market_offers", {})
     currency = market.get("currency_resource_id")
     cash = RuleEngine._holder_account(state, actor_id, currency) if currency is not None else None
+    actor = state.entities.get(actor_id)
+    place = state.entities.get(actor.location_id) if actor is not None else None
+    raw_market = place.components.get("market", {}) if place is not None else {}
+    own_listings = {
+        offer["listing_id"] for offer in raw_market.get("offers", ()) if offer["seller_id"] == str(actor_id)
+    }
     with localcontext() as decimal_context:
         decimal_context.prec = 80
         offers = [
@@ -1006,8 +1028,8 @@ def _planning_market_view(state: WorldState, actor_id: UUID, projection: dict[st
                 "minimum_within_budget": cash is not None
                 and Decimal(offer["minimum_quantity"]) * int(offer["unit_price_minor"]) <= cash.balance,
             }
-            for offer in market.get("offers", [])[:128]
-        ]
+            for offer in market.get("offers", []) if offer["listing_id"] not in own_listings
+        ][:128]
     return {
         "currency_resource_id": currency,
         "own_currency_balance": format(cash.balance, "f") if cash is not None else None,
@@ -1405,6 +1427,21 @@ def _model_request(
             "discuss_known_topic 是与另一位已知道同一线索的人讨论此事的目标。"
             "愿意讨论且对方在场时，可用 world.action.speak.v1，以 target_id 为唯一 target_ids，"
             "填写 topic_record_id 为条件中的 evidence_id。发言只表明谈过此事，不能同意任何交易、邀约或组织方案。"
+        )
+    if any(condition["kind"] == "inspect_known_topic" for goal in context.get("active_goals", ())
+           for condition in goal.get("conditions", ())):
+        system_content += (
+            "inspect_known_topic 是核查已知线索。现场可用 world.action.explore.v1，"
+            "place_id 填条件的 target_id，topic_record_id 填 evidence_id，focus 按人物打算查证的内容选择。"
+            "人物可暂缓；检查可能发现线索、搜寻失败或暂无线索，由规则裁定。"
+        )
+    if any(condition["kind"] == "report_topic_inspection" for goal in context.get("active_goals", ())
+           for condition in goal.get("conditions", ())):
+        system_content += (
+            "report_topic_inspection 是在完成核查前置条件之后，把现场所见反馈给原知情者的机会。"
+            "若决定反馈且对象在场，用 world.action.speak.v1，将核查结果记录的 id 填入 topic_record_id，"
+            "唯一 target_ids 为条件的 target_id。核查记录的关联线索必须与条件 evidence_id 一致。"
+            "照已收录的核查结果说，可以有保留；不能宣称发现尚未知的事实或替对方行动。"
         )
     if "goal_prerequisite_edges" in context:
         system_content += (

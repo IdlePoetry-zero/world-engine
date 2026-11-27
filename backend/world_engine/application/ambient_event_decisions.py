@@ -32,10 +32,13 @@ from world_engine.adapters.models import (
 from world_engine.adapters.models.errors import ProviderError, ProviderErrorCode
 from world_engine.application.errors import ApplicationFailure
 from world_engine.domain.ambient_events import (
+    AMBIENT_FOLLOWUP_POLICY,
     AmbientEventPolicy,
     AmbientEventProposal,
     ambient_agenda_author_ids,
+    ambient_inspection_actors,
     ambient_participants,
+    validate_ambient_follow_up,
     validate_ambient_proposal,
 )
 from world_engine.domain.errors import NotFound
@@ -112,6 +115,15 @@ async def propose_ambient_event(
         return AmbientEventProposalResult(status="unavailable")
 
     proposal_schema = AmbientEventProposal.model_json_schema(mode="validation")
+    inspection_instruction = ""
+    if prompt_data.get("eligible_inspection_actor_ids"):
+        inspection_instruction = (
+            "request_for_help、local_observation 或 organization_agenda 如果值得现场查证，可填 follow_up=inspect_site。"
+            "第一位 participant（无 participant 时为 initiator）须属于 eligible_inspection_actor_ids。"
+            "此字段只提供核查机会，由人物之后自行决定；不要写出核查结果或暗示一定存在隐藏目标。"
+        )
+    else:
+        proposal_schema["properties"].pop("follow_up", None)
     model_request = ModelRequest(
         role_task=RoleTask.NPC_DECISION,
         messages=(
@@ -127,7 +139,9 @@ async def propose_ambient_event(
                 "组织有 agenda_author_ids 时，可提出 organization_agenda，由当前有权成员根据现实条件提出下一项议题；"
                 "可以延续同组织已获准的议题，也可以改优先事项，只能提出议题，不能宣布预算、人事、协议或计划已经执行。"
                 "organization_strategy 是本组织预定义的使命与最近正式复审摘要。只有这些已列出的组织条件可以用于构思该组织议题。"
-                "如果没有合适、自然且局部的情况，选择 abstain。只返回符合 schema 的 JSON。",
+                "若有 local_conditions_by_place，参考公开道路、天气与市集情况。"
+                "known_recent_topics 只对所列人物有效。不得让其他人物声称自己见过这些事。"
+                + inspection_instruction + "如果没有合适、自然且局部的情况，选择 abstain。只返回符合 schema 的 JSON。",
             ),
             ChatMessage("user", user_content),
         ),
@@ -189,6 +203,7 @@ async def propose_ambient_event(
         # output. The orchestrator must repeat it against its live eligible
         # projection before committing any event.
         validate_ambient_proposal(proposal, projected_eligible, agenda_authors=ambient_agenda_author_ids(state, policy))
+        validate_ambient_follow_up(proposal, state, projected_eligible)
     except (ValidationError, TypeError, ValueError):
         return AmbientEventProposalResult(status="unavailable", model_call_id=model_call_id)
     return AmbientEventProposalResult(
@@ -287,14 +302,62 @@ def _validate_inputs(
             "duration_days": [1, 14],
         },
     }
+    inspection_actors = ambient_inspection_actors(state, projected_eligible)
+    if inspection_actors:
+        prompt_data["eligible_inspection_actor_ids"] = sorted(map(str, inspection_actors))
+    if state.metadata.get(AMBIENT_FOLLOWUP_POLICY) is True:
+        prompt_data["local_conditions_by_place"] = [
+            conditions for place_id in sorted(set(projected_eligible.values()), key=str)[:12]
+            if (conditions := _local_conditions(state, place_id)) is not None
+        ]
+        # Ambient observations are usually only held by their participants.
+        # A place being in the same region does not make every topic public.
+        prompt_data["recent_public_event_mentions"] = []
+        for row in actor_rows:
+            row["known_recent_topics"] = _actor_topics(state, UUID(row["id"]), due_tick)
     if agenda_authors:
         kinds.append("organization_agenda")
         prompt_data["agenda_author_ids"] = agenda_authors
         prompt_data["organization_agendas"] = _recent_ambient_mentions(
             state, policy, due_tick, kind="organization_agenda",
+            allowed_initiators=agenda_authors if state.metadata.get(AMBIENT_FOLLOWUP_POLICY) is True else None,
         )
         prompt_data["organization_strategy"] = _organization_strategy_context(state, policy.scope_id)
     return projected_eligible, prompt_data, resolved_timeout
+
+
+def _local_conditions(state: WorldState, place_id: UUID) -> dict[str, object] | None:
+    place = state.entities[place_id]
+    layout = place.components.get("place", {})
+    if not isinstance(layout, dict):
+        return None
+    row: dict[str, object] = {"place_id": str(place_id)}
+    conditions = layout.get("environment")
+    if isinstance(conditions, dict):
+        for key in ("weather", "season", "road_condition"):
+            value = _bounded_text(conditions.get(key), 60)
+            if value:
+                row[key] = value
+    market = place.components.get("market")
+    if isinstance(market, dict) and layout.get("access_policy", "open") == "open":
+        listed = [
+            offer for offer in market.get("offers", ())
+            if isinstance(offer, dict) and offer.get("active", True) and isinstance(offer.get("resource_id"), str)
+        ]
+        row["public_listed_goods"] = sorted({offer["resource_id"] for offer in listed})[:6]
+    return row if len(row) > 1 else None
+
+
+def _actor_topics(state: WorldState, actor_id: UUID, due_tick: int) -> list[dict[str, object]]:
+    cutoff = due_tick - _RECENT_EVENT_DAYS * state.calendar.day_seconds
+    recent = [
+        item for item in reversed(state.knowledge)
+        if item.holder_id == actor_id and item.summary and cutoff <= item.received_tick <= due_tick
+        and (item.valid_from_tick is None or item.valid_from_tick <= due_tick)
+        and item.visibility.policy == "subject_ids" and actor_id in item.visibility.subject_ids
+        and item.source_event_id is not None and item.kind in {"rumor", "observation"}
+    ]
+    return [{"title": item.summary[:80], "tick": item.received_tick} for item in recent[:2]]
 
 
 def _organization_strategy_context(state: WorldState, organization_id: UUID) -> list[dict[str, object]]:
@@ -328,6 +391,7 @@ def _recent_ambient_mentions(
     due_tick: int,
     *,
     kind: str = "local_observation",
+    allowed_initiators: list[str] | None = None,
 ) -> list[dict[str, object]]:
     cutoff = due_tick - _RECENT_EVENT_DAYS * state.calendar.day_seconds
     records = [
@@ -335,6 +399,7 @@ def _recent_ambient_mentions(
         if record.scope_id == policy.scope_id
         and record.proposal.kind == kind
         and cutoff <= record.start_tick <= due_tick
+        and (allowed_initiators is None or str(record.proposal.initiator_id) in allowed_initiators)
         and (state.player_id is None or state.player_id not in {
             record.proposal.initiator_id, *record.proposal.participant_ids,
         })

@@ -15,6 +15,7 @@ from world_engine.domain.events import parse_event
 from world_engine.domain.models import EventRecord, WorldState
 from world_engine.domain.npc_plan_events import NpcPlanRevisedEvent
 from world_engine.domain.npc_plan_review_events import NpcPlanReviewResolvedEvent
+from world_engine.domain.npc_plans import ActiveNpcTrade
 from world_engine.domain.promise_validation import requires_promise_validation, validate_promise_batch
 from world_engine.domain.story_nodes import StoryMilestoneResolvedEvent, story_reaction_event_id
 from world_engine.domain.travel_journey_events import TravelJourneyChangedEvent
@@ -35,6 +36,11 @@ _NPC_PLAN_EVENT_TYPES = frozenset({
 })
 _BACKUP_COMMAND_TYPE = "backup.restored_event_batch"
 _SIMULATION_COMMAND_TYPE = "simulation.window"
+
+
+class _HistoricalNpcTradeQuoteRules(RuleEngine):
+    def npc_trade_quote(self, state, actor, intent, context):
+        return self._trade_settlement(state, actor, intent, context, quote_only=True)
 
 
 def replay_npc_plan_batch(
@@ -127,6 +133,18 @@ def replay_npc_plan_batch(
         journey_resolution_receipts=receipts,
         journey_receipt_branch_ids=frozenset(event.branch_id for event in receipts.values()),
     )
+    # A past plan acceptance or timed start could quote the actor's own listing.
+    # Restore that preflight only for the exact recorded acceptance/start.
+    # Rejected steps and actual settlement still use the authoritative guard.
+    if rule_engine is None and (
+        any(review.outcome == "ready" for review in reviews)
+        or any(
+            isinstance(event, NpcPlanRevisedEvent) and isinstance(event.plan.active_execution, ActiveNpcTrade)
+            and event.plan.active_execution.seller_id == event.actor_id
+            for event in parsed
+        )
+    ):
+        rule_engine = _HistoricalNpcTradeQuoteRules()
     return validate_npc_plan_simulation_batch(
         before_state,
         parsed,

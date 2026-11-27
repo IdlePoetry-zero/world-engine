@@ -451,6 +451,8 @@ class WorldRepository:
             raise InvalidEvent("A new world cannot seed challenge receipts without committed attempts.")
         if any(record.speech_reply_to is not None for record in state.knowledge):
             raise InvalidEvent("A new world cannot seed private speech replies without committed actions.")
+        if any(record.topic_inspection is not None for record in state.knowledge):
+            raise InvalidEvent("A new world cannot seed topic inspection receipts without committed actions.")
         if state.contests:
             raise InvalidEvent("A new world cannot seed active or completed contests without committed invitations.")
         if state.npc_plans:
@@ -3460,13 +3462,15 @@ class WorldRepository:
                     SnapshotRow.last_seq == sequence,
                 )
             )
+            payload = None
             if sequence == branch.head_seq:
                 state = self._checked_branch_state(branch)
                 state_version = branch.state_version
                 digest = branch.state_hash
             elif existing is None:
                 state, state_version = self._state_at_seq(session, world_id, branch, sequence)
-                digest = state_hash(state)
+                payload = state_json(state)
+                digest = state_payload_hash(payload)
             if existing is not None:
                 return self._snapshot_record(existing)
             row = SnapshotRow(
@@ -3477,7 +3481,7 @@ class WorldRepository:
                 state_version=state_version,
                 current_tick=state.current_tick,
                 state_hash=digest,
-                state_json=state_json(state),
+                state_json=payload if payload is not None else state_json(state),
                 created_at=utc_now(),
             )
             session.add(row)

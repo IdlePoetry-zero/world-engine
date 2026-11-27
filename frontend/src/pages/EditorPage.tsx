@@ -9,6 +9,7 @@ import { NpcRehearsalPanel } from '../components/NpcRehearsalPanel'
 import { CreateEntityDialog, type AuthorEntityKind } from '../components/CreateEntityDialog'
 import { AuthorKinshipEditor } from '../components/AuthorKinshipEditor'
 import { WorldBookImport } from '../components/WorldBookImport'
+import { WorldPackAuthoringPanel } from '../components/WorldPackAuthoringPanel'
 import { Icon, type IconName } from '../components/Icon'
 import type { Notice } from '../App'
 
@@ -253,6 +254,7 @@ function WorldOverview({ world, view, entities, people, places, organizations, o
       </div>
       <div className="metadata-panel"><div className="metadata-heading"><span>作者备注与基础描述</span><span>作者投影</span></div>{view.state.metadata && Object.keys(view.state.metadata).length ? <pre>{JSON.stringify(view.state.metadata, null, 2)}</pre> : <p>服务端没有返回可展示的元数据。</p>}</div>
       <WorldBookImport key={`world-book-${view.branch.branch_id}-${view.branch.state_version}`} worldId={world.world_id} branchId={view.branch.branch_id} stateVersion={view.branch.state_version} entries={view.state.world_book_entries} onNotice={onNotice} onCommitted={onCommitted} />
+      <WorldPackAuthoringPanel />
       <AuthorRevisionEditor key={`world-${view.branch.branch_id}-${view.branch.state_version}`} worldId={world.world_id} branchId={view.branch.branch_id} stateVersion={view.branch.state_version} entities={entities} playerId={view.state.player_id} daySeconds={view.state.calendar?.day_seconds ?? 86_400} onNotice={onNotice} onCommitted={onCommitted} />
       <LegacyVacancySettlement
         key={`vacancy-settlement:${world.world_id}:${view.branch.branch_id}:${view.branch.state_version}`}

@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from world_engine.application.visibility import project_event, project_player_state
+from world_engine.application.autonomy_coverage import aggregate_autonomy_coverage
 from world_engine.application.long_action_readback import current_job_reason_code, work_purchase_affordability
 from world_engine.application.work_chat import RoutineWorkScheduleRequest, build_routine_work_plan
 from world_engine.application.worlds import WorldApplication
@@ -348,6 +349,41 @@ def create_app(
         if author and after == 0 and repository.has_world_pack_archive(access, world_id):
             result["has_source_world_pack"] = True
         return wire(result)
+
+    @app.get("/api/v1/worlds/{world_id}/autonomy-coverage")
+    def autonomy_coverage(request: Request, world_id: UUID, branch_id: UUID,
+                          after: Annotated[int | None, Query(ge=0, le=2**63 - 1)] = None):
+        access = scope(request)
+        repository = worlds.repository
+        repository.authorize_role(access, world_id, {MembershipRole.OWNER, MembershipRole.EDITOR})
+        head = repository.read_world(access, world_id, branch_id)
+        start_sequence = head.branch.fork_seq if after is None else after
+        if start_sequence > head.last_seq or head.last_seq - start_sequence > 20_000:
+            raise ApplicationFailure(
+                "COVERAGE_WINDOW_OUT_OF_RANGE", "请选择最近两万条事件内的存档提交点。", status_code=422,
+            )
+        origin = repository.replay(access, world_id, branch_id, through_seq=start_sequence)
+
+        def event_rows():
+            cursor = start_sequence
+            while cursor < head.last_seq:
+                page = repository.list_events(access, world_id, branch_id, after_seq=cursor, limit=500)
+                yield from (row for row in page.events if row.sequence <= head.last_seq)
+                if not page.has_more:
+                    break
+                cursor = page.next_cursor
+
+        try:
+            report = aggregate_autonomy_coverage(
+                origin.state, event_rows(), current_state=head.state, window_end_tick=head.state.current_tick,
+                period_ticks=30 * head.state.calendar.day_seconds,
+            )
+        except ValueError:
+            raise ApplicationFailure(
+                "COVERAGE_WINDOW_INVALID", "这段覆盖统计无法生成，请选择较近并可重放的提交点。", status_code=422,
+            ) from None
+        return wire({"from_sequence": str(start_sequence), "through_sequence": str(head.last_seq),
+                     "summary": report.portable, "detail": report.author_detail})
 
     @app.get("/api/v1/jobs/{job_id}")
     def job_status(request: Request, job_id: UUID):

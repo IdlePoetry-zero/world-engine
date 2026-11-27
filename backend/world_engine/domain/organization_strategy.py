@@ -156,6 +156,7 @@ class OrganizationalStrategy(StrategyModel):
     review_interval_ticks: Annotated[StrictInt, Field(gt=0, le=_MAX_TICK)]
     max_reviews: StrictInt = Field(default=_MAX_REVIEWS, ge=1, le=_MAX_REVIEWS)
     goals: tuple[OrganizationalStrategyGoal, ...] = Field(min_length=2, max_length=64)
+    allow_current_leader: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
 
     @model_validator(mode="after")
     def unique_goals(self) -> OrganizationalStrategy:
@@ -510,14 +511,14 @@ def _strategy_authorized_actor(
         or strategy.charter_clause_id not in governance.charter_clause_ids
     ):
         return None
-    candidate_ids = sorted(
-        {
-            office.holder_id
-            for office in governance.offices
-            if office.holder_id is not None and strategy.authority_tag in office.authority
-        },
-        key=str,
-    )
+    offices = {
+        office.holder_id
+        for office in governance.offices
+        if office.holder_id is not None and strategy.authority_tag in office.authority
+    }
+    if strategy.allow_current_leader and governance.leader_id is not None:
+        offices.add(governance.leader_id)
+    candidate_ids = sorted(offices, key=str)
     for candidate_id in candidate_ids:
         if candidate_id not in governance.members:
             continue
